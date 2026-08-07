@@ -1,0 +1,127 @@
+<UserControl
+    x:Class="CutFlow.Controls.InspectorPanel"
+    xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml">
+    <Grid Background="{StaticResource SurfaceBrush}" Padding="16">
+        <ScrollViewer VerticalScrollBarVisibility="Auto">
+            <StackPanel Spacing="14">
+                <StackPanel>
+                    <TextBlock x:Name="InspectorTitle" Style="{StaticResource SectionTitleTextBlockStyle}" Text="Project" />
+                    <TextBlock x:Name="InspectorSubtitle" Margin="0,3,0,0" Style="{StaticResource CaptionTextBlockStyle}" Text="Canvas settings" />
+                </StackPanel>
+
+                <TextBlock x:Name="ValidationText" Visibility="Collapsed" Foreground="{StaticResource ErrorBrush}" FontSize="11" TextWrapping="Wrap" AutomationProperties.LiveSetting="Polite" />
+
+                <StackPanel x:Name="ProjectPanel" Spacing="12">
+                    <StackPanel Spacing="5">
+                        <TextBlock Style="{StaticResource CaptionTextBlockStyle}" Text="Project" />
+                        <TextBlock x:Name="ProjectNameText" TextTrimming="CharacterEllipsis" Style="{StaticResource TitleTextBlockStyle}" />
+                    </StackPanel>
+                    <StackPanel Spacing="5">
+                        <TextBlock Style="{StaticResource CaptionTextBlockStyle}" Text="Aspect ratio" />
+                        <ComboBox x:Name="AspectRatioBox" HorizontalAlignment="Stretch" SelectionChanged="AspectRatioBox_SelectionChanged" AutomationProperties.Name="Project aspect ratio">
+                            <ComboBoxItem Content="16:9 Landscape" Tag="Landscape16By9" />
+                            <ComboBoxItem Content="9:16 Portrait" Tag="Portrait9By16" />
+                            <ComboBoxItem Content="1:1 Square" Tag="Square1By1" />
+                        </ComboBox>
+                    </StackPanel>
+                    <Grid ColumnSpacing="12">
+                        <Grid.ColumnDefinitions><ColumnDefinition Width="*" /><ColumnDefinition Width="*" /></Grid.ColumnDefinitions>
+                        <StackPanel Spacing="4"><TextBlock Style="{StaticResource CaptionTextBlockStyle}" Text="Resolution" /><TextBlock x:Name="ResolutionText" Style="{StaticResource BodyTextBlockStyle}" /></StackPanel>
+                        <StackPanel Grid.Column="1" Spacing="4"><TextBlock Style="{StaticResource CaptionTextBlockStyle}" Text="Frame rate" /><TextBlock Text="30 fps" Style="{StaticResource BodyTextBlockStyle}" /></StackPanel>
+                    </Grid>
+                    <StackPanel Spacing="5">
+                        <TextBlock Style="{StaticResource CaptionTextBlockStyle}" Text="Background color" />
+                        <TextBox x:Name="BackgroundColorBox" Tag="BackgroundColor" KeyDown="EditBox_KeyDown" LostFocus="EditBox_LostFocus" MaxLength="9" PlaceholderText="#FF000000" AutomationProperties.Name="Opaque ARGB background color" />
+                        <TextBlock Style="{StaticResource CaptionTextBlockStyle}" Text="Opaque ARGB: #FFRRGGBB" />
+                    </StackPanel>
+                </StackPanel>
+
+                <StackPanel x:Name="VideoPanel" Visibility="Collapsed" Spacing="12">
+                    <StackPanel Spacing="4"><TextBlock Style="{StaticResource CaptionTextBlockStyle}" Text="Filename" /><TextBlock x:Name="VideoFileNameText" TextTrimming="CharacterEllipsis" Style="{StaticResource BodyTextBlockStyle}" /></StackPanel>
+                    <Grid ColumnSpacing="12"><Grid.ColumnDefinitions><ColumnDefinition Width="*" /><ColumnDefinition Width="*" /></Grid.ColumnDefinitions>
+                        <StackPanel Spacing="4"><TextBlock Style="{StaticResource CaptionTextBlockStyle}" Text="Source resolution" /><TextBlock x:Name="VideoResolutionText" Style="{StaticResource BodyTextBlockStyle}" /></StackPanel>
+                        <StackPanel Grid.Column="1" Spacing="4"><TextBlock Style="{StaticResource CaptionTextBlockStyle}" Text="Source duration" /><TextBlock x:Name="VideoSourceDurationText" Style="{StaticResource BodyTextBlockStyle}" /></StackPanel>
+                    </Grid>
+                    <Grid ColumnSpacing="8"><Grid.ColumnDefinitions><ColumnDefinition Width="*" /><ColumnDefinition Width="*" /></Grid.ColumnDefinitions>
+                        <StackPanel Spacing="4"><TextBlock Style="{StaticResource CaptionTextBlockStyle}" Text="Source in (s)" /><TextBox x:Name="VideoSourceInBox" Tag="VideoSourceIn" KeyDown="EditBox_KeyDown" LostFocus="EditBox_LostFocus" /></StackPanel>
+                        <StackPanel Grid.Column="1" Spacing="4"><TextBlock Style="{StaticResource CaptionTextBlockStyle}" Text="Source out (s)" /><TextBox x:Name="VideoSourceOutBox" Tag="VideoSourceOut" KeyDown="EditBox_KeyDown" LostFocus="EditBox_LostFocus" /></StackPanel>
+                    </Grid>
+                    <StackPanel Spacing="4"><TextBlock Style="{StaticResource CaptionTextBlockStyle}" Text="Timeline duration" /><TextBlock x:Name="VideoTimelineDurationText" Style="{StaticResource BodyTextBlockStyle}" /></StackPanel>
+                    <StackPanel Spacing="5">
+                        <TextBlock Style="{StaticResource CaptionTextBlockStyle}" Text="Volume" />
+                        <Slider x:Name="VideoVolumeSlider" Minimum="0" Maximum="100" StepFrequency="1" KeyUp="VolumeSlider_KeyUp" AutomationProperties.Name="Video volume" />
+                        <StackPanel Orientation="Horizontal" Spacing="8"><CheckBox x:Name="VideoMuteBox" Content="Mute" Click="MuteBox_Click" /><Button Tag="VideoVolume" Content="Reset volume" Click="ResetVolume_Click" Style="{StaticResource CutFlowButtonStyle}" /></StackPanel>
+                    </StackPanel>
+                </StackPanel>
+
+                <StackPanel x:Name="ImagePanel" Visibility="Collapsed" Spacing="12">
+                    <StackPanel Spacing="4"><TextBlock Style="{StaticResource CaptionTextBlockStyle}" Text="Filename" /><TextBlock x:Name="ImageFileNameText" TextTrimming="CharacterEllipsis" Style="{StaticResource BodyTextBlockStyle}" /></StackPanel>
+                    <StackPanel Spacing="4"><TextBlock Style="{StaticResource CaptionTextBlockStyle}" Text="Resolution" /><TextBlock x:Name="ImageResolutionText" Style="{StaticResource BodyTextBlockStyle}" /></StackPanel>
+                    <StackPanel Spacing="5"><TextBlock Style="{StaticResource CaptionTextBlockStyle}" Text="Duration (s)" /><TextBox x:Name="ImageDurationBox" Tag="ImageDuration" KeyDown="EditBox_KeyDown" LostFocus="EditBox_LostFocus" AutomationProperties.Name="Image timeline duration" /></StackPanel>
+                    <Button Content="Reset to 5 seconds" Click="ResetImageDuration_Click" Style="{StaticResource CutFlowButtonStyle}" />
+                </StackPanel>
+
+                <StackPanel x:Name="AudioPanel" Visibility="Collapsed" Spacing="12">
+                    <StackPanel Spacing="4"><TextBlock Style="{StaticResource CaptionTextBlockStyle}" Text="Filename" /><TextBlock x:Name="AudioFileNameText" TextTrimming="CharacterEllipsis" Style="{StaticResource BodyTextBlockStyle}" /></StackPanel>
+                    <StackPanel Spacing="4"><TextBlock Style="{StaticResource CaptionTextBlockStyle}" Text="Source duration" /><TextBlock x:Name="AudioSourceDurationText" Style="{StaticResource BodyTextBlockStyle}" /></StackPanel>
+                    <StackPanel Spacing="5"><TextBlock Style="{StaticResource CaptionTextBlockStyle}" Text="Timeline start (s)" /><TextBox x:Name="AudioStartBox" Tag="AudioStart" KeyDown="EditBox_KeyDown" LostFocus="EditBox_LostFocus" /></StackPanel>
+                    <Grid ColumnSpacing="8"><Grid.ColumnDefinitions><ColumnDefinition Width="*" /><ColumnDefinition Width="*" /></Grid.ColumnDefinitions>
+                        <StackPanel Spacing="4"><TextBlock Style="{StaticResource CaptionTextBlockStyle}" Text="Source in (s)" /><TextBox x:Name="AudioSourceInBox" Tag="AudioSourceIn" KeyDown="EditBox_KeyDown" LostFocus="EditBox_LostFocus" /></StackPanel>
+                        <StackPanel Grid.Column="1" Spacing="4"><TextBlock Style="{StaticResource CaptionTextBlockStyle}" Text="Source out (s)" /><TextBox x:Name="AudioSourceOutBox" Tag="AudioSourceOut" KeyDown="EditBox_KeyDown" LostFocus="EditBox_LostFocus" /></StackPanel>
+                    </Grid>
+                    <StackPanel Spacing="5">
+                        <TextBlock Style="{StaticResource CaptionTextBlockStyle}" Text="Volume" />
+                        <Slider x:Name="AudioVolumeSlider" Minimum="0" Maximum="100" StepFrequency="1" KeyUp="VolumeSlider_KeyUp" AutomationProperties.Name="Audio volume" />
+                        <StackPanel Orientation="Horizontal" Spacing="8"><CheckBox x:Name="AudioMuteBox" Content="Mute" Click="MuteBox_Click" /><Button Tag="AudioVolume" Content="Reset volume" Click="ResetVolume_Click" Style="{StaticResource CutFlowButtonStyle}" /></StackPanel>
+                    </StackPanel>
+                </StackPanel>
+
+                <StackPanel x:Name="TextPanel" Visibility="Collapsed" Spacing="12">
+                    <StackPanel Spacing="5"><TextBlock Style="{StaticResource CaptionTextBlockStyle}" Text="Content" /><TextBox x:Name="TextContentBox" Tag="TextContent" AcceptsReturn="True" MinHeight="72" TextWrapping="Wrap" KeyDown="EditBox_KeyDown" LostFocus="EditBox_LostFocus" AutomationProperties.Name="Text content" /></StackPanel>
+                    <StackPanel Spacing="5">
+                        <TextBlock Style="{StaticResource CaptionTextBlockStyle}" Text="Font family" />
+                        <ComboBox x:Name="TextFontFamilyBox" HorizontalAlignment="Stretch" SelectionChanged="TextFontFamilyBox_SelectionChanged" AutomationProperties.Name="Text font family" />
+                    </StackPanel>
+                    <Grid ColumnSpacing="8">
+                        <Grid.ColumnDefinitions><ColumnDefinition Width="*" /><ColumnDefinition Width="Auto" /></Grid.ColumnDefinitions>
+                        <StackPanel Spacing="4"><TextBlock Style="{StaticResource CaptionTextBlockStyle}" Text="Font size" /><TextBox x:Name="TextFontSizeBox" Tag="TextFontSize" KeyDown="EditBox_KeyDown" LostFocus="EditBox_LostFocus" AutomationProperties.Name="Text font size" /></StackPanel>
+                        <StackPanel Grid.Column="1" Spacing="4">
+                            <TextBlock Style="{StaticResource CaptionTextBlockStyle}" Text="Style" />
+                            <StackPanel Orientation="Horizontal" Spacing="4">
+                                <ToggleButton x:Name="TextBoldButton" Width="40" Content="B" FontWeight="Bold" Click="TextStyleButton_Click" ToolTipService.ToolTip="Bold" AutomationProperties.Name="Bold" />
+                                <ToggleButton x:Name="TextItalicButton" Width="40" Content="I" FontStyle="Italic" Click="TextStyleButton_Click" ToolTipService.ToolTip="Italic" AutomationProperties.Name="Italic" />
+                            </StackPanel>
+                        </StackPanel>
+                    </Grid>
+                    <StackPanel Spacing="5">
+                        <TextBlock Style="{StaticResource CaptionTextBlockStyle}" Text="Alignment" />
+                        <StackPanel Orientation="Horizontal" Spacing="4">
+                            <ToggleButton x:Name="TextAlignLeftButton" Tag="Left" Content="Left" Click="TextAlignmentButton_Click" AutomationProperties.Name="Align text left" />
+                            <ToggleButton x:Name="TextAlignCenterButton" Tag="Center" Content="Center" Click="TextAlignmentButton_Click" AutomationProperties.Name="Align text center" />
+                            <ToggleButton x:Name="TextAlignRightButton" Tag="Right" Content="Right" Click="TextAlignmentButton_Click" AutomationProperties.Name="Align text right" />
+                        </StackPanel>
+                    </StackPanel>
+                    <Grid ColumnSpacing="8"><Grid.ColumnDefinitions><ColumnDefinition Width="*" /><ColumnDefinition Width="*" /></Grid.ColumnDefinitions>
+                        <StackPanel Spacing="4"><TextBlock Style="{StaticResource CaptionTextBlockStyle}" Text="Text color" /><TextBox x:Name="TextColorBox" Tag="TextColor" MaxLength="9" KeyDown="EditBox_KeyDown" LostFocus="EditBox_LostFocus" /></StackPanel>
+                        <StackPanel Grid.Column="1" Spacing="4"><TextBlock Style="{StaticResource CaptionTextBlockStyle}" Text="Background color" /><TextBox x:Name="TextBackgroundBox" Tag="TextBackground" MaxLength="9" KeyDown="EditBox_KeyDown" LostFocus="EditBox_LostFocus" /></StackPanel>
+                    </Grid>
+                    <StackPanel Spacing="5">
+                        <ToggleSwitch x:Name="TextBackgroundEnabledToggle" Header="Background" Toggled="TextBackgroundEnabledToggle_Toggled" AutomationProperties.Name="Enable text background" />
+                    </StackPanel>
+                    <StackPanel Spacing="5">
+                        <Grid><TextBlock Style="{StaticResource CaptionTextBlockStyle}" Text="Opacity" /><TextBlock x:Name="TextOpacityValueText" HorizontalAlignment="Right" Style="{StaticResource CaptionTextBlockStyle}" /></Grid>
+                        <Slider x:Name="TextOpacitySlider" Minimum="0" Maximum="100" StepFrequency="1" ValueChanged="TextOpacitySlider_ValueChanged" KeyUp="TextOpacitySlider_KeyUp" AutomationProperties.Name="Text opacity" />
+                    </StackPanel>
+                    <Grid ColumnSpacing="8"><Grid.ColumnDefinitions><ColumnDefinition Width="*" /><ColumnDefinition Width="*" /></Grid.ColumnDefinitions>
+                        <StackPanel Spacing="4"><TextBlock Style="{StaticResource CaptionTextBlockStyle}" Text="Horizontal position" /><NumberBox x:Name="TextHorizontalPositionBox" Tag="TextHorizontalPosition" Minimum="0" Maximum="1" SmallChange="0.01" LargeChange="0.1" SpinButtonPlacementMode="Compact" ValidationMode="InvalidInputOverwritten" ValueChanged="TextPositionBox_ValueChanged" AutomationProperties.Name="Normalized horizontal text position" /></StackPanel>
+                        <StackPanel Grid.Column="1" Spacing="4"><TextBlock Style="{StaticResource CaptionTextBlockStyle}" Text="Vertical position" /><NumberBox x:Name="TextVerticalPositionBox" Tag="TextVerticalPosition" Minimum="0" Maximum="1" SmallChange="0.01" LargeChange="0.1" SpinButtonPlacementMode="Compact" ValidationMode="InvalidInputOverwritten" ValueChanged="TextPositionBox_ValueChanged" AutomationProperties.Name="Normalized vertical text position" /></StackPanel>
+                    </Grid>
+                    <StackPanel Spacing="5"><TextBlock Style="{StaticResource CaptionTextBlockStyle}" Text="Timeline start (s)" /><TextBox x:Name="TextStartBox" Tag="TextStart" KeyDown="EditBox_KeyDown" LostFocus="EditBox_LostFocus" /></StackPanel>
+                    <StackPanel Spacing="5"><TextBlock Style="{StaticResource CaptionTextBlockStyle}" Text="Duration (s)" /><TextBox x:Name="TextDurationBox" Tag="TextDuration" KeyDown="EditBox_KeyDown" LostFocus="EditBox_LostFocus" /></StackPanel>
+                    <Button Content="Reset style" Click="ResetTextStyle_Click" Style="{StaticResource CutFlowButtonStyle}" AutomationProperties.Name="Reset text style" />
+                </StackPanel>
+            </StackPanel>
+        </ScrollViewer>
+    </Grid>
+</UserControl>

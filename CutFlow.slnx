@@ -1,0 +1,12 @@
+<Solution>
+  <Configurations>
+    <BuildType Name="Debug" />
+    <BuildType Name="Release" />
+    <Platform Name="x64" />
+    <ProjectType>
+      <Platform Project="x64" />
+    </ProjectType>
+  </Configurations>
+  <Project Path="src/CutFlow/CutFlow.csproj" />
+  <Project Path="tests/CutFlow.Tests/CutFlow.Tests.csproj" />
+</Solution>

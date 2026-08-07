@@ -1,0 +1,79 @@
+using System.Text.Json;
+using CutFlow.Models;
+using Microsoft.VisualStudio.TestTools.UnitTesting;
+
+namespace CutFlow.Tests;
+
+[TestClass]
+public sealed class ProjectModelTests
+{
+    [TestMethod]
+    public void CreateNew_InitializesSchemaIdentityAndDefaultSettings()
+    {
+        var createdAt = new DateTimeOffset(2026, 8, 4, 10, 30, 0, TimeSpan.Zero);
+
+        var project = ProjectDocument.CreateNew("Summer edit", createdAt);
+
+        Assert.AreEqual(1, project.SchemaVersion);
+        Assert.AreNotEqual(Guid.Empty, project.Id);
+        Assert.AreEqual("Summer edit", project.Name);
+        Assert.AreEqual(createdAt, project.CreatedAt);
+        Assert.AreEqual(createdAt, project.ModifiedAt);
+        Assert.AreEqual(1920, project.Settings.Width);
+        Assert.AreEqual(1080, project.Settings.Height);
+        Assert.AreEqual(30d, project.Settings.FrameRate);
+        Assert.AreEqual(0, project.Assets.Count);
+        Assert.AreEqual(0, project.VideoItems.Count);
+        Assert.AreEqual(0, project.AudioItems.Count);
+        Assert.AreEqual(0, project.TextItems.Count);
+    }
+
+    [TestMethod]
+    public void ApplyAspectRatio_Portrait_Uses1080By1920()
+    {
+        var settings = new ProjectSettings();
+
+        settings.ApplyAspectRatio(AspectRatioPreset.Portrait9By16);
+
+        Assert.AreEqual(1080, settings.Width);
+        Assert.AreEqual(1920, settings.Height);
+        Assert.AreEqual(AspectRatioPreset.Portrait9By16, settings.AspectRatio);
+    }
+
+    [TestMethod]
+    public void ApplyAspectRatio_Square_Uses1080By1080()
+    {
+        var settings = new ProjectSettings();
+
+        settings.ApplyAspectRatio(AspectRatioPreset.Square1By1);
+
+        Assert.AreEqual(1080, settings.Width);
+        Assert.AreEqual(1080, settings.Height);
+    }
+
+    [TestMethod]
+    public void ProjectSettings_SerializesAspectRatioAsEnumName()
+    {
+        var settings = new ProjectSettings();
+        settings.ApplyAspectRatio(AspectRatioPreset.Portrait9By16);
+
+        var json = JsonSerializer.Serialize(settings);
+
+        StringAssert.Contains(json, "\"aspectRatio\":\"Portrait9By16\"");
+    }
+
+    [TestMethod]
+    public void EditorSelection_NoneHasNoSelectedItem()
+    {
+        var selection = EditorSelection.None;
+
+        Assert.AreEqual(EditorSelectionKind.None, selection.Kind);
+        Assert.IsNull(selection.ItemId);
+    }
+
+    [TestMethod]
+    public void MinimumItemDuration_IsOneHundredMilliseconds()
+    {
+        Assert.AreEqual(100L, ProjectDocument.MinimumItemDurationMilliseconds);
+    }
+}

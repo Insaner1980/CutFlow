@@ -1,0 +1,162 @@
+<UserControl
+    x:Class="CutFlow.Controls.MediaPanel"
+    xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+    Loaded="MediaPanel_Loaded"
+    Unloaded="MediaPanel_Unloaded">
+    <Grid
+        x:Name="PanelRoot"
+        AllowDrop="True"
+        Background="{StaticResource SurfaceBrush}"
+        DragOver="PanelRoot_DragOver"
+        Drop="PanelRoot_Drop"
+        Padding="16">
+        <Grid.RowDefinitions>
+            <RowDefinition Height="Auto" />
+            <RowDefinition Height="*" />
+        </Grid.RowDefinitions>
+
+        <StackPanel>
+            <TextBlock x:Name="PanelTitle" Style="{StaticResource SectionTitleTextBlockStyle}" Text="Media" />
+            <TextBlock x:Name="PanelDescription" Margin="0,4,0,0" Style="{StaticResource CaptionTextBlockStyle}" Text="Project media and images" />
+        </StackPanel>
+
+        <Grid Grid.Row="1" Margin="0,14,0,0">
+            <Grid x:Name="AssetContent">
+                <Grid.RowDefinitions>
+                    <RowDefinition Height="Auto" />
+                    <RowDefinition Height="Auto" />
+                    <RowDefinition Height="*" />
+                </Grid.RowDefinitions>
+                <Button HorizontalAlignment="Stretch" AutomationProperties.Name="Import local media files" Click="Import_Click" Style="{StaticResource AccentButtonStyle}" TabIndex="20">
+                    <StackPanel Orientation="Horizontal" HorizontalAlignment="Center" Spacing="8">
+                        <FontIcon x:Name="ImportIcon" FontSize="14" Glyph="&#xE8B7;" />
+                        <TextBlock x:Name="ImportButtonText" Text="Import media" />
+                    </StackPanel>
+                </Button>
+                <AutoSuggestBox
+                    x:Name="SearchBox"
+                    Grid.Row="1"
+                    Margin="0,10,0,8"
+                    AutomationProperties.Name="Search imported assets"
+                    PlaceholderText="Search assets"
+                    QueryIcon="Find"
+                    TextChanged="SearchBox_TextChanged"
+                    TabIndex="21" />
+                <Grid Grid.Row="2">
+                    <GridView
+                        x:Name="AssetGrid"
+                        HorizontalAlignment="Stretch"
+                        ContainerContentChanging="AssetGrid_ContainerContentChanging"
+                        DoubleTapped="AssetGrid_DoubleTapped"
+                        IsItemClickEnabled="False"
+                        KeyDown="AssetGrid_KeyDown"
+                        SelectionMode="None"
+                        TabIndex="22">
+                        <GridView.ItemsPanel>
+                            <ItemsPanelTemplate>
+                                <ItemsWrapGrid Orientation="Horizontal" ItemWidth="124" ItemHeight="154" />
+                            </ItemsPanelTemplate>
+                        </GridView.ItemsPanel>
+                        <GridView.ItemContainerStyle>
+                            <Style TargetType="GridViewItem">
+                                <Setter Property="HorizontalContentAlignment" Value="Stretch" />
+                                <Setter Property="VerticalContentAlignment" Value="Stretch" />
+                                <Setter Property="Margin" Value="0,0,6,6" />
+                                <Setter Property="Padding" Value="0" />
+                            </Style>
+                        </GridView.ItemContainerStyle>
+                        <GridView.ItemTemplate>
+                            <DataTemplate>
+                                <Border
+                                    Padding="6"
+                                    Background="{StaticResource ControlBackgroundBrush}"
+                                    CanDrag="True"
+                                    CornerRadius="6"
+                                    DragStarting="AssetCard_DragStarting"
+                                    ToolTipService.ToolTip="{Binding FullPath}">
+                                    <Border.ContextFlyout>
+                                        <MenuFlyout>
+                                            <MenuFlyoutItem Text="Add to track" Tag="{Binding AssetId}" IsEnabled="{Binding CanAdd}" Click="AddToTrack_Click" />
+                                            <MenuFlyoutItem Text="Relink" Tag="{Binding AssetId}" Click="Relink_Click" />
+                                            <MenuFlyoutItem Text="Show in Explorer" Tag="{Binding AssetId}" Click="ShowInExplorer_Click" />
+                                            <MenuFlyoutSeparator />
+                                            <MenuFlyoutItem Text="Remove from project" Tag="{Binding AssetId}" Click="Remove_Click" />
+                                        </MenuFlyout>
+                                    </Border.ContextFlyout>
+                                    <Grid RowSpacing="4">
+                                        <Grid.RowDefinitions>
+                                            <RowDefinition Height="78" />
+                                            <RowDefinition Height="Auto" />
+                                            <RowDefinition Height="Auto" />
+                                            <RowDefinition Height="Auto" />
+                                        </Grid.RowDefinitions>
+                                        <Border Background="{StaticResource ChromeBackgroundBrush}" CornerRadius="4">
+                                            <Grid>
+                                                <Image Source="{Binding Thumbnail}" Stretch="UniformToFill" />
+                                                <FontIcon
+                                                    HorizontalAlignment="Center"
+                                                    VerticalAlignment="Center"
+                                                    FontSize="24"
+                                                    Foreground="{StaticResource TextTertiaryBrush}"
+                                                    Glyph="{Binding FallbackGlyph}"
+                                                    Visibility="{Binding FallbackVisibility}" />
+                                                <Border
+                                                    Margin="4"
+                                                    Padding="4,2"
+                                                    HorizontalAlignment="Left"
+                                                    VerticalAlignment="Top"
+                                                    Background="{StaticResource SurfaceHoverBrush}"
+                                                    CornerRadius="3">
+                                                    <TextBlock FontSize="9" Text="{Binding TypeText}" />
+                                                </Border>
+                                                <Border
+                                                    Margin="4"
+                                                    Padding="4,2"
+                                                    HorizontalAlignment="Right"
+                                                    VerticalAlignment="Top"
+                                                    Background="{StaticResource WarningBrush}"
+                                                    CornerRadius="3"
+                                                    Visibility="{Binding MissingVisibility}">
+                                                    <TextBlock FontSize="9" Foreground="Black" Text="Missing" />
+                                                </Border>
+                                            </Grid>
+                                        </Border>
+                                        <TextBlock Grid.Row="1" FontSize="11" FontWeight="SemiBold" Text="{Binding FileName}" TextTrimming="CharacterEllipsis" />
+                                        <TextBlock Grid.Row="2" Style="{StaticResource CaptionTextBlockStyle}" Text="{Binding DurationText}" TextTrimming="CharacterEllipsis" />
+                                        <TextBlock Grid.Row="3" Style="{StaticResource CaptionTextBlockStyle}" Text="{Binding DimensionsText}" TextTrimming="CharacterEllipsis" />
+                                    </Grid>
+                                </Border>
+                            </DataTemplate>
+                        </GridView.ItemTemplate>
+                    </GridView>
+                    <Border x:Name="AssetEmptyState" MinHeight="132" Padding="18" Background="{StaticResource ControlBackgroundBrush}" CornerRadius="6">
+                        <StackPanel HorizontalAlignment="Center" VerticalAlignment="Center" Spacing="8">
+                            <FontIcon Foreground="{StaticResource TextTertiaryBrush}" FontSize="26" Glyph="&#xE7C5;" />
+                            <TextBlock x:Name="EmptyTitle" TextAlignment="Center" Style="{StaticResource BodyTextBlockStyle}" Text="No media imported" />
+                            <TextBlock x:Name="EmptyDescription" TextAlignment="Center" TextWrapping="Wrap" Style="{StaticResource CaptionTextBlockStyle}" Text="Import files or drop them here." />
+                        </StackPanel>
+                    </Border>
+                </Grid>
+            </Grid>
+
+            <StackPanel x:Name="TextContent" Visibility="Collapsed" Spacing="12">
+                <TextBlock Style="{StaticResource CaptionTextBlockStyle}" Text="Add a selected three-second text item at the playhead." />
+                <Button Tag="Default" Content="Add text" HorizontalAlignment="Stretch" AutomationProperties.Name="Add text" Click="AddText_Click" Style="{StaticResource AccentButtonStyle}" TabIndex="20" />
+                <TextBlock Margin="0,4,0,0" Style="{StaticResource CaptionTextBlockStyle}" Text="Presets" />
+                <Button Tag="Default" Content="Default" HorizontalAlignment="Stretch" AutomationProperties.Name="Add default text" Click="AddText_Click" Style="{StaticResource CutFlowButtonStyle}" TabIndex="21" />
+                <Button Tag="Title" Content="Title" HorizontalAlignment="Stretch" AutomationProperties.Name="Add title text" Click="AddText_Click" Style="{StaticResource CutFlowButtonStyle}" TabIndex="22" />
+                <Button Tag="Subtitle" Content="Subtitle" HorizontalAlignment="Stretch" AutomationProperties.Name="Add subtitle text" Click="AddText_Click" Style="{StaticResource CutFlowButtonStyle}" TabIndex="23" />
+                <Button Tag="MinimalLabel" Content="Minimal label" HorizontalAlignment="Stretch" AutomationProperties.Name="Add minimal label text" Click="AddText_Click" Style="{StaticResource CutFlowButtonStyle}" TabIndex="24" />
+            </StackPanel>
+
+            <Border x:Name="UnsupportedContent" Visibility="Collapsed" MinHeight="180" Padding="20" Background="{StaticResource ControlBackgroundBrush}" CornerRadius="6">
+                <StackPanel HorizontalAlignment="Center" VerticalAlignment="Center" Spacing="10">
+                    <FontIcon x:Name="UnsupportedIcon" Foreground="{StaticResource TextTertiaryBrush}" FontSize="30" Glyph="&#xE783;" />
+                    <TextBlock x:Name="UnsupportedName" TextAlignment="Center" Style="{StaticResource SectionTitleTextBlockStyle}" />
+                    <TextBlock MaxWidth="220" TextAlignment="Center" Style="{StaticResource CaptionTextBlockStyle}" Text="This category is not included in this version." />
+                </StackPanel>
+            </Border>
+        </Grid>
+    </Grid>
+</UserControl>
