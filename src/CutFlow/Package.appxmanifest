@@ -20,7 +20,7 @@
     <Resource Language="x-generate" />
   </Resources>
   <Applications>
-    <Application Id="App" Executable="CutFlow.exe" EntryPoint="Windows.FullTrustApplication">
+    <Application Id="App" Executable="$targetnametoken$.exe" EntryPoint="Windows.FullTrustApplication">
       <uap:VisualElements
           DisplayName="CutFlow"
           Description="A local Windows video editor"
