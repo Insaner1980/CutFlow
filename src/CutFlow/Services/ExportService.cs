@@ -7,7 +7,7 @@ using Windows.Storage;
 
 namespace CutFlow.Services;
 
-public delegate Task<TranscodeFailureReason> ExportRenderAsync(
+internal delegate Task<TranscodeFailureReason> ExportRenderAsync(
     MediaComposition composition,
     StorageFile stagingFile,
     MediaEncodingProfile profile,
@@ -24,8 +24,13 @@ public sealed class ExportService
 
     public ExportService(
         CompositionService? compositionService = null,
-        TextOverlayRenderer? textOverlayRenderer = null)
-        : this(compositionService ?? new CompositionService(), textOverlayRenderer, RenderNativeAsync)
+        TextOverlayRenderer? textOverlayRenderer = null,
+        SimpleLogService? logService = null)
+        : this(
+            compositionService ?? new CompositionService(),
+            textOverlayRenderer,
+            RenderNativeAsync,
+            logService: logService)
     {
     }
 
@@ -158,10 +163,14 @@ public sealed class ExportService
 
     private async Task TryLogCleanupFailureAsync(Exception exception)
     {
+        if (_logService is null)
+        {
+            return;
+        }
+
         try
         {
-            var logService = _logService ?? new SimpleLogService();
-            await logService.TryWriteAsync(
+            await _logService.TryWriteAsync(
                 $"Export staging cleanup failed: {exception.GetType().Name}");
         }
         catch (Exception loggingException) when (loggingException is not OutOfMemoryException)

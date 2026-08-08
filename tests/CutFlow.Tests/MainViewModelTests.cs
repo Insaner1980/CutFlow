@@ -94,6 +94,82 @@ public sealed class MainViewModelTests
         Assert.HasCount(1, viewModel.Home.Projects);
     }
 
+    [TestMethod]
+    public async Task OpenEditorAsync_WhenViewChangeFails_RestoresHomeState()
+    {
+        using var directory = new TemporaryDirectory();
+        var viewModel = new MainViewModel(new ProjectService(directory.Path));
+        var project = ProjectDocument.CreateNew("Failed editor view", DateTimeOffset.UnixEpoch);
+        viewModel.CurrentViewChanged += (_, _) => throw new InvalidOperationException("View construction failed.");
+
+        await Assert.ThrowsExactlyAsync<InvalidOperationException>(() => viewModel.OpenEditorAsync(project));
+
+        Assert.IsNull(viewModel.CurrentProject);
+        Assert.IsNull(viewModel.Editor);
+        Assert.IsFalse(viewModel.IsEditorOpen);
+    }
+
+    [TestMethod]
+    public async Task ShowHomeAsync_WhenViewChangeFails_RestoresEditorState()
+    {
+        using var directory = new TemporaryDirectory();
+        var viewModel = new MainViewModel(new ProjectService(directory.Path));
+        var project = ProjectDocument.CreateNew("Retained editor view", DateTimeOffset.UnixEpoch);
+        await viewModel.OpenEditorAsync(project);
+        var editor = viewModel.Editor;
+        viewModel.CurrentViewChanged += (_, _) => throw new InvalidOperationException("Home view switch failed.");
+
+        await Assert.ThrowsExactlyAsync<InvalidOperationException>(() => viewModel.ShowHomeAsync());
+
+        Assert.AreSame(project, viewModel.CurrentProject);
+        Assert.AreSame(editor, viewModel.Editor);
+        Assert.IsTrue(viewModel.IsEditorOpen);
+    }
+
+    [TestMethod]
+    public async Task OpenEditorAsync_WhenCloseStartsDuringRefresh_DoesNotCommitEditorState()
+    {
+        using var directory = new TemporaryDirectory();
+        var continuationChecks = 0;
+        var viewModel = new MainViewModel(
+            new ProjectService(directory.Path),
+            canContinue: () => Interlocked.Increment(ref continuationChecks) == 1);
+        var project = ProjectDocument.CreateNew("Suppressed editor", DateTimeOffset.UnixEpoch);
+        var viewChanges = 0;
+        viewModel.CurrentViewChanged += (_, _) => viewChanges++;
+
+        await viewModel.OpenEditorAsync(project);
+
+        Assert.IsNull(viewModel.CurrentProject);
+        Assert.IsNull(viewModel.Editor);
+        Assert.AreEqual(0, viewChanges);
+    }
+
+    [TestMethod]
+    public async Task ShowHomeAsync_WhenCloseStartsDuringFailedSave_SuppressesExceptionalContinuation()
+    {
+        using var directory = new TemporaryDirectory();
+        var service = new ProjectService(directory.Path);
+        var suppressAfterFirstCheck = false;
+        var continuationChecks = 0;
+        var viewModel = new MainViewModel(
+            service,
+            canContinue: () => !suppressAfterFirstCheck || Interlocked.Increment(ref continuationChecks) == 1);
+        var project = await service.CreateAsync("Failed close continuation");
+
+        await viewModel.OpenEditorAsync(project);
+        viewModel.Editor!.CommitEdit(document => document.SchemaVersion = 99);
+        continuationChecks = 0;
+        suppressAfterFirstCheck = true;
+
+        var navigated = await viewModel.ShowHomeAsync();
+
+        Assert.IsFalse(navigated);
+        Assert.IsTrue(viewModel.IsEditorOpen);
+        Assert.AreEqual(EditorViewModel.UnsavedStatus, viewModel.Editor.SaveStatus);
+        Assert.IsNull(viewModel.Home.ErrorMessage);
+    }
+
     private sealed class TemporaryDirectory : IDisposable
     {
         public TemporaryDirectory()

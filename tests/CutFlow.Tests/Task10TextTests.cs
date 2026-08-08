@@ -469,6 +469,38 @@ public sealed class Task10TextTests
         Assert.AreEqual(expected, Controls.InspectorCommitGesture.ShouldCommit(tag, key, controlDown));
     }
 
+    [TestMethod]
+    public void InspectorEditBoundary_RefreshesCanonicalStateAfterRequest()
+    {
+        var project = ProjectDocument.CreateNew("Inspector", DateTimeOffset.UnixEpoch);
+        var asset = new ProjectAsset
+        {
+            Id = Guid.NewGuid(),
+            Kind = ProjectAssetKind.Video,
+            DurationMilliseconds = 2_000
+        };
+        var item = new VideoTimelineItem
+        {
+            Id = Guid.NewGuid(),
+            AssetId = asset.Id,
+            SourceOutMilliseconds = 2_000,
+            DurationMilliseconds = 2_000
+        };
+        project.Assets.Add(asset);
+        project.VideoItems.Add(item);
+        var viewModel = new EditorViewModel(project);
+        var displayedSourceOut = 5_000L;
+        var committed = true;
+
+        Controls.InspectorEditBoundary.Commit(
+            () => committed = viewModel.TrimVideoEnd(item.Id, displayedSourceOut),
+            () => displayedSourceOut = viewModel.Project.VideoItems.Single().SourceOutMilliseconds);
+
+        Assert.IsFalse(committed);
+        Assert.AreEqual(2_000L, displayedSourceOut);
+        Assert.IsFalse(viewModel.CanUndo);
+    }
+
     private sealed class TemporaryDirectory : IDisposable
     {
         public TemporaryDirectory()

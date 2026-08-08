@@ -19,7 +19,12 @@ public sealed class ProjectService
     private readonly string _projectsRootPath;
     private readonly Func<ProjectDocument, string> _serialize;
 
-    public ProjectService(string? rootPath = null, Func<ProjectDocument, string>? serialize = null)
+    public ProjectService()
+        : this(null)
+    {
+    }
+
+    internal ProjectService(string? rootPath, Func<ProjectDocument, string>? serialize = null)
     {
         var localRootPath = rootPath ?? ApplicationData.Current.LocalFolder.Path;
         if (string.IsNullOrWhiteSpace(localRootPath))
@@ -126,7 +131,7 @@ public sealed class ProjectService
             throw new InvalidDataException("The project identity does not match its directory.");
         }
 
-        Normalize(project);
+        Normalize(project, _projectsRootPath);
         return project;
     }
 
@@ -143,10 +148,10 @@ public sealed class ProjectService
             throw new InvalidDataException($"Unsupported project schema version {project.SchemaVersion}.");
         }
 
-        Normalize(project);
+        var projectDirectory = GetProjectDirectoryPath(project.Id);
+        Normalize(project, _projectsRootPath);
         var previousModifiedAt = project.ModifiedAt;
         var candidateModifiedAt = DateTimeOffset.UtcNow;
-        var projectDirectory = GetProjectDirectoryPath(project.Id);
         var projectPath = GetProjectFilePath(project.Id);
         var temporaryPath = projectPath + ".tmp";
 
@@ -207,6 +212,11 @@ public sealed class ProjectService
         var projectDirectory = GetProjectDirectoryPath(projectId);
         if (Directory.Exists(projectDirectory))
         {
+            if (File.Exists(GetProjectFilePath(projectId)))
+            {
+                await LoadAsync(projectId, cancellationToken);
+            }
+
             await Task.Run(() => Directory.Delete(projectDirectory, recursive: true), cancellationToken);
         }
     }
@@ -214,6 +224,8 @@ public sealed class ProjectService
     public string GetCachePath(Guid projectId) => Path.Combine(GetProjectDirectoryPath(projectId), "cache");
 
     public string GetProjectPath(Guid projectId) => GetProjectDirectoryPath(projectId);
+
+    internal string GetProjectsPath() => _projectsRootPath;
 
     private string GetProjectFilePath(Guid projectId) => Path.Combine(GetProjectDirectoryPath(projectId), "project.json");
 
@@ -249,8 +261,9 @@ public sealed class ProjectService
         stream.Flush(flushToDisk: true);
     }
 
-    private static void Normalize(ProjectDocument project)
+    private static void Normalize(ProjectDocument project, string projectsRootPath)
     {
+        project.Name ??= string.Empty;
         project.Settings ??= new ProjectSettings();
         if (!TimelineInput.IsOpaqueArgb(project.Settings.BackgroundColor))
         {
@@ -261,6 +274,35 @@ public sealed class ProjectService
         project.VideoItems ??= [];
         project.AudioItems ??= [];
         project.TextItems ??= [];
+        if (project.Assets.Any(static item => item is null) ||
+            project.VideoItems.Any(static item => item is null) ||
+            project.AudioItems.Any(static item => item is null) ||
+            project.TextItems.Any(static item => item is null))
+        {
+            throw new InvalidDataException("Project collections cannot contain null items.");
+        }
+
+        foreach (var asset in project.Assets)
+        {
+            asset.SourcePath ??= string.Empty;
+            asset.FileName ??= string.Empty;
+            asset.ThumbnailCachePath ??= string.Empty;
+            if (!string.IsNullOrWhiteSpace(asset.SourcePath))
+            {
+                try
+                {
+                    if (MediaImportService.IsPathWithinDirectory(asset.SourcePath, projectsRootPath))
+                    {
+                        throw new InvalidDataException(
+                            $"Source media must remain outside {AppInfo.ProductName}'s managed project folders.");
+                    }
+                }
+                catch (Exception exception) when (exception is ArgumentException or NotSupportedException or PathTooLongException)
+                {
+                    throw new InvalidDataException("A source media path is invalid.", exception);
+                }
+            }
+        }
 
         long videoStart = 0;
         for (var index = 0; index < project.VideoItems.Count; index++)

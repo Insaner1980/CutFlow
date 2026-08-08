@@ -10,14 +10,27 @@ namespace CutFlow.Views;
 public sealed partial class HomeView : UserControl
 {
     private readonly HomeProjectOpenGate _projectOpenGate = new();
+    private readonly Func<bool> _canContinue;
 
-    public HomeView(HomeViewModel viewModel)
+    public HomeView(HomeViewModel viewModel, Func<bool>? canContinue = null)
     {
         ViewModel = viewModel ?? throw new ArgumentNullException(nameof(viewModel));
+        _canContinue = canContinue ?? (() => true);
         InitializeComponent();
-        ViewModel.Projects.CollectionChanged += (_, _) => UpdateProjectState();
+        ViewModel.Projects.CollectionChanged += (_, _) =>
+        {
+            if (_canContinue())
+            {
+                UpdateProjectState();
+            }
+        };
         ViewModel.PropertyChanged += (_, args) =>
         {
+            if (!_canContinue())
+            {
+                return;
+            }
+
             if (args.PropertyName == nameof(HomeViewModel.IsBusy))
             {
                 BusyIndicator.IsActive = IsProjectOperationActive;
@@ -50,7 +63,7 @@ public sealed partial class HomeView : UserControl
 
     public async Task CreateProjectAsync()
     {
-        if (IsProjectOperationActive)
+        if (!_canContinue() || IsProjectOperationActive)
         {
             return;
         }
@@ -61,6 +74,11 @@ public sealed partial class HomeView : UserControl
             try
             {
                 var project = await ViewModel.CreateAsync();
+                if (!_canContinue())
+                {
+                    return;
+                }
+
                 await RequestProjectOpenAsync(project);
             }
             catch (Exception exception)
@@ -68,7 +86,10 @@ public sealed partial class HomeView : UserControl
                 ShowError(exception.Message);
             }
         });
-        BusyIndicator.IsActive = IsProjectOperationActive;
+        if (_canContinue())
+        {
+            BusyIndicator.IsActive = IsProjectOperationActive;
+        }
     }
 
     private async void ProjectOpen_Click(object sender, RoutedEventArgs e) => await OpenFromTagAsync((FrameworkElement)sender);
@@ -77,7 +98,7 @@ public sealed partial class HomeView : UserControl
 
     private async Task OpenFromTagAsync(FrameworkElement source)
     {
-        if (IsProjectOperationActive)
+        if (!_canContinue() || IsProjectOperationActive)
         {
             return;
         }
@@ -92,14 +113,23 @@ public sealed partial class HomeView : UserControl
             BusyIndicator.IsActive = true;
             try
             {
-                await RequestProjectOpenAsync(await ViewModel.OpenAsync(projectId));
+                var project = await ViewModel.OpenAsync(projectId);
+                if (!_canContinue())
+                {
+                    return;
+                }
+
+                await RequestProjectOpenAsync(project);
             }
             catch (Exception exception)
             {
                 ShowError(exception.Message);
             }
         });
-        BusyIndicator.IsActive = IsProjectOperationActive;
+        if (_canContinue())
+        {
+            BusyIndicator.IsActive = IsProjectOperationActive;
+        }
     }
 
     private Task RequestProjectOpenAsync(ProjectDocument project) =>
@@ -107,7 +137,7 @@ public sealed partial class HomeView : UserControl
 
     private async void RenameProject_Click(object sender, RoutedEventArgs e)
     {
-        if (IsProjectOperationActive || !TryGetProject((FrameworkElement)sender, out var project))
+        if (!_canContinue() || IsProjectOperationActive || !TryGetProject((FrameworkElement)sender, out var project))
         {
             return;
         }
@@ -130,24 +160,27 @@ public sealed partial class HomeView : UserControl
                 args.Cancel = true;
             }
         };
-        if (await dialog.ShowAsync() == ContentDialogResult.Primary)
+        var result = await dialog.ShowAsync();
+        if (!_canContinue() || result != ContentDialogResult.Primary)
         {
-            var name = nameBox.Text.Trim();
+            return;
+        }
 
-            try
-            {
-                await ViewModel.RenameAsync(project.Id, name);
-            }
-            catch (Exception exception)
-            {
-                ShowError(exception.Message);
-            }
+        var name = nameBox.Text.Trim();
+
+        try
+        {
+            await ViewModel.RenameAsync(project.Id, name);
+        }
+        catch (Exception exception)
+        {
+            ShowError(exception.Message);
         }
     }
 
     private async void DuplicateProject_Click(object sender, RoutedEventArgs e)
     {
-        if (IsProjectOperationActive || !TryGetProjectId(((FrameworkElement)sender).Tag, out var projectId))
+        if (!_canContinue() || IsProjectOperationActive || !TryGetProjectId(((FrameworkElement)sender).Tag, out var projectId))
         {
             return;
         }
@@ -164,7 +197,7 @@ public sealed partial class HomeView : UserControl
 
     private async void DeleteProject_Click(object sender, RoutedEventArgs e)
     {
-        if (IsProjectOperationActive || !TryGetProject((FrameworkElement)sender, out var project))
+        if (!_canContinue() || IsProjectOperationActive || !TryGetProject((FrameworkElement)sender, out var project))
         {
             return;
         }
@@ -177,7 +210,8 @@ public sealed partial class HomeView : UserControl
                 TextWrapping = TextWrapping.Wrap
             },
             "Delete");
-        if (await dialog.ShowAsync() != ContentDialogResult.Primary)
+        var result = await dialog.ShowAsync();
+        if (!_canContinue() || result != ContentDialogResult.Primary)
         {
             return;
         }
@@ -234,6 +268,11 @@ public sealed partial class HomeView : UserControl
 
     private void ShowError(string message)
     {
+        if (!_canContinue())
+        {
+            return;
+        }
+
         OperationError.Message = message;
         OperationError.IsOpen = true;
     }

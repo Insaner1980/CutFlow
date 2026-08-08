@@ -10,7 +10,7 @@ public static class FilePickerHelper
 {
     private static readonly string[] VisualExtensions = [".mp4", ".png", ".jpg", ".jpeg"];
     private static readonly string[] AudioExtensions = [".mp3", ".wav"];
-    private static readonly string[] BaselineExtensions = [.. VisualExtensions, .. AudioExtensions];
+    private static readonly string[] SupportedExtensions = [.. VisualExtensions, .. AudioExtensions];
 
     public static async Task<IReadOnlyList<StorageFile>> PickMediaFilesAsync(
         nint windowHandle,
@@ -34,7 +34,7 @@ public static class FilePickerHelper
     {
         MediaImportScope.Visual => VisualExtensions,
         MediaImportScope.Audio => AudioExtensions,
-        MediaImportScope.All => BaselineExtensions,
+        MediaImportScope.All => SupportedExtensions,
         _ => throw new ArgumentOutOfRangeException(nameof(scope), scope, null)
     };
 

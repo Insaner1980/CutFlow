@@ -32,25 +32,19 @@ These commands are the reproducible verification sequence; successful execution 
 
 ## Register and run
 
-The application is a framework-dependent, packaged WinUI 3 app. Register the built loose layout before launching it. This is a development deployment, not a signed installer:
+The application is a framework-dependent, packaged WinUI 3 app. Register the built loose layout before launching it. This is a development deployment, not a signed installer or Microsoft Store package:
 
 ```powershell
-$manifest = Resolve-Path .\src\CutFlow\bin\x64\Release\net10.0-windows10.0.26100.0\AppxManifest.xml
-Add-AppxPackage -Register $manifest.Path
-
-$package = Get-AppxPackage -Name CutFlow
-Start-Process "shell:AppsFolder\$($package.PackageFamilyName)!App"
+.\scripts\Register-CutFlowDevelopment.ps1 -Configuration Release
 ```
+
+The helper refuses to register when a `CutFlow` package is installed outside this repository's `src\CutFlow\bin` tree. This prevents development registration from replacing or being confused with a production installation. It also launches only the package registered from the requested build layout.
 
 For iterative Debug work, build and register the Debug layout, then launch it through its package identity:
 
 ```powershell
 dotnet build .\src\CutFlow\CutFlow.csproj -c Debug -p:Platform=x64
-$manifest = Resolve-Path .\src\CutFlow\bin\x64\Debug\net10.0-windows10.0.26100.0\AppxManifest.xml
-Add-AppxPackage -Register $manifest.Path
-
-$package = Get-AppxPackage -Name CutFlow
-Start-Process "shell:AppsFolder\$($package.PackageFamilyName)!App"
+.\scripts\Register-CutFlowDevelopment.ps1 -Configuration Debug
 ```
 
 If activation reports a missing framework package, install the Windows App SDK 2.3.1 x64 runtime linked under Requirements and register the layout again.
@@ -65,7 +59,7 @@ If activation reports a missing framework package, install the Windows App SDK 2
 6. Preview and seek with the transport controls or timeline. Changes autosave after a short debounce; returning Home, exporting, and closing perform an immediate save boundary.
 7. Select **Export**, choose a profile and `.mp4` destination, and keep the editor open while native rendering completes.
 
-Missing source files remain visible in the project. Relink them from the asset menu before previewing or exporting. Removing an asset or deleting a CutFlow project never deletes the original imported media.
+Missing source files remain visible in the project. Preview keeps missing visual duration as black video and omits missing audio; relink missing media from the asset menu before exporting. Removing an asset or deleting a CutFlow project never deletes the original imported media.
 
 ## Supported input
 
@@ -113,7 +107,11 @@ As a packaged app, CutFlow uses its package-local `LocalState` directory:
 Resolve the exact directory for the registered development package with:
 
 ```powershell
-$package = Get-AppxPackage -Name CutFlow
+$developmentRoot = (Resolve-Path .\src\CutFlow\bin).Path.TrimEnd("\", "/") + "\"
+$package = Get-AppxPackage -Name CutFlow |
+    Where-Object { $_.InstallLocation -and $_.InstallLocation.StartsWith($developmentRoot, [System.StringComparison]::OrdinalIgnoreCase) } |
+    Select-Object -First 1
+if ($null -eq $package) { throw "No CutFlow development package is registered from this repository." }
 Join-Path $env:LOCALAPPDATA "Packages\$($package.PackageFamilyName)\LocalState"
 ```
 

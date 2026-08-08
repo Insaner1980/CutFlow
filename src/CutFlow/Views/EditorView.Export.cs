@@ -154,7 +154,7 @@ public sealed partial class EditorView
         try
         {
             var progress = new Progress<double>(value => UpdateExportProgress(value, cancellation));
-            var service = new ExportService(_compositionService, _textOverlayRenderer);
+            var service = new ExportService(_compositionService, _textOverlayRenderer, _logService);
             var result = await service.ExportToPathAsync(
                 ViewModel.Project,
                 destinationPath,

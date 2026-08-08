@@ -1,5 +1,7 @@
 # CutFlow V1 Design
 
+> Historical design record. For current behavior, the implementation under `src/CutFlow` and executable tests under `tests/CutFlow.Tests` take precedence; see `PROJECT.md`.
+
 ## Approval and scope
 
 The user supplied an implementation-ready product specification and explicitly directed the implementation to proceed without follow-up questions. That specification is the approved design baseline. This document records the concrete engineering choices used to implement it without expanding the requested scope.

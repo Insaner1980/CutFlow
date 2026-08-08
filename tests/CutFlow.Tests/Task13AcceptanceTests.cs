@@ -121,12 +121,17 @@ public sealed class Task13AcceptanceTests
     [TestMethod]
     public void MediaImportScopes_KeepVisualAndAudioPickersSeparate()
     {
+        var supportedExtensions = new[] { ".mp4", ".png", ".jpg", ".jpeg", ".mp3", ".wav" };
+
         CollectionAssert.AreEquivalent(
             new[] { ".mp4", ".png", ".jpg", ".jpeg" },
             FilePickerHelper.GetMediaExtensions(MediaImportScope.Visual).ToArray());
         CollectionAssert.AreEquivalent(
             new[] { ".mp3", ".wav" },
             FilePickerHelper.GetMediaExtensions(MediaImportScope.Audio).ToArray());
+        CollectionAssert.AreEquivalent(
+            supportedExtensions,
+            FilePickerHelper.GetMediaExtensions(MediaImportScope.All).ToArray());
         Assert.IsTrue(MediaImportScope.Audio.Allows("voice.WAV"));
         Assert.IsFalse(MediaImportScope.Audio.Allows("clip.mp4"));
     }
@@ -157,7 +162,7 @@ public sealed class Task13AcceptanceTests
         var source = File.ReadAllText(Path.Combine(FindRepositoryRoot(), "src", "CutFlow", "Views", "HomeView.xaml.cs"));
 
         StringAssert.Contains(source, "private bool IsProjectOperationActive");
-        Assert.AreEqual(5, source.Split("if (IsProjectOperationActive", StringSplitOptions.None).Length - 1);
+        Assert.AreEqual(5, source.Split("if (!_canContinue() || IsProjectOperationActive", StringSplitOptions.None).Length - 1);
     }
 
     [TestMethod]

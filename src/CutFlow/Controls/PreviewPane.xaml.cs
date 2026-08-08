@@ -75,7 +75,7 @@ public sealed partial class PreviewPane : UserControl, IDisposable
     public void SetBackgroundColor(string opaqueArgb)
     {
         if (!TimelineInput.IsOpaqueArgb(opaqueArgb)) opaqueArgb = ProjectSettings.DefaultBackgroundColor;
-        PreviewSurface.Background = ParseBrush(opaqueArgb, ProjectSettings.DefaultBackgroundColor);
+        PreviewSurface.Background = TextStyle.ParseBrush(opaqueArgb, ProjectSettings.DefaultBackgroundColor);
     }
 
     public void ReplaceComposition(
@@ -540,15 +540,6 @@ public sealed partial class PreviewPane : UserControl, IDisposable
     private void FitButton_Click(object sender, RoutedEventArgs e) => ApplyFit();
     private void PreviewWorkspace_SizeChanged(object sender, SizeChangedEventArgs e) => ApplyFit();
 
-    private static SolidColorBrush ParseBrush(string value, string fallback)
-    {
-        var normalized = TextStyle.IsArgb(value) ? value : fallback;
-        return new SolidColorBrush(Microsoft.UI.ColorHelper.FromArgb(
-            Convert.ToByte(normalized.Substring(1, 2), 16),
-            Convert.ToByte(normalized.Substring(3, 2), 16),
-            Convert.ToByte(normalized.Substring(5, 2), 16),
-            Convert.ToByte(normalized.Substring(7, 2), 16)));
-    }
 }
 
 public sealed class TextPositionCommittedEventArgs(Guid itemId, double normalizedX, double normalizedY) : EventArgs

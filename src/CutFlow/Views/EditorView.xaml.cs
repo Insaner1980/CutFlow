@@ -22,9 +22,10 @@ public sealed partial class EditorView : UserControl, IDisposable
     private readonly Dictionary<EditorTool, Button> _toolButtons;
     private readonly MediaImportService _mediaImportService;
     private readonly ProjectService _projectService;
-    private readonly SimpleLogService _logService = new();
+    private readonly SimpleLogService _logService;
     private readonly ThumbnailService _thumbnailService;
     private readonly string _projectRootPath;
+    private readonly string _projectsRootPath;
     private readonly EditorImportGate _importGate = new();
     private readonly CompositionService _compositionService = new();
     private readonly PreviewRebuildGate _previewRebuildGate = new();
@@ -40,14 +41,21 @@ public sealed partial class EditorView : UserControl, IDisposable
     private double _timelineResizeStartHeight;
     private bool _disposed;
 
-    public EditorView(EditorViewModel viewModel, ProjectService projectService, MediaImportService mediaImportService, AppSettings? workspaceSettings = null)
+    public EditorView(
+        EditorViewModel viewModel,
+        ProjectService projectService,
+        MediaImportService mediaImportService,
+        SimpleLogService logService,
+        AppSettings? workspaceSettings = null)
     {
         ViewModel = viewModel ?? throw new ArgumentNullException(nameof(viewModel));
         _projectService = projectService ?? throw new ArgumentNullException(nameof(projectService));
         _mediaImportService = mediaImportService ?? throw new ArgumentNullException(nameof(mediaImportService));
+        _logService = logService ?? throw new ArgumentNullException(nameof(logService));
         _workspaceSettings = AppSettings.Normalize(workspaceSettings);
         _lifetimeToken = _lifetimeCts.Token;
         _projectRootPath = projectService.GetProjectPath(viewModel.Project.Id);
+        _projectsRootPath = projectService.GetProjectsPath();
         _thumbnailService = new ThumbnailService(_projectRootPath);
         _autosave = new DebouncedSaveCoordinator(() => _projectService.SaveAsync(ViewModel.Project));
         _autosave.StateChanged += Autosave_StateChanged;
@@ -112,7 +120,7 @@ public sealed partial class EditorView : UserControl, IDisposable
         }
 
         await _importGate.ExecuteAsync(
-            cancellationToken => _mediaImportService.ImportAsync(files, ViewModel.Project, cancellationToken),
+            cancellationToken => _mediaImportService.ImportAsync(files, ViewModel.Project, _projectsRootPath, cancellationToken),
             CommitImportResults,
             _lifetimeToken);
     }
@@ -167,7 +175,7 @@ public sealed partial class EditorView : UserControl, IDisposable
         }
 
         await _importGate.ExecuteAsync(
-            cancellationToken => _mediaImportService.ImportAsync(accepted, ViewModel.Project, cancellationToken),
+            cancellationToken => _mediaImportService.ImportAsync(accepted, ViewModel.Project, _projectsRootPath, cancellationToken),
             results => CommitTimelineDropResults(accepted, results, track, positionMilliseconds, rejected),
             _lifetimeToken);
     }
@@ -345,6 +353,7 @@ public sealed partial class EditorView : UserControl, IDisposable
             replacement,
             candidate,
             ViewModel.Project,
+            _projectsRootPath,
             _lifetimeToken);
         EnsureActive();
         var oldCacheReference = FindAsset(assetId) is { } current ? CopyAsset(current) : CopyAsset(existing);
@@ -1105,12 +1114,19 @@ public sealed partial class EditorView : UserControl, IDisposable
 
     private async void EditorRoot_KeyDown(object sender, KeyRoutedEventArgs e)
     {
-        if (e.Handled || IsEditableControlFocused())
+        var editableControlFocused = IsEditableControlFocused();
+        var controlDown = (InputKeyboardSource.GetKeyStateForCurrentThread(VirtualKey.Control) & CoreVirtualKeyStates.Down) != 0;
+        var shouldCreateNewProject = GlobalShortcutRouter.ShouldCreateNewProject(
+            e.Handled,
+            editableControlFocused,
+            controlDown,
+            e.Key,
+            e.KeyStatus.WasKeyDown);
+        if (e.Handled || editableControlFocused)
         {
             return;
         }
 
-        var controlDown = (InputKeyboardSource.GetKeyStateForCurrentThread(VirtualKey.Control) & CoreVirtualKeyStates.Down) != 0;
         if (controlDown)
         {
             switch (e.Key)
@@ -1120,17 +1136,21 @@ public sealed partial class EditorView : UserControl, IDisposable
                     e.Handled = true;
                     return;
                 case VirtualKey.N:
+                    e.Handled = true;
+                    if (!shouldCreateNewProject)
+                    {
+                        return;
+                    }
+
                     if (_isRendering)
                     {
                         ShowMessage(InfoBarSeverity.Warning, "Export in progress", "Cancel the export or wait for it to finish before creating another project.");
-                        e.Handled = true;
                         return;
                     }
                     if (await SaveAsync())
                     {
                         NewProjectRequested?.Invoke(this, EventArgs.Empty);
                     }
-                    e.Handled = true;
                     return;
                 case VirtualKey.Z:
                     ViewModel.Undo();

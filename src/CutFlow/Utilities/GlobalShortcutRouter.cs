@@ -8,6 +8,11 @@ public static class GlobalShortcutRouter
         bool alreadyHandled,
         bool editableControlFocused,
         bool controlDown,
-        VirtualKey key) =>
-        !alreadyHandled && !editableControlFocused && controlDown && key == VirtualKey.N;
+        VirtualKey key,
+        bool keyWasDown) =>
+        !alreadyHandled &&
+        !editableControlFocused &&
+        controlDown &&
+        key == VirtualKey.N &&
+        !keyWasDown;
 }

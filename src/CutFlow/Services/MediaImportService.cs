@@ -12,10 +12,12 @@ public sealed class MediaImportService
     public async Task<IReadOnlyList<ImportResult>> ImportAsync(
         IReadOnlyList<StorageFile> files,
         ProjectDocument project,
+        string managedProjectsRootPath,
         CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(files);
         ArgumentNullException.ThrowIfNull(project);
+        ArgumentException.ThrowIfNullOrWhiteSpace(managedProjectsRootPath);
 
         var knownPaths = project.Assets
             .Where(asset => !string.IsNullOrWhiteSpace(asset.SourcePath))
@@ -42,6 +44,14 @@ public sealed class MediaImportService
                 }
 
                 var normalizedPath = NormalizePath(file.Path);
+                if (IsPathWithinDirectory(normalizedPath, managedProjectsRootPath))
+                {
+                    results.Add(ImportResult.Failure(
+                        displayName,
+                        $"Choose source media outside {AppInfo.ProductName}'s managed project folders."));
+                    continue;
+                }
+
                 if (knownPaths.Contains(normalizedPath))
                 {
                     results.Add(ImportResult.Duplicate(displayName));
@@ -71,15 +81,24 @@ public sealed class MediaImportService
         StorageFile replacement,
         ProjectAsset asset,
         ProjectDocument project,
+        string managedProjectsRootPath,
         CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(replacement);
         ArgumentNullException.ThrowIfNull(asset);
         ArgumentNullException.ThrowIfNull(project);
+        ArgumentException.ThrowIfNullOrWhiteSpace(managedProjectsRootPath);
 
         try
         {
             var normalizedPath = NormalizePath(replacement.Path);
+            if (IsPathWithinDirectory(normalizedPath, managedProjectsRootPath))
+            {
+                return ImportResult.Failure(
+                    replacement.Name,
+                    $"Choose source media outside {AppInfo.ProductName}'s managed project folders.");
+            }
+
             if (project.Assets.Any(candidate =>
                     candidate.Id != asset.Id &&
                     !string.IsNullOrWhiteSpace(candidate.SourcePath) &&
@@ -120,7 +139,7 @@ public sealed class MediaImportService
             cancellationToken);
     }
 
-    public static int RefreshMissing(ProjectDocument project, Func<string, bool> pathExists)
+    internal static int RefreshMissing(ProjectDocument project, Func<string, bool> pathExists)
     {
         ArgumentNullException.ThrowIfNull(project);
         ArgumentNullException.ThrowIfNull(pathExists);
@@ -155,6 +174,14 @@ public sealed class MediaImportService
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(path);
         return Path.TrimEndingDirectorySeparator(Path.GetFullPath(path));
+    }
+
+    internal static bool IsPathWithinDirectory(string path, string directoryPath)
+    {
+        var normalizedPath = NormalizePath(path);
+        var normalizedDirectory = NormalizePath(directoryPath);
+        return string.Equals(normalizedPath, normalizedDirectory, StringComparison.OrdinalIgnoreCase) ||
+               normalizedPath.StartsWith(normalizedDirectory + Path.DirectorySeparatorChar, StringComparison.OrdinalIgnoreCase);
     }
 
     public static bool ContainsSourcePath(ProjectDocument project, string path)

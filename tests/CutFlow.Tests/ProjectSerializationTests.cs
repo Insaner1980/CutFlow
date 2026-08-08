@@ -141,6 +141,57 @@ public sealed class ProjectSerializationTests
         Assert.HasCount(0, loaded.TextItems);
     }
 
+    [DataTestMethod]
+    [DataRow("assets")]
+    [DataRow("videoItems")]
+    [DataRow("audioItems")]
+    [DataRow("textItems")]
+    public async Task LoadAsync_WhenCollectionContainsNullElement_ThrowsInvalidDataException(string propertyName)
+    {
+        using var directory = new TemporaryDirectory();
+        var id = Guid.NewGuid();
+        var projectDirectory = Directory.CreateDirectory(Path.Combine(directory.Path, "Projects", id.ToString("D")));
+        await File.WriteAllTextAsync(Path.Combine(projectDirectory.FullName, "project.json"), $$"""
+            { "schemaVersion": 1, "id": "{{id}}", "name": "Null item", "{{propertyName}}": [null] }
+            """);
+
+        await Assert.ThrowsExactlyAsync<InvalidDataException>(
+            () => new ProjectService(directory.Path).LoadAsync(id));
+    }
+
+    [TestMethod]
+    public async Task LoadAsync_WhenReferenceStringsAreExplicitJsonNull_NormalizesModelDefaults()
+    {
+        using var directory = new TemporaryDirectory();
+        var id = Guid.NewGuid();
+        var assetId = Guid.NewGuid();
+        var projectDirectory = Directory.CreateDirectory(Path.Combine(directory.Path, "Projects", id.ToString("D")));
+        await File.WriteAllTextAsync(Path.Combine(projectDirectory.FullName, "project.json"), $$"""
+            {
+              "schemaVersion": 1,
+              "id": "{{id}}",
+              "name": null,
+              "assets": [
+                {
+                  "id": "{{assetId}}",
+                  "kind": "Video",
+                  "sourcePath": null,
+                  "fileName": null,
+                  "thumbnailCachePath": null
+                }
+              ]
+            }
+            """);
+
+        var loaded = await new ProjectService(directory.Path).LoadAsync(id);
+        var asset = loaded.Assets.Single();
+
+        Assert.AreEqual(string.Empty, loaded.Name);
+        Assert.AreEqual(string.Empty, asset.SourcePath);
+        Assert.AreEqual(string.Empty, asset.FileName);
+        Assert.AreEqual(string.Empty, asset.ThumbnailCachePath);
+    }
+
     [TestMethod]
     public async Task SaveAndLoadAsync_NormalizesTimelineAndFontBoundaries()
     {

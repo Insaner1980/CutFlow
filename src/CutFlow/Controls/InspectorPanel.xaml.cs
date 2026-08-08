@@ -410,7 +410,10 @@ public sealed partial class InspectorPanel : UserControl
         }
     }
 
-    private void RaiseEdit(InspectorEditCommittedEventArgs args) => EditCommitted?.Invoke(this, args);
+    private void RaiseEdit(InspectorEditCommittedEventArgs args) =>
+        InspectorEditBoundary.Commit(
+            () => EditCommitted?.Invoke(this, args),
+            Refresh);
 
     private void ShowValidation(string message)
     {
@@ -483,4 +486,13 @@ public static class InspectorCommitGesture
 {
     public static bool ShouldCommit(string? tag, VirtualKey key, bool controlDown) =>
         key == VirtualKey.Enter && (!string.Equals(tag, "TextContent", StringComparison.Ordinal) || controlDown);
+}
+
+internal static class InspectorEditBoundary
+{
+    public static void Commit(Action requestEdit, Action refreshCanonicalState)
+    {
+        requestEdit();
+        refreshCanonicalState();
+    }
 }

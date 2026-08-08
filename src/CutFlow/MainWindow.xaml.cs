@@ -22,7 +22,7 @@ public sealed partial class MainWindow : Window
     private readonly MediaImportService _mediaImportService;
     private readonly SettingsService _settingsService;
     private readonly DebouncedSaveCoordinator _settingsSaveCoordinator;
-    private readonly SimpleLogService _logService = new();
+    private readonly SimpleLogService _logService;
     private readonly WorkspaceSettingsSaveFailureNotice _workspaceSettingsSaveFailureNotice = new();
     private readonly TaskCompletionSource<AppWindowContext> _windowReady = new(TaskCreationOptions.RunContinuationsAsynchronously);
     private readonly MainWindowLifecycle _lifecycle = new();
@@ -41,11 +41,12 @@ public sealed partial class MainWindow : Window
         _projectService = new ProjectService();
         _mediaImportService = new MediaImportService();
         _settingsService = new SettingsService();
+        _logService = new SimpleLogService();
         _settingsSaveCoordinator = new DebouncedSaveCoordinator(() => _settingsService.SaveAsync(_appSettings));
         _settingsSaveCoordinator.StateChanged += SettingsSaveCoordinator_StateChanged;
-        _viewModel = new MainViewModel(_projectService, _mediaImportService);
+        _viewModel = new MainViewModel(_projectService, _mediaImportService, () => _lifecycle.CanContinueInitialization);
         _viewModel.CurrentViewChanged += (_, _) => ShowCurrentView();
-        _homeView = new HomeView(_viewModel.Home);
+        _homeView = new HomeView(_viewModel.Home, () => _lifecycle.CanContinueInitialization);
         _homeView.ProjectOpenRequested = project => _viewModel.OpenEditorAsync(project);
         _initializationTask = _lifecycle.StartInitialization(InitializeAsync);
     }
@@ -57,18 +58,21 @@ public sealed partial class MainWindow : Window
             return;
         }
 
-        if (_viewModel.Editor is not null)
+        if (_viewModel.Editor is { } editorViewModel)
         {
-            _editorView?.Dispose();
-            _editorView = new EditorView(_viewModel.Editor, _projectService, _mediaImportService, _appSettings);
-            _editorView.ReturnHomeRequested += async (_, _) => await _viewModel.ShowHomeAsync();
-            _editorView.NewProjectRequested += async (_, _) =>
+            if (_editorView is not null &&
+                ReferenceEquals(_editorView.ViewModel, editorViewModel) &&
+                ReferenceEquals(ContentHost.Content, _editorView))
             {
-                if (await _viewModel.ShowHomeAsync())
-                {
-                    await _homeView.CreateProjectAsync();
-                }
-            };
+                SetTitleBar(_editorView.TitleBarElement);
+                return;
+            }
+
+            var editorView = new EditorView(editorViewModel, _projectService, _mediaImportService, _logService, _appSettings);
+            DetachEditorView();
+            _editorView = editorView;
+            _editorView.ReturnHomeRequested += Editor_ReturnHomeRequested;
+            _editorView.NewProjectRequested += Editor_NewProjectRequested;
             _editorView.ImportRequested += Editor_ImportRequested;
             _editorView.RelinkAssetRequested += Editor_RelinkAssetRequested;
             _editorView.ExportRequested += Editor_ExportRequested;
@@ -78,10 +82,32 @@ public sealed partial class MainWindow : Window
             return;
         }
 
-        _editorView?.Dispose();
-        _editorView = null;
+        if (_editorView is null && ReferenceEquals(ContentHost.Content, _homeView))
+        {
+            SetTitleBar(_homeView.TitleBarElement);
+            return;
+        }
+
+        DetachEditorView();
         ContentHost.Content = _homeView;
         SetTitleBar(_homeView.TitleBarElement);
+    }
+
+    private void DetachEditorView()
+    {
+        if (_editorView is not { } editor)
+        {
+            return;
+        }
+
+        editor.ReturnHomeRequested -= Editor_ReturnHomeRequested;
+        editor.NewProjectRequested -= Editor_NewProjectRequested;
+        editor.ImportRequested -= Editor_ImportRequested;
+        editor.RelinkAssetRequested -= Editor_RelinkAssetRequested;
+        editor.ExportRequested -= Editor_ExportRequested;
+        editor.WorkspaceSettingsChanged -= Editor_WorkspaceSettingsChanged;
+        editor.Dispose();
+        _editorView = null;
     }
 
     private async Task InitializeAsync()
@@ -91,7 +117,7 @@ public sealed partial class MainWindow : Window
         try
         {
             var context = await _windowReady.Task;
-            if (!_lifecycle.CanContinueClosing)
+            if (!_lifecycle.CanContinueInitialization)
             {
                 return;
             }
@@ -105,7 +131,7 @@ public sealed partial class MainWindow : Window
                 settingsError = $"Could not restore window settings. {exception.Message}";
             }
 
-            if (!_lifecycle.CanContinueClosing)
+            if (!_lifecycle.CanContinueInitialization)
             {
                 return;
             }
@@ -136,7 +162,7 @@ public sealed partial class MainWindow : Window
             }
 
             await _viewModel.ShowHomeAsync();
-            if (!_lifecycle.CanContinueClosing)
+            if (!_lifecycle.CanContinueInitialization)
             {
                 return;
             }
@@ -257,9 +283,30 @@ public sealed partial class MainWindow : Window
         return WindowGeometry.ScaleFactorToDpi(scaleFactor);
     }
 
+    private async void Editor_ReturnHomeRequested(object? sender, EventArgs e)
+    {
+        if (_lifecycle.CanHandleEditorEvent(_editorView, sender))
+        {
+            await _viewModel.ShowHomeAsync();
+        }
+    }
+
+    private async void Editor_NewProjectRequested(object? sender, EventArgs e)
+    {
+        if (!_lifecycle.CanHandleEditorEvent(_editorView, sender))
+        {
+            return;
+        }
+
+        if (await _viewModel.ShowHomeAsync() && _lifecycle.CanContinueInitialization)
+        {
+            await _homeView.CreateProjectAsync();
+        }
+    }
+
     private async void Editor_ImportRequested(object? sender, MediaImportRequestedEventArgs e)
     {
-        if (sender is not EditorView editor)
+        if (sender is not EditorView editor || !_lifecycle.CanHandleEditorEvent(_editorView, editor))
         {
             return;
         }
@@ -267,7 +314,7 @@ public sealed partial class MainWindow : Window
         try
         {
             var files = await FilePickerHelper.PickMediaFilesAsync(GetWindowHandle(), e.Scope);
-            if (ReferenceEquals(_editorView, editor))
+            if (_lifecycle.CanHandleEditorEvent(_editorView, editor))
             {
                 await editor.ImportFilesAsync(files);
             }
@@ -277,7 +324,7 @@ public sealed partial class MainWindow : Window
         }
         catch (Exception exception) when (exception is IOException or UnauthorizedAccessException or InvalidOperationException or ArgumentException or System.Runtime.InteropServices.COMException)
         {
-            if (ReferenceEquals(_editorView, editor))
+            if (_lifecycle.CanHandleEditorEvent(_editorView, editor))
             {
                 editor.ReportError("Could not open media", $"The file picker or import failed. {exception.Message}");
             }
@@ -286,7 +333,9 @@ public sealed partial class MainWindow : Window
 
     private async void Editor_RelinkAssetRequested(object? sender, Controls.AssetActionEventArgs e)
     {
-        if (sender is not EditorView editor || editor.FindAsset(e.AssetId) is not { } asset)
+        if (sender is not EditorView editor ||
+            !_lifecycle.CanHandleEditorEvent(_editorView, editor) ||
+            editor.FindAsset(e.AssetId) is not { } asset)
         {
             return;
         }
@@ -294,7 +343,7 @@ public sealed partial class MainWindow : Window
         try
         {
             var file = await FilePickerHelper.PickRelinkFileAsync(GetWindowHandle(), asset.Kind);
-            if (file is not null && ReferenceEquals(_editorView, editor))
+            if (file is not null && _lifecycle.CanHandleEditorEvent(_editorView, editor))
             {
                 await editor.RelinkAssetAsync(e.AssetId, file);
             }
@@ -304,7 +353,7 @@ public sealed partial class MainWindow : Window
         }
         catch (Exception exception) when (exception is IOException or UnauthorizedAccessException or InvalidOperationException or ArgumentException or System.Runtime.InteropServices.COMException)
         {
-            if (ReferenceEquals(_editorView, editor))
+            if (_lifecycle.CanHandleEditorEvent(_editorView, editor))
             {
                 editor.ReportError($"Could not relink '{asset.FileName}'", $"The replacement could not be opened. {exception.Message}");
             }
@@ -313,7 +362,7 @@ public sealed partial class MainWindow : Window
 
     private async void Editor_ExportRequested(object? sender, EventArgs e)
     {
-        if (sender is not EditorView editor || !ReferenceEquals(_editorView, editor))
+        if (sender is not EditorView editor || !_lifecycle.CanHandleEditorEvent(_editorView, editor))
         {
             return;
         }
@@ -324,7 +373,7 @@ public sealed partial class MainWindow : Window
         }
         catch (Exception exception) when (exception is not OutOfMemoryException)
         {
-            if (ReferenceEquals(_editorView, editor))
+            if (_lifecycle.CanHandleEditorEvent(_editorView, editor))
             {
                 editor.ReportError("Export failed", $"{AppInfo.ProductName} could not start the export. Try again or choose another output location.");
                 _ = _logService.TryWriteAsync($"Export start failed: {exception.GetType().Name}");
@@ -339,7 +388,13 @@ public sealed partial class MainWindow : Window
         var controlDown = (InputKeyboardSource.GetKeyStateForCurrentThread(VirtualKey.Control) & Windows.UI.Core.CoreVirtualKeyStates.Down) != 0;
         var editableControlFocused = Content is FrameworkElement root &&
                                      FocusManager.GetFocusedElement(root.XamlRoot) is TextBox or PasswordBox or RichEditBox;
-        if (_viewModel.Editor is not null || !GlobalShortcutRouter.ShouldCreateNewProject(e.Handled, editableControlFocused, controlDown, e.Key))
+        if (_viewModel.Editor is not null ||
+            !GlobalShortcutRouter.ShouldCreateNewProject(
+                e.Handled,
+                editableControlFocused,
+                controlDown,
+                e.Key,
+                e.KeyStatus.WasKeyDown))
         {
             return;
         }
@@ -350,7 +405,7 @@ public sealed partial class MainWindow : Window
 
     private void Editor_WorkspaceSettingsChanged(object? sender, WorkspaceSettingsChangedEventArgs e)
     {
-        if (!_lifecycle.CanContinueInitialization)
+        if (!_lifecycle.CanHandleEditorEvent(_editorView, sender))
         {
             return;
         }
@@ -372,7 +427,7 @@ public sealed partial class MainWindow : Window
 
         DispatcherQueue.TryEnqueue(() =>
         {
-            if (!_lifecycle.CanContinueClosing)
+            if (!_lifecycle.CanContinueInitialization)
             {
                 return;
             }
@@ -532,8 +587,7 @@ public sealed partial class MainWindow : Window
 
         _settingsSaveCoordinator.StateChanged -= SettingsSaveCoordinator_StateChanged;
         _settingsSaveCoordinator.Dispose();
-        _editorView?.Dispose();
-        _editorView = null;
+        DetachEditorView();
     }
 }
 
@@ -546,6 +600,9 @@ internal sealed class MainWindowLifecycle
     public bool CanContinueInitialization => !_closing && !_closed;
 
     public bool CanContinueClosing => !_closed;
+
+    public bool CanHandleEditorEvent(object? currentEditor, object? sender) =>
+        CanContinueInitialization && currentEditor is not null && ReferenceEquals(currentEditor, sender);
 
     public bool CloseApproved { get; private set; }
 

@@ -9,12 +9,12 @@ The implementation under `src/CutFlow` and the executable tests under `tests/Cut
 Snapshot described here:
 
 - Workspace: `C:\Dev\CutFlow`
-- Documentation date: 2026-08-07
+- Documentation date: 2026-08-08
 - Repository: [github.com/Insaner1980/CutFlow](https://github.com/Insaner1980/CutFlow).
 - Default publication branch: `main`. The local `C:\Dev\CutFlow` checkout is the active source of truth; GitHub is its publication and backup destination.
 - Source inventory, excluding generated `bin` and `obj` trees: 74 files, including 55 C# files (10,186 lines) and 9 XAML files (1,012 lines).
-- Test inventory: 29 C# files (4,733 lines).
-- Current verification: `dotnet test .\CutFlow.slnx -c Release --no-restore` passed 342/342 tests; `dotnet build .\CutFlow.slnx -c Release -p:Platform=x64 --no-restore` completed with 0 warnings and 0 errors.
+- Test inventory: 35 C# files (5,421 lines).
+- Current verification: `dotnet test .\CutFlow.slnx -c Release -p:Platform=x64 --no-restore` passed 383/383 tests; `dotnet build .\CutFlow.slnx -c Release -p:Platform=x64 --no-restore` completed with 0 warnings and 0 errors.
 - The verification above proves the automated Release build and test suite. It does not claim that an interactive packaged-app acceptance pass was performed for this documentation update.
 
 ## Product summary
@@ -106,7 +106,7 @@ The Release loose-package layout is produced under:
 src\CutFlow\bin\x64\Release\net10.0-windows10.0.26100.0
 ```
 
-The app must be registered from the generated `AppxManifest.xml` and launched through its package identity. The repository does not generate a signed distribution installer.
+The app must be registered from the generated `AppxManifest.xml` and launched through its package identity. `scripts/Register-CutFlowDevelopment.ps1` refuses to register over a `CutFlow` package installed outside this repository's build tree and resolves the requested loose layout before launch. The repository does not generate a signed distribution installer or Microsoft Store package.
 
 ## Repository map
 
@@ -992,7 +992,7 @@ Expected exception filters are intentionally narrow around I/O, access, invalid 
 
 The suite is a single x64 MSTest assembly referencing the app project. Internal visibility allows deterministic utilities and state gates to be tested without introducing a separate production abstraction layer.
 
-The current 342 passing cases cover these major areas:
+The current 383 passing cases cover these major areas:
 
 | Area | Representative coverage |
 | --- | --- |

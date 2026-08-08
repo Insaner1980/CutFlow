@@ -154,6 +154,36 @@ public sealed class ProjectServiceTests
         Assert.AreEqual("external media", await File.ReadAllTextAsync(externalMediaPath));
     }
 
+    [TestMethod]
+    public async Task DeleteAsync_LegacyManagedSourceReferenceRefusesDeletionAndPreservesSource()
+    {
+        using var directory = new TemporaryDirectory();
+        var service = new ProjectService(directory.Path);
+        var project = await service.CreateAsync("Preserve source");
+        var projectPath = service.GetProjectPath(project.Id);
+        var sourcePath = Path.Combine(projectPath, "cache", "source.png");
+        await File.WriteAllTextAsync(sourcePath, "imported source");
+        project.Assets.Add(new ProjectAsset
+        {
+            Id = Guid.NewGuid(),
+            Kind = ProjectAssetKind.Image,
+            SourcePath = sourcePath,
+            FileName = "source.png"
+        });
+
+        await Assert.ThrowsExceptionAsync<InvalidDataException>(() => service.SaveAsync(project));
+        Assert.AreEqual("imported source", await File.ReadAllTextAsync(sourcePath));
+
+        await File.WriteAllTextAsync(
+            Path.Combine(projectPath, "project.json"),
+            System.Text.Json.JsonSerializer.Serialize(project));
+
+        await Assert.ThrowsExceptionAsync<InvalidDataException>(() => service.DeleteAsync(project.Id));
+
+        Assert.IsTrue(Directory.Exists(projectPath));
+        Assert.AreEqual("imported source", await File.ReadAllTextAsync(sourcePath));
+    }
+
     private sealed class TemporaryDirectory : IDisposable
     {
         public TemporaryDirectory()

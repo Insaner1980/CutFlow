@@ -6,6 +6,7 @@
     <Platforms>x64</Platforms>
     <Platform>x64</Platform>
     <PlatformTarget>x64</PlatformTarget>
+    <RuntimeIdentifiers>win-x64</RuntimeIdentifiers>
     <ImplicitUsings>enable</ImplicitUsings>
     <Nullable>enable</Nullable>
     <IsPackable>false</IsPackable>
@@ -20,4 +21,15 @@
   <ItemGroup>
     <ProjectReference Include="../../src/CutFlow/CutFlow.csproj" />
   </ItemGroup>
+
+  <ItemGroup>
+    <Content Include="TestMedia\valid-audio.wav" CopyToOutputDirectory="PreserveNewest" />
+    <Content Include="TestMedia\valid-image.jpg" CopyToOutputDirectory="PreserveNewest" />
+    <Content Include="TestMedia\valid-video.mp4" CopyToOutputDirectory="PreserveNewest" />
+  </ItemGroup>
+
+  <Target Name="ValidateX64Configuration" BeforeTargets="PrepareForBuild">
+    <Error Condition="'$(Platform)' != 'x64'" Text="CutFlow tests support only the x64 platform. Set Platform=x64." />
+    <Error Condition="'$(RuntimeIdentifier)' != '' and '$(RuntimeIdentifier)' != 'win-x64'" Text="CutFlow tests support only the win-x64 runtime identifier." />
+  </Target>
 </Project>

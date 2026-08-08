@@ -13,7 +13,7 @@ public sealed class MediaImportServiceTests
     [DataRow(@"C:\Media\still.JPEG", ProjectAssetKind.Image)]
     [DataRow(@"C:\Media\song.mp3", ProjectAssetKind.Audio)]
     [DataRow(@"C:\Media\song.WAV", ProjectAssetKind.Audio)]
-    public void TryGetKind_RecognizesBaselineExtensionsCaseInsensitively(string path, ProjectAssetKind expected)
+    public void TryGetKind_RecognizesSupportedExtensionsCaseInsensitively(string path, ProjectAssetKind expected)
     {
         Assert.IsTrue(MediaImportService.TryGetKind(path, out var actual));
         Assert.AreEqual(expected, actual);
@@ -21,6 +21,9 @@ public sealed class MediaImportServiceTests
 
     [DataTestMethod]
     [DataRow(@"C:\Media\clip.mov")]
+    [DataRow(@"C:\Media\clip.mkv")]
+    [DataRow(@"C:\Media\still.webp")]
+    [DataRow(@"C:\Media\song.m4a")]
     [DataRow(@"C:\Media\notes.txt")]
     [DataRow(@"C:\Media\no-extension")]
     public void TryGetKind_RejectsUnsupportedExtensions(string path)
@@ -37,6 +40,66 @@ public sealed class MediaImportServiceTests
         Assert.AreEqual(@"C:\Media\clip.mp4", MediaImportService.NormalizePath(@"c:\media\.\clip.mp4"), ignoreCase: true);
         Assert.IsTrue(MediaImportService.ContainsSourcePath(project, @"c:\media\clip.mp4"));
         Assert.IsFalse(MediaImportService.ContainsSourcePath(project, @"c:\media\clip-copy.mp4"));
+    }
+
+    [TestMethod]
+    public void IsPathWithinDirectory_RejectsOnlyTheManagedDirectoryAndItsDescendants()
+    {
+        var projectsRoot = Path.Combine(Path.GetTempPath(), "CutFlow.Tests", Guid.NewGuid().ToString("N"), "Projects");
+
+        Assert.IsTrue(MediaImportService.IsPathWithinDirectory(
+            Path.Combine(projectsRoot, Guid.NewGuid().ToString("D"), "cache", "source.png"),
+            Path.Combine(projectsRoot, ".")));
+        Assert.IsTrue(MediaImportService.IsPathWithinDirectory(projectsRoot, projectsRoot));
+        Assert.IsFalse(MediaImportService.IsPathWithinDirectory(
+            Path.Combine(projectsRoot + "-other", "source.png"),
+            projectsRoot));
+    }
+
+    [TestMethod]
+    public async Task ImportAndRelink_RejectManagedProjectSourcesWithoutMutatingThem()
+    {
+        var testRoot = Path.Combine(Path.GetTempPath(), "CutFlow.Tests", Guid.NewGuid().ToString("N"));
+        var projectsRoot = Path.Combine(testRoot, "Projects");
+        var sourcePath = Path.Combine(projectsRoot, Guid.NewGuid().ToString("D"), "cache", "source.png");
+        Directory.CreateDirectory(Path.GetDirectoryName(sourcePath)!);
+        await File.WriteAllTextAsync(sourcePath, "source bytes");
+        try
+        {
+            var source = await Windows.Storage.StorageFile.GetFileFromPathAsync(sourcePath);
+            var service = new MediaImportService();
+            var project = new ProjectDocument();
+
+            var imported = await service.ImportAsync([source], project, projectsRoot);
+
+            Assert.IsFalse(imported.Single().IsSuccess);
+            StringAssert.Contains(imported.Single().ErrorMessage, "managed project folders");
+            Assert.HasCount(0, project.Assets);
+
+            var existing = new ProjectAsset
+            {
+                Id = Guid.NewGuid(),
+                Kind = ProjectAssetKind.Image,
+                SourcePath = @"C:\Media\old.png",
+                ThumbnailCachePath = @"cache\thumbnails\old.jpg"
+            };
+            project.Assets.Add(existing);
+
+            var relinked = await service.RelinkAsync(source, existing, project, projectsRoot);
+
+            Assert.IsFalse(relinked.IsSuccess);
+            StringAssert.Contains(relinked.ErrorMessage, "managed project folders");
+            Assert.AreEqual(@"C:\Media\old.png", existing.SourcePath);
+            Assert.AreEqual(@"cache\thumbnails\old.jpg", existing.ThumbnailCachePath);
+            Assert.AreEqual("source bytes", await File.ReadAllTextAsync(sourcePath));
+        }
+        finally
+        {
+            if (Directory.Exists(testRoot))
+            {
+                Directory.Delete(testRoot, recursive: true);
+            }
+        }
     }
 
     [TestMethod]
