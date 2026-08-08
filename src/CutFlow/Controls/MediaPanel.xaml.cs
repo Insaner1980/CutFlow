@@ -84,6 +84,7 @@ public sealed partial class MediaPanel : UserControl
     public void SetTool(EditorTool tool)
     {
         _tool = tool;
+        var acceptsMediaInput = TryGetMediaImportScope(tool, out _);
         PanelTitle.Text = ToolName(tool);
         PanelDescription.Text = tool switch
         {
@@ -94,9 +95,10 @@ public sealed partial class MediaPanel : UserControl
         };
         AssetContent.Visibility = tool is EditorTool.Media or EditorTool.Audio ? Visibility.Visible : Visibility.Collapsed;
         TextContent.Visibility = tool == EditorTool.Text ? Visibility.Visible : Visibility.Collapsed;
-        UnsupportedContent.Visibility = tool is EditorTool.Media or EditorTool.Audio or EditorTool.Text
+        UnsupportedContent.Visibility = acceptsMediaInput || tool == EditorTool.Text
             ? Visibility.Collapsed
             : Visibility.Visible;
+        PanelRoot.AllowDrop = acceptsMediaInput;
         UnsupportedName.Text = ToolName(tool);
         ImportButtonText.Text = tool == EditorTool.Audio ? "Import audio" : "Import media";
         ImportIcon.Glyph = tool == EditorTool.Audio ? "\uE8D6" : "\uE8B7";
@@ -167,6 +169,30 @@ public sealed partial class MediaPanel : UserControl
         _ => tool.ToString()
     };
 
+    internal static bool TryGetMediaImportScope(EditorTool tool, out MediaImportScope scope)
+    {
+        switch (tool)
+        {
+            case EditorTool.Media:
+            case EditorTool.Text:
+                scope = MediaImportScope.Visual;
+                return true;
+            case EditorTool.Audio:
+                scope = MediaImportScope.Audio;
+                return true;
+            default:
+                scope = default;
+                return false;
+        }
+    }
+
+    internal static bool CanUseAssetKind(EditorTool tool, ProjectAssetKind kind) => tool switch
+    {
+        EditorTool.Media or EditorTool.Text => kind is ProjectAssetKind.Video or ProjectAssetKind.Image,
+        EditorTool.Audio => kind == ProjectAssetKind.Audio,
+        _ => false
+    };
+
     private void MediaPanel_Loaded(object sender, RoutedEventArgs e)
     {
         _lifetimeCts?.Cancel();
@@ -185,12 +211,17 @@ public sealed partial class MediaPanel : UserControl
         _lifetimeCts = null;
     }
 
-    private void Import_Click(object sender, RoutedEventArgs e) =>
-        ImportRequested?.Invoke(this, new MediaImportRequestedEventArgs(CurrentImportScope));
+    private void Import_Click(object sender, RoutedEventArgs e)
+    {
+        if (TryGetMediaImportScope(_tool, out var scope))
+        {
+            ImportRequested?.Invoke(this, new MediaImportRequestedEventArgs(scope));
+        }
+    }
 
     private void AddText_Click(object sender, RoutedEventArgs e)
     {
-        if (sender is FrameworkElement element && Enum.TryParse<TextPreset>(element.Tag?.ToString(), out var preset))
+        if (_tool == EditorTool.Text && sender is FrameworkElement element && Enum.TryParse<TextPreset>(element.Tag?.ToString(), out var preset))
         {
             AddTextRequested?.Invoke(this, new TextPresetRequestedEventArgs(preset));
         }
@@ -217,7 +248,7 @@ public sealed partial class MediaPanel : UserControl
 
     private void AssetGrid_DoubleTapped(object sender, DoubleTappedRoutedEventArgs e)
     {
-        if (FindCard(e.OriginalSource as DependencyObject) is { } card && card.CanAdd)
+        if (FindCard(e.OriginalSource as DependencyObject) is { } card && card.CanAdd && CanUseAsset(card.AssetId))
         {
             AddAssetRequested?.Invoke(this, new AssetActionEventArgs(card.AssetId));
         }
@@ -227,7 +258,7 @@ public sealed partial class MediaPanel : UserControl
     {
         var card = FindCard(e.OriginalSource as DependencyObject) ??
             FindCard(FocusManager.GetFocusedElement(XamlRoot) as DependencyObject);
-        if (card is null || !MediaAssetActivationPolicy.ShouldActivate(e.Key, card.CanAdd))
+        if (card is null || !CanUseAsset(card.AssetId) || !MediaAssetActivationPolicy.ShouldActivate(e.Key, card.CanAdd))
         {
             return;
         }
@@ -238,7 +269,7 @@ public sealed partial class MediaPanel : UserControl
 
     private void AssetCard_DragStarting(UIElement sender, DragStartingEventArgs e)
     {
-        if (sender is not FrameworkElement { DataContext: MediaAssetCard { CanAdd: true } card })
+        if (sender is not FrameworkElement { DataContext: MediaAssetCard { CanAdd: true } card } || !CanUseAsset(card.AssetId))
         {
             e.Cancel = true;
             return;
@@ -257,12 +288,18 @@ public sealed partial class MediaPanel : UserControl
 
     private void Remove_Click(object sender, RoutedEventArgs e) => RaiseAssetAction(sender, RemoveAssetRequested);
 
-    private static void RaiseAssetAction(object sender, EventHandler<AssetActionEventArgs>? handler)
+    private void RaiseAssetAction(object sender, EventHandler<AssetActionEventArgs>? handler)
     {
-        if (sender is FrameworkElement { Tag: Guid assetId })
+        if (sender is FrameworkElement { Tag: Guid assetId } && CanUseAsset(assetId))
         {
             handler?.Invoke(sender, new AssetActionEventArgs(assetId));
         }
+    }
+
+    private bool CanUseAsset(Guid assetId)
+    {
+        var asset = _project?.Assets.FirstOrDefault(candidate => candidate.Id == assetId);
+        return asset is not null && CanUseAssetKind(_tool, asset.Kind);
     }
 
     private static MediaAssetCard? FindCard(DependencyObject? source)
@@ -282,17 +319,22 @@ public sealed partial class MediaPanel : UserControl
 
     private void PanelRoot_DragOver(object sender, DragEventArgs e)
     {
-        if (e.DataView.Contains(StandardDataFormats.StorageItems))
+        if (TryGetMediaImportScope(_tool, out _) && e.DataView.Contains(StandardDataFormats.StorageItems))
         {
             e.AcceptedOperation = DataPackageOperation.Copy;
             e.DragUIOverride.Caption = "Import into this project";
             e.DragUIOverride.IsCaptionVisible = true;
         }
+        else
+        {
+            e.AcceptedOperation = DataPackageOperation.None;
+        }
     }
 
     private async void PanelRoot_Drop(object sender, DragEventArgs e)
     {
-        if (!e.DataView.Contains(StandardDataFormats.StorageItems))
+        var tool = _tool;
+        if (!TryGetMediaImportScope(tool, out var scope) || !e.DataView.Contains(StandardDataFormats.StorageItems))
         {
             return;
         }
@@ -304,13 +346,17 @@ public sealed partial class MediaPanel : UserControl
                 async () => await e.DataView.GetStorageItemsAsync(),
                 cancellationToken);
             cancellationToken.ThrowIfCancellationRequested();
+            if (_tool != tool)
+            {
+                return;
+            }
+
             if (!result.IsSuccess)
             {
                 MediaDropFailed?.Invoke(this, new MediaDropFailedEventArgs(result.ErrorMessage!, result.Exception));
             }
             else if (result.Files.Count > 0)
             {
-                var scope = CurrentImportScope;
                 var acceptedFiles = result.Files.Where(file => scope.Allows(file.Path)).ToList();
                 if (acceptedFiles.Count != result.Files.Count)
                 {
@@ -344,9 +390,6 @@ public sealed partial class MediaPanel : UserControl
             }
         }
     }
-
-    private MediaImportScope CurrentImportScope =>
-        _tool == EditorTool.Audio ? MediaImportScope.Audio : MediaImportScope.Visual;
 
     private void RestartThumbnailRefresh()
     {
