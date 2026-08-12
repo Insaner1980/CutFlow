@@ -10,6 +10,9 @@ namespace CutFlow.Services;
 
 public sealed class ThumbnailService
 {
+    private const string RelativeCachePathPrefix = "cache/thumbnails/";
+    private const string RelativeCachePathSuffix = ".jpg";
+
     public const long MaximumCachedThumbnailBytes = 8 * 1024 * 1024;
     public const int DefaultRequestedSize = 256;
     public const int MaximumRequestedSize = 1_024;
@@ -22,6 +25,7 @@ public sealed class ThumbnailService
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(projectRootPath);
         _projectRootPath = Path.GetFullPath(projectRootPath);
+        ProjectService.RejectReparsePoints(_projectRootPath);
     }
 
     public async Task<string?> GetOrCreateThumbnailAsync(
@@ -32,66 +36,92 @@ public sealed class ThumbnailService
     {
         ArgumentNullException.ThrowIfNull(file);
         ArgumentNullException.ThrowIfNull(asset);
-        if (requestedSize is <= 0 or > MaximumRequestedSize)
-        {
-            throw new ArgumentOutOfRangeException(nameof(requestedSize));
-        }
+        var normalizedRequestedSize = NormalizeRequestedSize(requestedSize);
 
         if (asset.Kind == ProjectAssetKind.Audio || asset.IsMissing)
         {
             return null;
         }
 
-        var request = CaptureRequest(asset, requestedSize);
-        if (!IsStoragePathForRequest(request, file.Path))
+        for (var attempt = 0; attempt < 2; attempt++)
         {
-            return null;
-        }
-
-        var relativePath = CreateRelativeCachePath(request.CacheKey);
-        var cachePath = ResolveProjectCachePath(_projectRootPath, relativePath);
-        if (File.Exists(cachePath))
-        {
-            return TryCommitCacheHit(asset, request, relativePath) ? cachePath : null;
-        }
-
-        cancellationToken.ThrowIfCancellationRequested();
-        var mode = request.Kind == ProjectAssetKind.Image ? ThumbnailMode.PicturesView : ThumbnailMode.VideosView;
-        using var thumbnail = await file.GetThumbnailAsync(mode, checked((uint)requestedSize), ThumbnailOptions.ResizeThumbnail);
-        cancellationToken.ThrowIfCancellationRequested();
-        if (thumbnail is null || thumbnail.Type != ThumbnailType.Image)
-        {
-            return null;
-        }
-
-        using var encodedThumbnail = await EncodeJpegAsync(thumbnail, cancellationToken);
-
-        Directory.CreateDirectory(Path.GetDirectoryName(cachePath)!);
-        var temporaryPath = cachePath + $".{Guid.NewGuid():N}.tmp";
-        try
-        {
-            await using (var destination = new FileStream(
-                temporaryPath,
-                FileMode.Create,
-                FileAccess.Write,
-                FileShare.None,
-                16 * 1024,
-                FileOptions.Asynchronous))
+            var currentRequest = await CaptureCurrentRequestAsync(
+                file,
+                asset,
+                normalizedRequestedSize,
+                cancellationToken);
+            if (currentRequest is not { } request)
             {
-                await CopyBoundedAsync(encodedThumbnail.AsStreamForRead(), destination, MaximumCachedThumbnailBytes, cancellationToken);
-                await destination.FlushAsync(cancellationToken);
+                return null;
+            }
+
+            var relativePath = CreateRelativeCachePath(request.CacheKey);
+            var cachePath = ResolveProjectCachePath(_projectRootPath, relativePath);
+            if (File.Exists(cachePath))
+            {
+                if (await IsUsableCachedThumbnailAsync(cachePath, cancellationToken))
+                {
+                    if (!await SourceStillMatchesRequestAsync(file, asset, request, cancellationToken))
+                    {
+                        continue;
+                    }
+
+                    return TryCommitCacheHit(asset, request, relativePath, cancellationToken) ? cachePath : null;
+                }
+
+                TryDeleteProjectOwnedFile(cachePath);
             }
 
             cancellationToken.ThrowIfCancellationRequested();
-            return TryCommitGeneratedThumbnail(asset, request, temporaryPath, relativePath) ? cachePath : null;
-        }
-        finally
-        {
-            if (File.Exists(temporaryPath))
+            var mode = request.Kind == ProjectAssetKind.Image ? ThumbnailMode.PicturesView : ThumbnailMode.VideosView;
+            using var thumbnail = await file.GetThumbnailAsync(
+                    mode,
+                    checked((uint)request.RequestedSize),
+                    ThumbnailOptions.ResizeThumbnail)
+                .AsTask(cancellationToken);
+            if (thumbnail is null || thumbnail.Type != ThumbnailType.Image)
             {
-                File.Delete(temporaryPath);
+                return null;
+            }
+
+            using var encodedThumbnail = await EncodeJpegAsync(thumbnail, request.RequestedSize, cancellationToken);
+
+            Directory.CreateDirectory(Path.GetDirectoryName(cachePath)!);
+            var temporaryPath = cachePath + $".{Guid.NewGuid():N}.tmp";
+            ProjectService.RejectReparsePoints(temporaryPath);
+            try
+            {
+                await using (var destination = new FileStream(
+                    temporaryPath,
+                    FileMode.CreateNew,
+                    FileAccess.Write,
+                    FileShare.None,
+                    16 * 1024,
+                    FileOptions.Asynchronous))
+                {
+                    await CopyBoundedAsync(encodedThumbnail.AsStreamForRead(), destination, MaximumCachedThumbnailBytes, cancellationToken);
+                    await destination.FlushAsync(cancellationToken);
+                }
+
+                cancellationToken.ThrowIfCancellationRequested();
+                if (!await SourceStillMatchesRequestAsync(file, asset, request, cancellationToken))
+                {
+                    continue;
+                }
+
+                return TryCommitGeneratedThumbnail(asset, request, temporaryPath, relativePath, cancellationToken) ? cachePath : null;
+            }
+            finally
+            {
+                if (File.Exists(temporaryPath))
+                {
+                    EnsureProjectOwnedThumbnailPath(temporaryPath);
+                    File.Delete(temporaryPath);
+                }
             }
         }
+
+        return null;
     }
 
     public bool TryDeleteCachedThumbnail(ProjectAsset asset)
@@ -114,37 +144,85 @@ public sealed class ThumbnailService
 
     public static string CreateCacheKey(string sourcePath, ulong fileSize, DateTimeOffset lastWriteUtc, int requestedSize)
     {
-        if (requestedSize <= 0)
-        {
-            throw new ArgumentOutOfRangeException(nameof(requestedSize));
-        }
-
+        var normalizedRequestedSize = NormalizeRequestedSize(requestedSize);
         var normalized = MediaImportService.NormalizePath(sourcePath).ToUpperInvariant();
-        var input = $"{normalized}\n{fileSize}\n{lastWriteUtc.ToUniversalTime().Ticks}\n{requestedSize}";
+        var input = $"{normalized}\n{fileSize}\n{lastWriteUtc.ToUniversalTime().Ticks}\n{normalizedRequestedSize}";
         return Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(input))).ToLowerInvariant();
     }
 
     internal static ThumbnailRequest CaptureRequest(ProjectAsset asset, int requestedSize)
     {
         ArgumentNullException.ThrowIfNull(asset);
-        if (requestedSize is <= 0 or > MaximumRequestedSize)
-        {
-            throw new ArgumentOutOfRangeException(nameof(requestedSize));
-        }
+        var normalizedRequestedSize = NormalizeRequestedSize(requestedSize);
 
         lock (asset)
         {
-            var sourcePath = MediaImportService.NormalizePath(asset.SourcePath);
-            return new ThumbnailRequest(
-                asset.Id,
-                asset.Kind,
-                sourcePath,
-                asset.FileSize,
-                asset.LastWriteUtc.ToUniversalTime().Ticks,
-                requestedSize,
-                CreateCacheKey(sourcePath, asset.FileSize, asset.LastWriteUtc, requestedSize));
+            return CaptureRequestLocked(asset, normalizedRequestedSize);
         }
     }
+
+    private static async Task<ThumbnailRequest?> CaptureCurrentRequestAsync(
+        StorageFile file,
+        ProjectAsset asset,
+        int requestedSize,
+        CancellationToken cancellationToken)
+    {
+        var basic = await file.GetBasicPropertiesAsync().AsTask(cancellationToken);
+        cancellationToken.ThrowIfCancellationRequested();
+        var fileSize = basic.Size;
+        var lastWriteUtc = basic.DateModified.ToUniversalTime();
+
+        lock (asset)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            if (asset.Kind == ProjectAssetKind.Audio ||
+                asset.IsMissing ||
+                string.IsNullOrWhiteSpace(asset.SourcePath) ||
+                !string.Equals(
+                    MediaImportService.NormalizePath(asset.SourcePath),
+                    MediaImportService.NormalizePath(file.Path),
+                    StringComparison.OrdinalIgnoreCase))
+            {
+                return null;
+            }
+
+            if (asset.FileSize != fileSize ||
+                asset.LastWriteUtc.ToUniversalTime() != lastWriteUtc)
+            {
+                asset.FileSize = fileSize;
+                asset.LastWriteUtc = lastWriteUtc;
+                asset.ThumbnailCachePath = string.Empty;
+            }
+
+            return CaptureRequestLocked(asset, requestedSize);
+        }
+    }
+
+    private static async Task<bool> SourceStillMatchesRequestAsync(
+        StorageFile file,
+        ProjectAsset asset,
+        ThumbnailRequest request,
+        CancellationToken cancellationToken) =>
+        await CaptureCurrentRequestAsync(file, asset, request.RequestedSize, cancellationToken) is { } current &&
+        current == request;
+
+    private static ThumbnailRequest CaptureRequestLocked(ProjectAsset asset, int requestedSize)
+    {
+        var sourcePath = MediaImportService.NormalizePath(asset.SourcePath);
+        return new ThumbnailRequest(
+            asset.Id,
+            asset.Kind,
+            sourcePath,
+            asset.FileSize,
+            asset.LastWriteUtc.ToUniversalTime().Ticks,
+            requestedSize,
+            CreateCacheKey(sourcePath, asset.FileSize, asset.LastWriteUtc, requestedSize));
+    }
+
+    internal static int NormalizeRequestedSize(int requestedSize) =>
+        requestedSize <= 0
+            ? DefaultRequestedSize
+            : Math.Min(requestedSize, MaximumRequestedSize);
 
     internal static bool IsCurrentRequest(ProjectAsset asset, ThumbnailRequest request)
     {
@@ -162,17 +240,21 @@ public sealed class ThumbnailService
             MediaImportService.NormalizePath(storagePath),
             StringComparison.OrdinalIgnoreCase);
 
+    internal static bool IsCachePathForRequest(ThumbnailRequest request, string relativePath) =>
+        string.Equals(relativePath, CreateRelativeCachePath(request.CacheKey), StringComparison.Ordinal);
+
     internal bool TryCommitGeneratedThumbnail(
         ProjectAsset asset,
         ThumbnailRequest request,
         string temporaryPath,
-        string relativePath)
+        string relativePath,
+        CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(asset);
         if (!string.Equals(
                 relativePath,
                 CreateRelativeCachePath(request.CacheKey),
-                StringComparison.OrdinalIgnoreCase))
+                StringComparison.Ordinal))
         {
             throw new InvalidDataException("The thumbnail cache path does not match its request.");
         }
@@ -182,13 +264,15 @@ public sealed class ThumbnailService
 
         lock (asset)
         {
-            if (!IsCurrentRequestLocked(asset, request))
+            cancellationToken.ThrowIfCancellationRequested();
+            if (!IsCurrentRequestLocked(asset, request) || !SourceStillMatchesRequest(request))
             {
                 TryDeleteProjectOwnedFile(temporaryPath);
                 return false;
             }
 
             File.Move(temporaryPath, cachePath, overwrite: true);
+            cancellationToken.ThrowIfCancellationRequested();
             asset.ThumbnailCachePath = relativePath;
             return true;
         }
@@ -196,12 +280,25 @@ public sealed class ThumbnailService
 
     public static string CreateRelativeCachePath(string cacheKey)
     {
-        if (cacheKey.Length != 64 || cacheKey.Any(character => !Uri.IsHexDigit(character)))
+        ArgumentNullException.ThrowIfNull(cacheKey);
+        if (!IsLowercaseSha256(cacheKey))
         {
-            throw new ArgumentException("A SHA-256 cache key is required.", nameof(cacheKey));
+            throw new ArgumentException("A lowercase SHA-256 cache key is required.", nameof(cacheKey));
         }
 
-        return Path.Combine("cache", "thumbnails", $"{cacheKey.ToLowerInvariant()}.jpg");
+        return $"{RelativeCachePathPrefix}{cacheKey}{RelativeCachePathSuffix}";
+    }
+
+    internal static bool IsCanonicalRelativeCachePath(string relativePath)
+    {
+        if (relativePath.Length != RelativeCachePathPrefix.Length + 64 + RelativeCachePathSuffix.Length ||
+            !relativePath.StartsWith(RelativeCachePathPrefix, StringComparison.Ordinal) ||
+            !relativePath.EndsWith(RelativeCachePathSuffix, StringComparison.Ordinal))
+        {
+            return false;
+        }
+
+        return IsLowercaseSha256(relativePath.AsSpan(RelativeCachePathPrefix.Length, 64));
     }
 
     public static string ResolveProjectCachePath(string projectRootPath, string relativePath)
@@ -213,6 +310,11 @@ public sealed class ThumbnailService
             throw new InvalidDataException("Thumbnail cache paths must be project-relative.");
         }
 
+        if (!IsCanonicalRelativeCachePath(relativePath))
+        {
+            throw new InvalidDataException("The thumbnail cache path is not in the canonical format.");
+        }
+
         var root = Path.GetFullPath(projectRootPath);
         var resolved = Path.GetFullPath(Path.Combine(root, relativePath));
         var thumbnailsRoot = Path.GetFullPath(Path.Combine(root, "cache", "thumbnails"));
@@ -221,7 +323,77 @@ public sealed class ThumbnailService
             throw new InvalidDataException("The thumbnail cache path is outside the project thumbnail cache.");
         }
 
+        ProjectService.RejectReparsePoints(resolved);
         return resolved;
+    }
+
+    private static bool IsLowercaseSha256(ReadOnlySpan<char> value)
+    {
+        if (value.Length != 64)
+        {
+            return false;
+        }
+
+        foreach (var character in value)
+        {
+            if (character is not (>= '0' and <= '9') and not (>= 'a' and <= 'f'))
+            {
+                return false;
+            }
+        }
+
+        return true;
+    }
+
+    internal static async Task<bool> IsUsableCachedThumbnailAsync(
+        string path,
+        CancellationToken cancellationToken)
+    {
+        if (!File.Exists(path))
+        {
+            return false;
+        }
+
+        try
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            await using var fileStream = new FileStream(
+                path,
+                FileMode.Open,
+                FileAccess.Read,
+                FileShare.Read | FileShare.Delete);
+            if (fileStream.Length is <= 0 or > MaximumCachedThumbnailBytes)
+            {
+                return false;
+            }
+
+            using IRandomAccessStream randomAccess = fileStream.AsRandomAccessStream();
+            var decoder = await BitmapDecoder.CreateAsync(BitmapDecoder.JpegDecoderId, randomAccess).AsTask(cancellationToken);
+            var stride = checked((long)decoder.PixelWidth * 4);
+            var decodedBytes = checked(stride * decoder.PixelHeight);
+            if (decoder.PixelWidth == 0 || decoder.PixelHeight == 0 || decodedBytes > MaximumCachedThumbnailBytes)
+            {
+                return false;
+            }
+
+            var pixels = await decoder.GetPixelDataAsync(
+                    BitmapPixelFormat.Bgra8,
+                    BitmapAlphaMode.Ignore,
+                    new BitmapTransform(),
+                    ExifOrientationMode.RespectExifOrientation,
+                    ColorManagementMode.ColorManageToSRgb)
+                .AsTask(cancellationToken);
+            _ = pixels.DetachPixelData();
+            return true;
+        }
+        catch (OperationCanceledException)
+        {
+            throw;
+        }
+        catch (Exception exception) when (MediaImportService.IsExpectedMediaFailure(exception))
+        {
+            return false;
+        }
     }
 
     public static async Task CopyBoundedAsync(
@@ -235,6 +407,15 @@ public sealed class ThumbnailService
         if (maximumBytes <= 0)
         {
             throw new ArgumentOutOfRangeException(nameof(maximumBytes));
+        }
+
+        if (source.CanSeek)
+        {
+            var remaining = checked(source.Length - source.Position);
+            if (remaining < 0 || remaining > maximumBytes)
+            {
+                throw new InvalidDataException("The generated thumbnail exceeded the cache size limit.");
+            }
         }
 
         var buffer = new byte[16 * 1024];
@@ -259,39 +440,56 @@ public sealed class ThumbnailService
 
     private static async Task<InMemoryRandomAccessStream> EncodeJpegAsync(
         IRandomAccessStream source,
+        int requestedSize,
         CancellationToken cancellationToken)
     {
+        var normalizedRequestedSize = NormalizeRequestedSize(requestedSize);
+        if (source.Size is 0 or > MaximumCachedThumbnailBytes)
+        {
+            throw new InvalidDataException("The generated thumbnail exceeded the cache size limit.");
+        }
+
         source.Seek(0);
-        var decoder = await BitmapDecoder.CreateAsync(source);
-        cancellationToken.ThrowIfCancellationRequested();
-        var decodedBytes = checked((long)decoder.PixelWidth * decoder.PixelHeight * 4);
+        var decoder = await BitmapDecoder.CreateAsync(source).AsTask(cancellationToken);
+        var decodedWidth = decoder.OrientedPixelWidth;
+        var decodedHeight = decoder.OrientedPixelHeight;
+        var maximumDimension = checked((uint)normalizedRequestedSize);
+        if (decodedWidth == 0 ||
+            decodedHeight == 0 ||
+            decodedWidth > maximumDimension ||
+            decodedHeight > maximumDimension)
+        {
+            throw new InvalidDataException("The generated thumbnail dimensions exceeded the requested size.");
+        }
+
+        var stride = checked((long)decodedWidth * 4);
+        var decodedBytes = checked(stride * decodedHeight);
         if (decodedBytes > MaximumCachedThumbnailBytes)
         {
             throw new InvalidDataException("The generated thumbnail exceeded the cache size limit.");
         }
 
         var pixelData = await decoder.GetPixelDataAsync(
-            BitmapPixelFormat.Bgra8,
-            BitmapAlphaMode.Ignore,
-            new BitmapTransform(),
-            ExifOrientationMode.RespectExifOrientation,
-            ColorManagementMode.ColorManageToSRgb);
-        cancellationToken.ThrowIfCancellationRequested();
+                BitmapPixelFormat.Bgra8,
+                BitmapAlphaMode.Ignore,
+                new BitmapTransform(),
+                ExifOrientationMode.RespectExifOrientation,
+                ColorManagementMode.ColorManageToSRgb)
+            .AsTask(cancellationToken);
 
         var destination = new InMemoryRandomAccessStream();
         try
         {
-            var encoder = await BitmapEncoder.CreateAsync(BitmapEncoder.JpegEncoderId, destination);
+            var encoder = await BitmapEncoder.CreateAsync(BitmapEncoder.JpegEncoderId, destination).AsTask(cancellationToken);
             encoder.SetPixelData(
                 BitmapPixelFormat.Bgra8,
                 BitmapAlphaMode.Ignore,
-                decoder.OrientedPixelWidth,
-                decoder.OrientedPixelHeight,
+                decodedWidth,
+                decodedHeight,
                 decoder.DpiX > 0 ? decoder.DpiX : 96,
                 decoder.DpiY > 0 ? decoder.DpiY : 96,
                 pixelData.DetachPixelData());
-            await encoder.FlushAsync();
-            cancellationToken.ThrowIfCancellationRequested();
+            await encoder.FlushAsync().AsTask(cancellationToken);
             if (destination.Size > MaximumCachedThumbnailBytes)
             {
                 throw new InvalidDataException("The generated thumbnail exceeded the cache size limit.");
@@ -318,11 +516,33 @@ public sealed class ThumbnailService
         asset.FileSize == request.FileSize &&
         asset.LastWriteUtc.ToUniversalTime().Ticks == request.LastWriteUtcTicks;
 
-    private static bool TryCommitCacheHit(ProjectAsset asset, ThumbnailRequest request, string relativePath)
+    private static bool SourceStillMatchesRequest(ThumbnailRequest request)
+    {
+        try
+        {
+            var file = new FileInfo(request.SourcePath);
+            return file.Exists &&
+                   checked((ulong)file.Length) == request.FileSize &&
+                   new DateTimeOffset(file.LastWriteTimeUtc).ToUniversalTime().Ticks == request.LastWriteUtcTicks;
+        }
+        catch (Exception exception) when (exception is IOException or UnauthorizedAccessException or
+                                              ArgumentException or NotSupportedException or PathTooLongException or
+                                              OverflowException or System.Security.SecurityException)
+        {
+            return false;
+        }
+    }
+
+    internal static bool TryCommitCacheHit(
+        ProjectAsset asset,
+        ThumbnailRequest request,
+        string relativePath,
+        CancellationToken cancellationToken)
     {
         lock (asset)
         {
-            if (!IsCurrentRequestLocked(asset, request))
+            cancellationToken.ThrowIfCancellationRequested();
+            if (!IsCurrentRequestLocked(asset, request) || !SourceStillMatchesRequest(request))
             {
                 return false;
             }
@@ -341,6 +561,8 @@ public sealed class ThumbnailService
         {
             throw new InvalidDataException("The temporary thumbnail path is outside the project thumbnail cache.");
         }
+
+        ProjectService.RejectReparsePoints(resolved);
     }
 
     private void TryDeleteProjectOwnedFile(string path)

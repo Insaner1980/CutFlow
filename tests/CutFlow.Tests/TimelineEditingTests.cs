@@ -1,5 +1,6 @@
 using CutFlow.Models;
 using CutFlow.Services;
+using CutFlow.Utilities;
 using Microsoft.VisualStudio.TestTools.UnitTesting;
 
 namespace CutFlow.Tests;
@@ -65,7 +66,7 @@ public sealed class TimelineEditingTests
         Assert.AreNotEqual(project.VideoItems[1].Id, project.VideoItems[2].Id);
     }
 
-    [DataTestMethod]
+    [TestMethod]
     [DataRow(0L)]
     [DataRow(4_000L)]
     [DataRow(3_950L)]
@@ -114,6 +115,23 @@ public sealed class TimelineEditingTests
     }
 
     [TestMethod]
+    public void TrimVideoEnd_CurrentAssetEndRepairsDurationAndRipplesLaterItems()
+    {
+        var project = TestProjects.WithVideo(5_000, 1_000);
+        var item = project.VideoItems[0];
+        item.SourceInMilliseconds = 500;
+        item.DurationMilliseconds = 1_000;
+
+        var changed = TimelineEditingService.TrimVideoEnd(project, item.Id, 5_000);
+
+        Assert.IsTrue(changed);
+        Assert.AreEqual(500L, item.SourceInMilliseconds);
+        Assert.AreEqual(5_000L, item.SourceOutMilliseconds);
+        Assert.AreEqual(4_500L, item.DurationMilliseconds);
+        Assert.AreEqual(4_500L, TimelineLayoutProjection.GetVideoBounds(project)[1].StartMilliseconds);
+    }
+
+    [TestMethod]
     public void MoveAudioItem_ClampsNegativeStartToZero()
     {
         var project = new ProjectDocument();
@@ -153,7 +171,7 @@ public sealed class TimelineEditingTests
         Assert.IsFalse(TimelineEditingService.DeleteSelection(project, EditorSelection.None));
     }
 
-    [DataTestMethod]
+    [TestMethod]
     [DataRow(EditorSelectionKind.VideoItem)]
     [DataRow(EditorSelectionKind.AudioItem)]
     [DataRow(EditorSelectionKind.TextItem)]
@@ -170,6 +188,45 @@ public sealed class TimelineEditingTests
         Assert.AreNotEqual(selection.ItemId, duplicatedSelection.ItemId);
         Assert.AreEqual(2, TestProjects.CountItems(project, kind));
         Assert.IsFalse(TimelineEditingService.DuplicateSelection(project, EditorSelection.None, out _));
+    }
+
+    [TestMethod]
+    public void DuplicateSelection_AudioStartsAtSourceEndPreservesFieldsAndAllowsOverlap()
+    {
+        var project = new ProjectDocument();
+        var source = new AudioTimelineItem
+        {
+            Id = Guid.NewGuid(),
+            AssetId = Guid.NewGuid(),
+            StartMilliseconds = 2_000,
+            SourceInMilliseconds = 500,
+            SourceOutMilliseconds = 2_000,
+            Volume = 0.35,
+            FadeInMilliseconds = 125,
+            FadeOutMilliseconds = 250,
+            IsMuted = true
+        };
+        project.AudioItems.AddRange(
+        [
+            source,
+            TestProjects.Audio(startMilliseconds: 3_000, sourceOutMilliseconds: 2_000)
+        ]);
+
+        Assert.IsTrue(TimelineEditingService.DuplicateSelection(
+            project,
+            new EditorSelection(EditorSelectionKind.AudioItem, source.Id),
+            out var duplicatedSelection));
+
+        var duplicate = project.AudioItems.Single(item => item.Id == duplicatedSelection.ItemId);
+        Assert.AreNotEqual(source.Id, duplicate.Id);
+        Assert.AreEqual(3_500L, duplicate.StartMilliseconds);
+        Assert.AreEqual(source.AssetId, duplicate.AssetId);
+        Assert.AreEqual(source.SourceInMilliseconds, duplicate.SourceInMilliseconds);
+        Assert.AreEqual(source.SourceOutMilliseconds, duplicate.SourceOutMilliseconds);
+        Assert.AreEqual(source.Volume, duplicate.Volume);
+        Assert.AreEqual(source.IsMuted, duplicate.IsMuted);
+        Assert.AreEqual(source.FadeInMilliseconds, duplicate.FadeInMilliseconds);
+        Assert.AreEqual(source.FadeOutMilliseconds, duplicate.FadeOutMilliseconds);
     }
 
     [TestMethod]

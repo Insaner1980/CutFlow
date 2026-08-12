@@ -12,7 +12,7 @@ namespace CutFlow.Tests;
 [TestClass]
 public sealed class Task10TextTests
 {
-    [DataTestMethod]
+    [TestMethod]
     [DataRow(TextPreset.Default, "Text", 64d, 0.5d, 0.5d)]
     [DataRow(TextPreset.Title, "Title", 96d, 0.5d, 0.22d)]
     [DataRow(TextPreset.Subtitle, "Subtitle", 52d, 0.5d, 0.78d)]
@@ -85,6 +85,66 @@ public sealed class Task10TextTests
     }
 
     [TestMethod]
+    public async Task LoadAsync_NormalizesTextCoordinateJsonNumberEdges()
+    {
+        using var directory = new TemporaryDirectory();
+        var id = Guid.NewGuid();
+        var projectDirectory = Directory.CreateDirectory(Path.Combine(directory.Path, "Projects", id.ToString("D")));
+        await File.WriteAllTextAsync(Path.Combine(projectDirectory.FullName, "project.json"), $$"""
+            {
+              "schemaVersion": 1,
+              "id": "{{id}}",
+              "textItems": [
+                { "id": "{{Guid.NewGuid()}}", "normalizedX": -0, "normalizedY": -1 },
+                { "id": "{{Guid.NewGuid()}}", "normalizedX": 2, "normalizedY": 1e309 },
+                { "id": "{{Guid.NewGuid()}}", "normalizedX": -1e309, "normalizedY": 1e-999 }
+              ]
+            }
+            """);
+
+        var items = (await new Services.ProjectService(directory.Path).LoadAsync(id)).TextItems;
+
+        Assert.AreEqual(0L, BitConverter.DoubleToInt64Bits(items[0].NormalizedX));
+        Assert.AreEqual(0d, items[0].NormalizedY);
+        Assert.AreEqual(1d, items[1].NormalizedX);
+        Assert.AreEqual(0.5d, items[1].NormalizedY);
+        Assert.AreEqual(0.5d, items[2].NormalizedX);
+        Assert.AreEqual(0d, items[2].NormalizedY);
+    }
+
+    [TestMethod]
+    public async Task LoadAsync_NormalizesValidArgbColorCasingConsistently()
+    {
+        using var directory = new TemporaryDirectory();
+        var id = Guid.NewGuid();
+        var textId = Guid.NewGuid();
+        var projectDirectory = Directory.CreateDirectory(Path.Combine(directory.Path, "Projects", id.ToString("D")));
+        await File.WriteAllTextAsync(Path.Combine(projectDirectory.FullName, "project.json"), $$"""
+            {
+              "schemaVersion": 1,
+              "id": "{{id}}",
+              "name": "Color casing",
+              "settings": { "backgroundColor": "#FfaBcDeF" },
+              "textItems": [
+                {
+                  "id": "{{textId}}",
+                  "durationMilliseconds": 3000,
+                  "textColor": "#7faabbcc",
+                  "backgroundColor": "#00ddeeff"
+                }
+              ]
+            }
+            """);
+
+        var loaded = await new Services.ProjectService(directory.Path).LoadAsync(id);
+        var item = loaded.TextItems.Single();
+
+        Assert.AreEqual("#FFABCDEF", loaded.Settings.BackgroundColor);
+        Assert.AreEqual("#7FAABBCC", item.TextColor);
+        Assert.AreEqual("#00DDEEFF", item.BackgroundColor);
+    }
+
+    [TestMethod]
     public void SetTextPosition_ClampsCommitsOneUndoAndNoOpCreatesNoHistory()
     {
         var project = ProjectDocument.CreateNew("Drag", DateTimeOffset.UnixEpoch);
@@ -109,10 +169,18 @@ public sealed class Task10TextTests
         var project = ProjectDocument.CreateNew("Duplicate", DateTimeOffset.UnixEpoch);
         var source = new TextTimelineItem
         {
-            Id = Guid.NewGuid(), Text = "Styled", StartMilliseconds = 200, DurationMilliseconds = 1_500,
-            FontFamily = "Arial", FontSize = 73, FontWeight = 700, TextColor = "#FFABCDEF",
-            BackgroundColor = "#80443322", Alignment = TextHorizontalAlignment.Left,
-            NormalizedX = 0.2, NormalizedY = 0.7
+            Id = Guid.NewGuid(),
+            Text = "Styled",
+            StartMilliseconds = 200,
+            DurationMilliseconds = 1_500,
+            FontFamily = "Arial",
+            FontSize = 73,
+            FontWeight = 700,
+            TextColor = "#FFABCDEF",
+            BackgroundColor = "#80443322",
+            Alignment = TextHorizontalAlignment.Left,
+            NormalizedX = 0.2,
+            NormalizedY = 0.7
         };
         project.TextItems.Add(source);
 
@@ -163,6 +231,41 @@ public sealed class Task10TextTests
         Assert.AreEqual(
             Path.Combine(directory.Path, "cache", "text-overlays", Services.TextOverlayRenderer.GetCacheFileName(project, item)),
             path);
+    }
+
+    [TestMethod]
+    public async Task TextOverlayCache_LinkedDirectoryRejectsWithoutOverwritingTarget()
+    {
+        using var directory = new TemporaryDirectory();
+        var projectRoot = Directory.CreateDirectory(Path.Combine(directory.Path, "project"));
+        var cacheRoot = Directory.CreateDirectory(Path.Combine(projectRoot.FullName, "cache"));
+        var externalDirectory = Directory.CreateDirectory(Path.Combine(directory.Path, "external"));
+        Directory.CreateSymbolicLink(
+            Path.Combine(cacheRoot.FullName, "text-overlays"),
+            externalDirectory.FullName);
+        var project = ProjectDocument.CreateNew("Linked text cache", DateTimeOffset.UnixEpoch);
+        project.Settings.Width = 1;
+        project.Settings.Height = 1;
+        var item = new TextTimelineItem { Id = Guid.NewGuid(), Text = "Linked" };
+        var externalPath = Path.Combine(
+            externalDirectory.FullName,
+            Services.TextOverlayRenderer.GetCacheFileName(project, item));
+        await File.WriteAllTextAsync(externalPath, "preserve external overlay");
+        var renderCalled = false;
+        var renderer = new Services.TextOverlayRenderer(projectRoot.FullName);
+
+        await Assert.ThrowsExactlyAsync<InvalidDataException>(() => renderer.GetOrRenderAsync(
+            project,
+            item,
+            async (path, cancellationToken) =>
+            {
+                renderCalled = true;
+                await WriteTransparentPngAsync(path, 1, 1, cancellationToken);
+            },
+            CancellationToken.None));
+
+        Assert.IsFalse(renderCalled);
+        Assert.AreEqual("preserve external overlay", await File.ReadAllTextAsync(externalPath));
     }
 
     [TestMethod]
@@ -232,7 +335,7 @@ public sealed class Task10TextTests
         Assert.AreEqual(0, renderCount);
     }
 
-    [DataTestMethod]
+    [TestMethod]
     [DataRow(PngCorruption.TruncatedIdat)]
     [DataRow(PngCorruption.IhdrCrc)]
     [DataRow(PngCorruption.IdatCrc)]
@@ -458,7 +561,7 @@ public sealed class Task10TextTests
         Assert.AreEqual(128, decoded[7]);
     }
 
-    [DataTestMethod]
+    [TestMethod]
     [DataRow("TextContent", VirtualKey.Enter, false, false)]
     [DataRow("TextContent", VirtualKey.Enter, true, true)]
     [DataRow("TextDuration", VirtualKey.Enter, false, true)]

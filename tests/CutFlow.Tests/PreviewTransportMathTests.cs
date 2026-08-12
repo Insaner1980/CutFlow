@@ -6,7 +6,7 @@ namespace CutFlow.Tests;
 [TestClass]
 public sealed class PreviewTransportMathTests
 {
-    [DataTestMethod]
+    [TestMethod]
     [DataRow(1_000L, 5_000L, false, 967L)]
     [DataRow(1_000L, 5_000L, true, 1_033L)]
     [DataRow(0L, 5_000L, false, 0L)]
@@ -37,7 +37,7 @@ public sealed class PreviewTransportMathTests
         Assert.AreEqual(1_000, position);
     }
 
-    [DataTestMethod]
+    [TestMethod]
     [DataRow(1_000d, 500d, 1_920d, 1_080d, 888.8889d, 500d)]
     [DataRow(400d, 900d, 1_080d, 1_920d, 400d, 711.1111d)]
     [DataRow(600d, 600d, 1_080d, 1_080d, 600d, 600d)]

@@ -67,6 +67,14 @@ public sealed class CompositionPlan
                 continue;
             }
 
+            if (asset.Kind is not (ProjectAssetKind.Video or ProjectAssetKind.Image))
+            {
+                errors.Add($"'{AssetName(asset)}' has an unsupported visual kind and was replaced with black video.");
+                visuals.Add(CompositionVisualPlan.Filler(item.Id, item.DurationMilliseconds, AssetName(asset)));
+                visualDuration = TimelineMath.SaturatingAdd(visualDuration, item.DurationMilliseconds);
+                continue;
+            }
+
             if (asset.IsMissing)
             {
                 errors.Add($"'{AssetName(asset)}' is missing and was replaced with black video.");

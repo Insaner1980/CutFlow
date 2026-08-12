@@ -127,6 +127,7 @@ public sealed partial class EditorView
 
     public async Task<bool> PrepareToCloseAsync()
     {
+        CommitProjectName();
         _exportState.BeginClosing();
         _exportCts?.Cancel();
         if (_activeExportTask is { } operation)

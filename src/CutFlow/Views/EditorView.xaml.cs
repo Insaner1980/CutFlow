@@ -1,4 +1,5 @@
 using System.Diagnostics;
+using System.Runtime.InteropServices;
 using CutFlow.Controls;
 using CutFlow.Models;
 using CutFlow.Services;
@@ -39,6 +40,7 @@ public sealed partial class EditorView : UserControl, IDisposable
     private uint _timelineResizePointerId;
     private double _timelineResizeStartY;
     private double _timelineResizeStartHeight;
+    private bool _projectSaveFailureInfoBarIsCurrent;
     private bool _disposed;
 
     public EditorView(
@@ -60,6 +62,8 @@ public sealed partial class EditorView : UserControl, IDisposable
         _autosave = new DebouncedSaveCoordinator(() => _projectService.SaveAsync(ViewModel.Project));
         _autosave.StateChanged += Autosave_StateChanged;
         InitializeComponent();
+        ProjectNameBox.MaxLength = ProjectDocument.MaximumNameLength;
+        Timeline.SetLifetimeToken(_lifetimeToken);
         _textOverlayRenderer = new TextOverlayRenderer(_projectRootPath, Preview.RenderHost);
         _toolButtons = new Dictionary<EditorTool, Button>
         {
@@ -111,24 +115,36 @@ public sealed partial class EditorView : UserControl, IDisposable
 
     public void SetTimelineHeight(double height) => SetTimelineHeight(height, notify: true);
 
-    public async Task ImportFilesAsync(IReadOnlyList<StorageFile> files)
+    public Task ImportFilesAsync(IReadOnlyList<StorageFile> files) =>
+        ImportFilesAsync(files, new ImportResult?[files.Count]);
+
+    private async Task ImportFilesAsync(
+        IReadOnlyList<StorageFile> files,
+        IReadOnlyList<ImportResult?> resultSlots)
     {
         EnsureActive();
         if (files.Count == 0)
         {
+            var rejected = resultSlots.OfType<ImportResult>().ToList();
+            if (rejected.Count > 0)
+            {
+                CommitImportResults(rejected);
+            }
+
             return;
         }
 
         await _importGate.ExecuteAsync(
             cancellationToken => _mediaImportService.ImportAsync(files, ViewModel.Project, _projectsRootPath, cancellationToken),
-            CommitImportResults,
+            results => CommitImportResults(MediaImportService.MergeImportResults(resultSlots, results)),
             _lifetimeToken);
     }
 
     private async Task ImportFilesToTimelineAsync(
         IReadOnlyList<StorageFile> files,
         TimelineTrackKind track,
-        long positionMilliseconds)
+        long positionMilliseconds,
+        IReadOnlyList<string> preflightRejections)
     {
         EnsureActive();
         if (files.Count == 0)
@@ -146,10 +162,16 @@ public sealed partial class EditorView : UserControl, IDisposable
         }
 
         var accepted = new List<StorageFile>(files.Count);
-        var rejected = new List<string>();
+        var rejected = new List<string>(preflightRejections);
         foreach (var file in files)
         {
-            if (!MediaImportService.TryGetKind(file.Path, out var kind))
+            if (!MediaImportService.TryResolveLocalSourcePath(file.Path, out var normalizedPath, out var pathError))
+            {
+                rejected.Add($"'{file.Name}': {pathError}");
+                continue;
+            }
+
+            if (!MediaImportService.TryGetKind(normalizedPath, out var kind))
             {
                 rejected.Add($"'{file.Name}' is not a supported media file.");
                 continue;
@@ -188,22 +210,21 @@ public sealed partial class EditorView : UserControl, IDisposable
         IReadOnlyList<string> rejected)
     {
         EnsureActive();
+        results = MediaImportService.RevalidateDuplicateResults(ViewModel.Project, results);
         var imported = results
             .Where(result => result.Asset is not null)
             .Select(result => result.Asset!)
             .ToList();
-        if (imported.Count > 0)
-        {
-            ViewModel.AddImportedAssets(imported);
-        }
 
         var issues = new List<string>(rejected);
-        var added = 0;
+        var candidates = new List<ProjectAsset>();
         for (var index = 0; index < results.Count; index++)
         {
             var result = results[index];
             var asset = result.Asset ??
-                (result.IsDuplicate && index < files.Count ? FindAssetBySourcePath(files[index].Path) : null);
+                (result.IsDuplicate && index < files.Count
+                    ? FindAssetBySourcePath(files[index].Path, imported)
+                    : null);
             if (asset is null)
             {
                 if (!result.IsDuplicate)
@@ -218,13 +239,36 @@ public sealed partial class EditorView : UserControl, IDisposable
                 continue;
             }
 
-            if (TryAddAssetToTrack(asset, track, positionMilliseconds, out var error))
+            var decision = TimelineDropPolicy.Evaluate(track, asset.Kind, Timeline.IsTrackLocked(track));
+            if (!decision.IsAllowed)
             {
-                added++;
+                issues.Add(decision.Failure == TimelineDropFailure.LockedTrack
+                    ? $"{TimelineDropPolicy.DisplayName(track)} is locked. Unlock the track before adding media."
+                    : IncompatibleDropMessage(asset.FileName, asset.Kind, track));
+                continue;
             }
-            else
+
+            candidates.Add(asset);
+        }
+
+        if (track == TimelineTrackKind.Audio)
+        {
+            Preview.Seek(positionMilliseconds);
+            ViewModel.Seek(positionMilliseconds);
+        }
+
+        var additions = ViewModel.AddImportedAssetsToTimeline(
+            imported,
+            candidates.Select(asset => asset.Id).ToList());
+        var added = additions.Count(wasAdded => wasAdded);
+        for (var index = 0; index < additions.Count; index++)
+        {
+            if (!additions[index])
             {
-                issues.Add(error!);
+                var asset = candidates[index];
+                issues.Add(asset.IsMissing
+                    ? $"'{asset.FileName}' is missing. Relink it before adding it."
+                    : $"'{asset.FileName}' is too short or invalid.");
             }
         }
 
@@ -281,12 +325,12 @@ public sealed partial class EditorView : UserControl, IDisposable
         return true;
     }
 
-    private ProjectAsset? FindAssetBySourcePath(string path)
+    private ProjectAsset? FindAssetBySourcePath(string path, IEnumerable<ProjectAsset>? additionalAssets = null)
     {
         try
         {
             var normalized = MediaImportService.NormalizePath(path);
-            return ViewModel.Project.Assets.FirstOrDefault(asset =>
+            return ViewModel.Project.Assets.Concat(additionalAssets ?? []).FirstOrDefault(asset =>
                 !string.IsNullOrWhiteSpace(asset.SourcePath) &&
                 string.Equals(
                     MediaImportService.NormalizePath(asset.SourcePath),
@@ -324,7 +368,7 @@ public sealed partial class EditorView : UserControl, IDisposable
         }
         catch (Exception exception) when (exception is IOException or UnauthorizedAccessException or InvalidDataException)
         {
-            ReportError("Could not save project", "Your latest edit could not be saved. Try again before closing the editor.");
+            ShowProjectSaveFailure("Your latest edit could not be saved. Try again before closing the editor.");
             _ = _logService.TryWriteAsync($"Project save failed: {exception.GetType().Name}");
             return false;
         }
@@ -378,11 +422,6 @@ public sealed partial class EditorView : UserControl, IDisposable
         _disposed = true;
         _exportState.BeginClosing();
         _autosave.StateChanged -= Autosave_StateChanged;
-        _autosave.Dispose();
-        _lifetimeCts.Cancel();
-        _previewRebuildGate.Dispose();
-        Preview.Dispose();
-        _lifetimeCts.Dispose();
         ViewModel.PropertyChanged -= ViewModel_PropertyChanged;
         ViewModel.EditCommitted -= ViewModel_EditCommitted;
         ViewModel.SelectionChanged -= ViewModel_SelectionChanged;
@@ -396,6 +435,26 @@ public sealed partial class EditorView : UserControl, IDisposable
         Preview.TextPositionCommitted -= Preview_TextPositionCommitted;
         Preview.LoopChanged -= Preview_LoopChanged;
         Timeline.ZoomChanged -= Timeline_ZoomChanged;
+        CleanupEditorResource(_autosave.Dispose, "autosave coordinator");
+        CleanupEditorResource(_lifetimeCts.Cancel, "editor lifetime cancellation");
+        CleanupEditorResource(_previewRebuildGate.Dispose, "preview rebuild cancellation");
+        CleanupEditorResource(ToolPanel.Dispose, "thumbnail work");
+        CleanupEditorResource(Timeline.StopThumbnailWork, "timeline thumbnail work");
+        _textOverlayRenderer.RenderHost = null;
+        CleanupEditorResource(Preview.Dispose, "native preview resources");
+        CleanupEditorResource(_lifetimeCts.Dispose, "editor lifetime token");
+    }
+
+    private void CleanupEditorResource(Action cleanup, string resource)
+    {
+        try
+        {
+            cleanup();
+        }
+        catch (Exception exception) when (exception is AggregateException or COMException or InvalidOperationException or ObjectDisposedException)
+        {
+            _ = _logService.TryWriteAsync($"Editor {resource} cleanup failed: {exception.GetType().Name}");
+        }
     }
 
     private void ViewModel_PropertyChanged(object? sender, System.ComponentModel.PropertyChangedEventArgs e)
@@ -439,13 +498,14 @@ public sealed partial class EditorView : UserControl, IDisposable
             {
                 case DebouncedSaveState.Saved:
                     ViewModel.MarkSaved();
+                    ClearProjectSaveFailure();
                     break;
                 case DebouncedSaveState.Saving:
                     ViewModel.MarkSaving();
                     break;
                 case DebouncedSaveState.SaveFailed:
                     ViewModel.MarkSaveFailed();
-                    ReportError("Could not save project", "Autosave failed. Try Ctrl+S before closing the editor.");
+                    ShowProjectSaveFailure("Autosave failed. Try Ctrl+S before closing the editor.");
                     _ = _logService.TryWriteAsync("Project autosave failed.");
                     break;
             }
@@ -532,7 +592,7 @@ public sealed partial class EditorView : UserControl, IDisposable
         catch (OperationCanceledException)
         {
         }
-        catch (Exception exception) when (exception is IOException or UnauthorizedAccessException or InvalidOperationException or ArgumentException or System.Runtime.InteropServices.COMException)
+        catch (Exception exception) when (MediaImportService.IsExpectedMediaFailure(exception) || exception is InvalidOperationException)
         {
             if (!_disposed && lease?.IsCurrent == true)
             {
@@ -548,17 +608,17 @@ public sealed partial class EditorView : UserControl, IDisposable
     private void EditorView_SizeChanged(object sender, SizeChangedEventArgs e)
     {
         var narrow = e.NewSize.Width <= InspectorCollapseWidth;
-        if (narrow == _isNarrow && ActualWidth > 0)
+        if (narrow != _isNarrow || ActualWidth <= 0)
         {
-            return;
+            _isNarrow = narrow;
+            InspectorOverlay.Visibility = Visibility.Collapsed;
+            InspectorColumn.Width = new GridLength(!_isNarrow && _wideInspectorVisible ? 324 : 0);
+            InspectorSeparatorColumn.Width = new GridLength(!_isNarrow && _wideInspectorVisible ? 1 : 0);
+            DesktopInspector.Visibility = !_isNarrow && _wideInspectorVisible ? Visibility.Visible : Visibility.Collapsed;
+            InspectorSeparator.Visibility = DesktopInspector.Visibility;
         }
 
-        _isNarrow = narrow;
-        InspectorOverlay.Visibility = Visibility.Collapsed;
-        InspectorColumn.Width = new GridLength(!_isNarrow && _wideInspectorVisible ? 324 : 0);
-        InspectorSeparatorColumn.Width = new GridLength(!_isNarrow && _wideInspectorVisible ? 1 : 0);
-        DesktopInspector.Visibility = !_isNarrow && _wideInspectorVisible ? Visibility.Visible : Visibility.Collapsed;
-        InspectorSeparator.Visibility = DesktopInspector.Visibility;
+        SetTimelineHeight(_workspaceSettings.TimelineHeight, notify: false);
     }
 
     private void InspectorToggle_Click(object sender, RoutedEventArgs e)
@@ -717,7 +777,7 @@ public sealed partial class EditorView : UserControl, IDisposable
     {
         try
         {
-            await ImportFilesToTimelineAsync(e.Files, e.Track, e.PositionMilliseconds);
+            await ImportFilesToTimelineAsync(e.Files, e.Track, e.PositionMilliseconds, e.RejectedItems);
         }
         catch (OperationCanceledException)
         {
@@ -729,6 +789,12 @@ public sealed partial class EditorView : UserControl, IDisposable
 
     private void Timeline_EditRequested(object sender, TimelineEditRequestedEventArgs e)
     {
+        if (e is { Kind: TimelineEditKind.Duplicate, ItemId: Guid duplicateItemId })
+        {
+            ViewModel.DuplicateTimelineItem(duplicateItemId);
+            return;
+        }
+
         if (e.ItemId is Guid itemId)
         {
             SelectTimelineItem(itemId);
@@ -837,14 +903,13 @@ public sealed partial class EditorView : UserControl, IDisposable
 
     private void SetTimelineHeight(double height, bool notify)
     {
-        var normalized = AppSettings.Normalize(new AppSettings { TimelineHeight = height }).TimelineHeight;
-        if (Math.Abs(TimelineRow.Height.Value - normalized) < 0.01)
+        var normalized = AppSettings.NormalizeTimelineHeightForWindow(height, EditorRoot.ActualHeight);
+        if (Math.Abs(TimelineRow.Height.Value - normalized) >= 0.01)
         {
-            return;
+            TimelineRow.Height = new GridLength(normalized);
         }
 
-        TimelineRow.Height = new GridLength(normalized);
-        if (notify)
+        if (notify && Math.Abs(_workspaceSettings.TimelineHeight - normalized) >= 0.01)
         {
             _workspaceSettings.TimelineHeight = normalized;
             RaiseWorkspaceSettingsChanged();
@@ -854,7 +919,7 @@ public sealed partial class EditorView : UserControl, IDisposable
     private void RaiseWorkspaceSettingsChanged() =>
         WorkspaceSettingsChanged?.Invoke(this, new WorkspaceSettingsChangedEventArgs(
             Timeline.Zoom,
-            TimelineHeight,
+            _workspaceSettings.TimelineHeight,
             Preview.IsLooping,
             _workspaceSettings.LastExportFolder));
 
@@ -878,7 +943,9 @@ public sealed partial class EditorView : UserControl, IDisposable
             return;
         }
 
-        SetTimelineHeight(_timelineResizeStartHeight - (e.GetCurrentPoint(EditorRoot).Position.Y - _timelineResizeStartY));
+        SetTimelineHeight(
+            _timelineResizeStartHeight - (e.GetCurrentPoint(EditorRoot).Position.Y - _timelineResizeStartY),
+            notify: false);
         e.Handled = true;
     }
 
@@ -889,16 +956,50 @@ public sealed partial class EditorView : UserControl, IDisposable
             return;
         }
 
+        _timelineResizePointerId = 0;
         if (sender is UIElement handle)
         {
             handle.ReleasePointerCapture(e.Pointer);
         }
 
-        _timelineResizePointerId = 0;
+        SetTimelineHeight(TimelineHeight, notify: true);
         e.Handled = true;
     }
 
-    private void TimelineResizeHandle_PointerCaptureLost(object sender, PointerRoutedEventArgs e) => _timelineResizePointerId = 0;
+    private void TimelineResizeHandle_PointerCanceled(object sender, PointerRoutedEventArgs e)
+    {
+        if (!CancelTimelineResize(e))
+        {
+            return;
+        }
+
+        if (sender is UIElement handle)
+        {
+            handle.ReleasePointerCapture(e.Pointer);
+        }
+
+        e.Handled = true;
+    }
+
+    private void TimelineResizeHandle_PointerCaptureLost(object sender, PointerRoutedEventArgs e)
+    {
+        if (CancelTimelineResize(e))
+        {
+            e.Handled = true;
+        }
+    }
+
+    private bool CancelTimelineResize(PointerRoutedEventArgs e)
+    {
+        if (_timelineResizePointerId != e.Pointer.PointerId)
+        {
+            return false;
+        }
+
+        _timelineResizePointerId = 0;
+        SetTimelineHeight(_timelineResizeStartHeight, notify: false);
+        return true;
+    }
 
     private void ToolPanel_ImportRequested(object? sender, MediaImportRequestedEventArgs e)
     {
@@ -1009,7 +1110,7 @@ public sealed partial class EditorView : UserControl, IDisposable
     {
         try
         {
-            await ImportFilesAsync(e.Files);
+            await ImportFilesAsync(e.Files, e.ResultSlots);
         }
         catch (OperationCanceledException)
         {
@@ -1061,6 +1162,12 @@ public sealed partial class EditorView : UserControl, IDisposable
             return;
         }
 
+        if (_isRendering)
+        {
+            ShowMessage(InfoBarSeverity.Warning, "Export in progress", "Cancel the export or wait for it to finish before returning Home.");
+            return;
+        }
+
         ViewModel.RequestReturnHome();
         ReturnHomeRequested?.Invoke(this, EventArgs.Empty);
     }
@@ -1085,7 +1192,13 @@ public sealed partial class EditorView : UserControl, IDisposable
 
     private void CommitProjectName()
     {
-        var name = ProjectNameBox.Text.Trim();
+        var enteredName = ProjectNameBox.Text;
+        if (string.Equals(enteredName, ViewModel.ProjectName, StringComparison.Ordinal))
+        {
+            return;
+        }
+
+        var name = enteredName.Trim();
         if (name.Length == 0)
         {
             ProjectNameBox.Text = ViewModel.ProjectName;
@@ -1142,13 +1255,19 @@ public sealed partial class EditorView : UserControl, IDisposable
                         return;
                     }
 
-                    if (_isRendering)
+                    if (_isExporting)
                     {
                         ShowMessage(InfoBarSeverity.Warning, "Export in progress", "Cancel the export or wait for it to finish before creating another project.");
                         return;
                     }
                     if (await SaveAsync())
                     {
+                        if (_isExporting)
+                        {
+                            ShowMessage(InfoBarSeverity.Warning, "Export in progress", "Cancel the export or wait for it to finish before creating another project.");
+                            return;
+                        }
+
                         NewProjectRequested?.Invoke(this, EventArgs.Empty);
                     }
                     return;
@@ -1271,10 +1390,28 @@ public sealed partial class EditorView : UserControl, IDisposable
 
     private void ShowMessage(InfoBarSeverity severity, string title, string message)
     {
+        _projectSaveFailureInfoBarIsCurrent = false;
         EditorInfoBar.Severity = severity;
         EditorInfoBar.Title = title;
         EditorInfoBar.Message = message;
         EditorInfoBar.IsOpen = true;
+    }
+
+    private void ShowProjectSaveFailure(string message)
+    {
+        ShowMessage(InfoBarSeverity.Error, "Could not save project", message);
+        _projectSaveFailureInfoBarIsCurrent = true;
+    }
+
+    private void ClearProjectSaveFailure()
+    {
+        if (!_projectSaveFailureInfoBarIsCurrent)
+        {
+            return;
+        }
+
+        _projectSaveFailureInfoBarIsCurrent = false;
+        EditorInfoBar.IsOpen = false;
     }
 
     private void ShowLockedTrackMessage(Guid itemId)
@@ -1292,8 +1429,10 @@ public sealed partial class EditorView : UserControl, IDisposable
         {
             _thumbnailService.TryDeleteCachedThumbnail(asset);
         }
-        catch (Exception exception) when (exception is IOException or UnauthorizedAccessException or InvalidDataException)
+        catch (Exception exception) when (exception is IOException or UnauthorizedAccessException or InvalidDataException or
+                                           ArgumentException or NotSupportedException or System.Security.SecurityException)
         {
+            _ = _logService.TryWriteAsync($"Thumbnail cache cleanup failed: {exception.GetType().Name}");
             ShowMessage(InfoBarSeverity.Warning, "Media updated", "The project reference was updated, but its old thumbnail cache could not be removed.");
         }
     }
@@ -1301,6 +1440,7 @@ public sealed partial class EditorView : UserControl, IDisposable
     private void CommitImportResults(IReadOnlyList<ImportResult> results)
     {
         EnsureActive();
+        results = MediaImportService.RevalidateDuplicateResults(ViewModel.Project, results);
         var imported = results.Where(result => result.Asset is not null).Select(result => result.Asset!).ToList();
         if (imported.Count > 0)
         {

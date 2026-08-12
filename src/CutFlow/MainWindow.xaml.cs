@@ -29,6 +29,7 @@ public sealed partial class MainWindow : Window
     private readonly Task _initializationTask;
     private EditorView? _editorView;
     private AppWindow? _appWindow;
+    private WindowGeometry? _restoredWindowBounds;
     private AppSettings _appSettings = AppSettings.Normalize(null);
 
     public MainWindow()
@@ -68,8 +69,12 @@ public sealed partial class MainWindow : Window
                 return;
             }
 
+            if (_editorView is not null)
+            {
+                DetachEditorView();
+            }
+
             var editorView = new EditorView(editorViewModel, _projectService, _mediaImportService, _logService, _appSettings);
-            DetachEditorView();
             _editorView = editorView;
             _editorView.ReturnHomeRequested += Editor_ReturnHomeRequested;
             _editorView.NewProjectRequested += Editor_NewProjectRequested;
@@ -100,14 +105,20 @@ public sealed partial class MainWindow : Window
             return;
         }
 
+        _editorView = null;
         editor.ReturnHomeRequested -= Editor_ReturnHomeRequested;
         editor.NewProjectRequested -= Editor_NewProjectRequested;
         editor.ImportRequested -= Editor_ImportRequested;
         editor.RelinkAssetRequested -= Editor_RelinkAssetRequested;
         editor.ExportRequested -= Editor_ExportRequested;
         editor.WorkspaceSettingsChanged -= Editor_WorkspaceSettingsChanged;
+        SetTitleBar(null);
+        if (ReferenceEquals(ContentHost.Content, editor))
+        {
+            ContentHost.Content = null;
+        }
+
         editor.Dispose();
-        _editorView = null;
     }
 
     private async Task InitializeAsync()
@@ -117,11 +128,6 @@ public sealed partial class MainWindow : Window
         try
         {
             var context = await _windowReady.Task;
-            if (!_lifecycle.CanContinueInitialization)
-            {
-                return;
-            }
-
             try
             {
                 loadedSettings = await _settingsService.LoadAsync();
@@ -129,11 +135,6 @@ public sealed partial class MainWindow : Window
             catch (Exception exception)
             {
                 settingsError = $"Could not restore window settings. {exception.Message}";
-            }
-
-            if (!_lifecycle.CanContinueInitialization)
-            {
-                return;
             }
 
             _appSettings = loadedSettings;
@@ -174,8 +175,17 @@ public sealed partial class MainWindow : Window
         {
             if (_lifecycle.CanContinueInitialization)
             {
-                _viewModel.Home.ReportError(exception.Message);
-                ShowCurrentView();
+                try
+                {
+                    _viewModel.Home.ReportError(exception.Message);
+                    ShowCurrentView();
+                }
+                catch (Exception recoveryException)
+                {
+                    _ = _logService.TryWriteAsync($"Startup recovery failed: {recoveryException.GetType().Name}");
+                    _lifecycle.ApproveClose();
+                    _lifecycle.TryCommitClose(Close);
+                }
             }
         }
     }
@@ -190,6 +200,11 @@ public sealed partial class MainWindow : Window
         var windowHandle = WinRT.Interop.WindowNative.GetWindowHandle(this);
         var windowId = Microsoft.UI.Win32Interop.GetWindowIdFromWindow(windowHandle);
         _appWindow = AppWindow.GetFromWindowId(windowId);
+        if (IsRestored(_appWindow))
+        {
+            _restoredWindowBounds = GetCurrentBounds(_appWindow);
+        }
+
         _appWindow.Closing += AppWindow_Closing;
         _appWindow.Changed += AppWindow_Changed;
         _windowReady.TrySetResult(new AppWindowContext(_appWindow));
@@ -198,12 +213,19 @@ public sealed partial class MainWindow : Window
     private void RestoreWindowGeometry(AppWindowContext context)
     {
         var hasPhysicalBounds = WindowGeometry.TryGetStoredPhysicalBounds(_appSettings, out var requestedBounds);
-        var displayArea = hasPhysicalBounds
-            ? DisplayArea.GetFromRect(ToRect(requestedBounds), DisplayAreaFallback.Nearest)
-            : DisplayArea.GetFromRect(
-                ToRect(WindowGeometry.FromLegacyLogicalSettings(_appSettings, targetDpi: 96)),
-                DisplayAreaFallback.Nearest);
-        var targetDpi = GetDisplayDpi(displayArea);
+        var displays = DisplayArea.FindAll();
+        var displayGeometry = displays
+            .Select(area => new WindowDisplayGeometry(
+                new WindowGeometry(area.OuterBounds.X, area.OuterBounds.Y, area.OuterBounds.Width, area.OuterBounds.Height),
+                GetDisplayDpi(area),
+                area.IsPrimary,
+                area.DisplayId.Value))
+            .ToArray();
+        var targetDisplayIndex = hasPhysicalBounds
+            ? WindowGeometry.SelectTargetDisplay(requestedBounds, displayGeometry)
+            : WindowGeometry.SelectLegacyTargetDisplay(_appSettings, displayGeometry);
+        var displayArea = displays[targetDisplayIndex];
+        var targetDpi = displayGeometry[targetDisplayIndex].Dpi;
         if (!hasPhysicalBounds)
         {
             requestedBounds = WindowGeometry.FromLegacyLogicalSettings(_appSettings, targetDpi);
@@ -214,18 +236,24 @@ public sealed partial class MainWindow : Window
         var geometry = WindowGeometry.ClampPhysicalToWorkArea(requestedBounds, physicalWorkArea, targetDpi);
         ApplyPreferredMinimum(context.AppWindow, workArea, targetDpi);
         context.AppWindow.MoveAndResize(ToRect(geometry));
+        _restoredWindowBounds = geometry;
     }
 
     private void AppWindow_Changed(AppWindow sender, AppWindowChangedEventArgs args)
     {
-        if (!args.DidPositionChange || !_lifecycle.CanContinueInitialization)
+        if ((!args.DidPositionChange && !args.DidSizeChange) || !_lifecycle.CanContinueInitialization)
         {
             return;
         }
 
         try
         {
-            var bounds = new WindowGeometry(sender.Position.X, sender.Position.Y, sender.Size.Width, sender.Size.Height);
+            var bounds = GetCurrentBounds(sender);
+            if (IsRestored(sender))
+            {
+                _restoredWindowBounds = bounds;
+            }
+
             var displayArea = DisplayArea.GetFromRect(ToRect(bounds), DisplayAreaFallback.Nearest);
             ApplyPreferredMinimum(sender, displayArea.WorkArea, GetWindowDpi());
         }
@@ -250,7 +278,11 @@ public sealed partial class MainWindow : Window
 
     private static uint GetDisplayDpi(DisplayArea displayArea)
     {
-        var bounds = displayArea.OuterBounds;
+        return GetDisplayDpi(displayArea.OuterBounds);
+    }
+
+    private static uint GetDisplayDpi(RectInt32 bounds)
+    {
         var nativeBounds = new NativeRect(bounds.X, bounds.Y, bounds.X + bounds.Width, bounds.Y + bounds.Height);
         var monitor = MonitorFromRect(ref nativeBounds, 2);
         if (monitor == 0)
@@ -293,15 +325,40 @@ public sealed partial class MainWindow : Window
 
     private async void Editor_NewProjectRequested(object? sender, EventArgs e)
     {
-        if (!_lifecycle.CanHandleEditorEvent(_editorView, sender))
+        if (sender is not EditorView editor || !_lifecycle.CanHandleEditorEvent(_editorView, editor))
         {
             return;
         }
 
-        if (await _viewModel.ShowHomeAsync() && _lifecycle.CanContinueInitialization)
+        await _homeView.RunProjectOpenGateAsync(async () =>
         {
-            await _homeView.CreateProjectAsync();
-        }
+            editor.IsEnabled = false;
+            try
+            {
+                var project = await _viewModel.Home.CreateAsync();
+                if (_lifecycle.CanHandleEditorEvent(_editorView, editor))
+                {
+                    await _viewModel.ReplaceEditorAsync(project);
+                }
+            }
+            catch (OperationCanceledException)
+            {
+            }
+            catch (Exception exception) when (exception is IOException or UnauthorizedAccessException or InvalidDataException or ArgumentException or InvalidOperationException)
+            {
+                if (_lifecycle.CanHandleEditorEvent(_editorView, editor))
+                {
+                    editor.ReportError("Could not create project", exception.Message);
+                }
+            }
+            finally
+            {
+                if (_lifecycle.CanHandleEditorEvent(_editorView, editor))
+                {
+                    editor.IsEnabled = true;
+                }
+            }
+        });
     }
 
     private async void Editor_ImportRequested(object? sender, MediaImportRequestedEventArgs e)
@@ -322,7 +379,7 @@ public sealed partial class MainWindow : Window
         catch (OperationCanceledException)
         {
         }
-        catch (Exception exception) when (exception is IOException or UnauthorizedAccessException or InvalidOperationException or ArgumentException or System.Runtime.InteropServices.COMException)
+        catch (Exception exception) when (MediaImportService.IsExpectedMediaFailure(exception))
         {
             if (_lifecycle.CanHandleEditorEvent(_editorView, editor))
             {
@@ -351,7 +408,7 @@ public sealed partial class MainWindow : Window
         catch (OperationCanceledException)
         {
         }
-        catch (Exception exception) when (exception is IOException or UnauthorizedAccessException or InvalidOperationException or ArgumentException or System.Runtime.InteropServices.COMException)
+        catch (Exception exception) when (MediaImportService.IsExpectedMediaFailure(exception))
         {
             if (_lifecycle.CanHandleEditorEvent(_editorView, editor))
             {
@@ -488,8 +545,14 @@ public sealed partial class MainWindow : Window
                 return;
             }
 
-            await SaveWindowSettingsAsync(appWindow);
+            var closeBounds = CaptureBoundsForPersistence(appWindow);
+            await SaveWindowSettingsAsync(closeBounds);
             if (!_lifecycle.CanContinueClosing)
+            {
+                return;
+            }
+
+            if (_editorView is not null && !await _editorView.PrepareToCloseAsync())
             {
                 return;
             }
@@ -513,6 +576,7 @@ public sealed partial class MainWindow : Window
                 return;
             }
 
+            _workspaceSettingsSaveFailureNotice.Observe(_settingsSaveCoordinator.State);
             if (_editorView is not null)
             {
                 _editorView.ReportError("Could not close safely", "The workspace could not be saved. Try again before closing the editor.");
@@ -532,22 +596,47 @@ public sealed partial class MainWindow : Window
         }
     }
 
-    private async Task SaveWindowSettingsAsync(AppWindow appWindow)
+    private WindowGeometry CaptureBoundsForPersistence(AppWindow appWindow)
     {
-        var position = appWindow.Position;
-        var size = appWindow.Size;
-        _appSettings.WindowBoundsVersion = AppSettings.CurrentWindowBoundsVersion;
-        _appSettings.WindowPixelX = position.X;
-        _appSettings.WindowPixelY = position.Y;
-        _appSettings.WindowPixelWidth = size.Width;
-        _appSettings.WindowPixelHeight = size.Height;
+        var currentBounds = GetCurrentBounds(appWindow);
+        var isRestored = IsRestored(appWindow);
+        var bounds = WindowGeometry.SelectBoundsForPersistence(currentBounds, _restoredWindowBounds, isRestored);
+        if (isRestored)
+        {
+            _restoredWindowBounds = bounds;
+        }
 
-        var currentBounds = new WindowGeometry(position.X, position.Y, size.Width, size.Height);
-        var currentDpi = GetDisplayDpi(DisplayArea.GetFromRect(ToRect(currentBounds), DisplayAreaFallback.Nearest));
-        _appSettings.WindowX = ToLogical(position.X, currentDpi);
-        _appSettings.WindowY = ToLogical(position.Y, currentDpi);
-        _appSettings.WindowWidth = ToLogical(size.Width, currentDpi);
-        _appSettings.WindowHeight = ToLogical(size.Height, currentDpi);
+        return bounds;
+    }
+
+    private static WindowGeometry GetCurrentBounds(AppWindow appWindow) =>
+        new(appWindow.Position.X, appWindow.Position.Y, appWindow.Size.Width, appWindow.Size.Height);
+
+    private static bool IsRestored(AppWindow appWindow) =>
+        appWindow.Presenter is not OverlappedPresenter presenter ||
+        presenter.State == OverlappedPresenterState.Restored;
+
+    private async Task SaveWindowSettingsAsync(WindowGeometry bounds)
+    {
+        var displayArea = DisplayArea.GetFromRect(ToRect(bounds), DisplayAreaFallback.Nearest);
+        var workArea = displayArea.WorkArea;
+        var outerBounds = displayArea.OuterBounds;
+        var currentDpi = GetDisplayDpi(outerBounds);
+        bounds = WindowGeometry.ClampPhysicalToWorkArea(
+            bounds,
+            new WindowGeometry(workArea.X, workArea.Y, workArea.Width, workArea.Height),
+            currentDpi);
+
+        _appSettings.WindowBoundsVersion = AppSettings.CurrentWindowBoundsVersion;
+        _appSettings.WindowPixelX = bounds.X;
+        _appSettings.WindowPixelY = bounds.Y;
+        _appSettings.WindowPixelWidth = bounds.Width;
+        _appSettings.WindowPixelHeight = bounds.Height;
+
+        _appSettings.WindowX = ToLogical(bounds.X, currentDpi);
+        _appSettings.WindowY = ToLogical(bounds.Y, currentDpi);
+        _appSettings.WindowWidth = ToLogical(bounds.Width, currentDpi);
+        _appSettings.WindowHeight = ToLogical(bounds.Height, currentDpi);
         _settingsSaveCoordinator.NotifyEdited();
         await _settingsSaveCoordinator.FlushAsync();
     }

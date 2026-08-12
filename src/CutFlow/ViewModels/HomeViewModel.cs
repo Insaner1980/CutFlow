@@ -11,12 +11,21 @@ namespace CutFlow.ViewModels;
 public sealed class HomeViewModel : ViewModelBase
 {
     private readonly ProjectService _projectService;
+    private readonly Func<ProjectDocument, string, CancellationToken, Task<string?>> _thumbnailPathResolver;
     private bool _isBusy;
     private string? _errorMessage;
 
     public HomeViewModel(ProjectService projectService)
+        : this(projectService, ProjectCardViewModel.ResolveThumbnailPathAsync)
+    {
+    }
+
+    internal HomeViewModel(
+        ProjectService projectService,
+        Func<ProjectDocument, string, CancellationToken, Task<string?>> thumbnailPathResolver)
     {
         _projectService = projectService ?? throw new ArgumentNullException(nameof(projectService));
+        _thumbnailPathResolver = thumbnailPathResolver ?? throw new ArgumentNullException(nameof(thumbnailPathResolver));
     }
 
     public ObservableCollection<ProjectCardViewModel> Projects { get; } = [];
@@ -51,7 +60,7 @@ public sealed class HomeViewModel : ViewModelBase
         await RunBusyAsync(async () =>
         {
             var projects = await _projectService.ListAsync(cancellationToken);
-            ReplaceProjects(projects);
+            await ReplaceProjectsAsync(projects, cancellationToken);
         });
     }
 
@@ -110,16 +119,30 @@ public sealed class HomeViewModel : ViewModelBase
     private async Task RefreshCoreAsync(CancellationToken cancellationToken)
     {
         var projects = await _projectService.ListAsync(cancellationToken);
-        ReplaceProjects(projects);
+        await ReplaceProjectsAsync(projects, cancellationToken);
     }
 
-    private void ReplaceProjects(IEnumerable<ProjectDocument> projects)
+    private async Task ReplaceProjectsAsync(
+        IEnumerable<ProjectDocument> projects,
+        CancellationToken cancellationToken)
     {
+        cancellationToken.ThrowIfCancellationRequested();
+        var cards = projects.Select(ProjectCardViewModel.Create).ToList();
+
         Projects.Clear();
-        foreach (var project in projects)
+        foreach (var card in cards)
         {
-            Projects.Add(new ProjectCardViewModel(project, _projectService.GetProjectPath(project.Id)));
+            Projects.Add(card);
         }
+
+        await Task.WhenAll(cards.Select(async card =>
+        {
+            var path = await _thumbnailPathResolver(
+                card.Project,
+                _projectService.GetProjectPath(card.Id),
+                cancellationToken);
+            card.SetThumbnailPath(path);
+        }));
     }
 
     private async Task RunBusyAsync(Func<Task> action)
@@ -142,12 +165,26 @@ public sealed class HomeViewModel : ViewModelBase
     }
 }
 
-public sealed class ProjectCardViewModel
+public sealed class ProjectCardViewModel : ViewModelBase
 {
-    public ProjectCardViewModel(ProjectDocument project, string projectPath)
+    private string? _thumbnailPath;
+
+    private ProjectCardViewModel(ProjectDocument project, string? thumbnailPath)
     {
         Project = project ?? throw new ArgumentNullException(nameof(project));
-        ThumbnailPath = ResolveThumbnailPath(project, projectPath);
+        _thumbnailPath = thumbnailPath;
+    }
+
+    internal static ProjectCardViewModel Create(ProjectDocument project) => new(project, null);
+
+    internal static async Task<ProjectCardViewModel> CreateAsync(
+        ProjectDocument project,
+        string projectPath,
+        CancellationToken cancellationToken = default)
+    {
+        var card = Create(project);
+        card.SetThumbnailPath(await ResolveThumbnailPathAsync(project, projectPath, cancellationToken));
+        return card;
     }
 
     public ProjectDocument Project { get; }
@@ -169,7 +206,7 @@ public sealed class ProjectCardViewModel
         TimelineEditingService.CalculateProjectDuration(Project),
         Project.Settings.FrameRate);
 
-    public string? ThumbnailPath { get; }
+    public string? ThumbnailPath => _thumbnailPath;
 
     public bool HasThumbnail => ThumbnailPath is not null;
 
@@ -177,7 +214,19 @@ public sealed class ProjectCardViewModel
         ? null
         : new BitmapImage(new Uri(ThumbnailPath));
 
-    private static string? ResolveThumbnailPath(ProjectDocument project, string projectPath)
+    internal void SetThumbnailPath(string? thumbnailPath)
+    {
+        if (SetProperty(ref _thumbnailPath, thumbnailPath, nameof(ThumbnailPath)))
+        {
+            OnPropertyChanged(nameof(HasThumbnail));
+            OnPropertyChanged(nameof(ThumbnailSource));
+        }
+    }
+
+    internal static async Task<string?> ResolveThumbnailPathAsync(
+        ProjectDocument project,
+        string projectPath,
+        CancellationToken cancellationToken)
     {
         if (string.IsNullOrWhiteSpace(projectPath))
         {
@@ -195,13 +244,19 @@ public sealed class ProjectCardViewModel
 
             try
             {
+                var request = ThumbnailService.CaptureRequest(asset, ThumbnailService.DefaultRequestedSize);
+                if (!ThumbnailService.IsCachePathForRequest(request, asset.ThumbnailCachePath))
+                {
+                    continue;
+                }
+
                 var path = ThumbnailService.ResolveProjectCachePath(projectPath, asset.ThumbnailCachePath);
-                if (File.Exists(path))
+                if (await ThumbnailService.IsUsableCachedThumbnailAsync(path, cancellationToken))
                 {
                     return path;
                 }
             }
-            catch (InvalidDataException)
+            catch (Exception exception) when (exception is IOException or UnauthorizedAccessException or ArgumentException or InvalidDataException)
             {
                 // Invalid cache references fall back to the restrained placeholder.
             }

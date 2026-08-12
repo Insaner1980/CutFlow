@@ -8,7 +8,7 @@ namespace CutFlow.Tests;
 [TestClass]
 public sealed class PreviewTimingTests
 {
-    [DataTestMethod]
+    [TestMethod]
     [DataRow(1920, 1080, 1280, 720)]
     [DataRow(1080, 1080, 720, 720)]
     [DataRow(720, 1280, 405, 720)]

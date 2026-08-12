@@ -1,0 +1,19 @@
+deprecated packages
+Root: C:\Dev\CutFlow
+Command: dotnet package list --project CutFlow.slnx --deprecated
+Started: 2026-08-13 01.47.49
+
+  Determining projects to restore...
+  All projects are up-to-date for restore.
+
+The following sources were used:
+   https://api.nuget.org/v3/index.json
+   C:\Program Files (x86)\Microsoft SDKs\NuGetPackages\
+
+The given project `CutFlow` has no deprecated packages given the current sources.
+Project `CutFlow.Tests` has the following deprecated packages
+   [net10.0-windows10.0.26100.0]: 
+   Top-level Package           Requested   Resolved   Reason(s)   Alternative
+   > MSTest.TestAdapter        3.8.3       3.8.3      Legacy                 
+   > MSTest.TestFramework      3.8.3       3.8.3      Legacy                 
+

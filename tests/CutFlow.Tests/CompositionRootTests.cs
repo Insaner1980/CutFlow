@@ -54,6 +54,34 @@ public sealed class CompositionRootTests
         Assert.IsFalse(exportService.Contains("new SimpleLogService(", StringComparison.Ordinal));
     }
 
+    [TestMethod]
+    public void RelinkThumbnailCleanup_HappensAfterCommitAndLogsNonfatalFailures()
+    {
+        var editorView = File.ReadAllText(Path.Combine(
+            FindRepositoryRoot(),
+            "src",
+            "CutFlow",
+            "Views",
+            "EditorView.xaml.cs"));
+        var relinkStart = editorView.IndexOf("public async Task RelinkAssetAsync", StringComparison.Ordinal);
+        var relinkEnd = editorView.IndexOf("public void Dispose()", relinkStart, StringComparison.Ordinal);
+        var relink = editorView[relinkStart..relinkEnd];
+        var commit = relink.IndexOf("ViewModel.ApplyRelinkedAsset(candidate)", StringComparison.Ordinal);
+        var cleanup = relink.IndexOf("TryDeleteCache(oldCacheReference);", StringComparison.Ordinal);
+
+        Assert.IsTrue(commit >= 0);
+        Assert.IsTrue(cleanup > commit);
+
+        var cleanupStart = editorView.IndexOf("private void TryDeleteCache", StringComparison.Ordinal);
+        var cleanupEnd = editorView.IndexOf("private void CommitImportResults", cleanupStart, StringComparison.Ordinal);
+        var cleanupMethod = editorView[cleanupStart..cleanupEnd];
+
+        Assert.Contains("ArgumentException", cleanupMethod);
+        Assert.Contains("NotSupportedException", cleanupMethod);
+        Assert.Contains("Thumbnail cache cleanup failed:", cleanupMethod);
+        Assert.Contains("_logService.TryWriteAsync", cleanupMethod);
+    }
+
     private static string FindRepositoryRoot()
     {
         for (var directory = new DirectoryInfo(AppContext.BaseDirectory); directory is not null; directory = directory.Parent)

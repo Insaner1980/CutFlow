@@ -85,7 +85,6 @@ public sealed class ExportService
         var validation = await ExportPreflight.ValidateAsync(
             project,
             refreshMissingFlags: true,
-            File.Exists,
             cancellationToken);
         if (!validation.CanExport)
         {
@@ -155,27 +154,13 @@ public sealed class ExportService
                 catch (Exception exception) when (exception is not OutOfMemoryException)
                 {
                     // Secondary cleanup must not replace the primary export failure or cancellation.
-                    await TryLogCleanupFailureAsync(exception);
+                    if (_logService is not null)
+                    {
+                        _ = _logService.TryWriteAsync(
+                            $"Export staging cleanup failed: {exception.GetType().Name}");
+                    }
                 }
             }
-        }
-    }
-
-    private async Task TryLogCleanupFailureAsync(Exception exception)
-    {
-        if (_logService is null)
-        {
-            return;
-        }
-
-        try
-        {
-            await _logService.TryWriteAsync(
-                $"Export staging cleanup failed: {exception.GetType().Name}");
-        }
-        catch (Exception loggingException) when (loggingException is not OutOfMemoryException)
-        {
-            // Logging availability is secondary and must not replace the export outcome.
         }
     }
 
@@ -254,13 +239,32 @@ public static class ExportPreflight
     public static ExportPreflightResult Validate(ProjectDocument project)
     {
         ArgumentNullException.ThrowIfNull(project);
-        return ValidateCore(project, refreshMissingFlags: false, File.Exists, CancellationToken.None);
+        return ValidateCore(
+            project,
+            refreshMissingFlags: false,
+            MediaImportService.SourceMatchesRecordedSnapshot,
+            CancellationToken.None);
     }
 
     public static Task<ExportPreflightResult> ValidateAsync(
         ProjectDocument project,
         CancellationToken cancellationToken = default) =>
-        ValidateAsync(project, refreshMissingFlags: false, File.Exists, cancellationToken);
+        ValidateAsync(project, refreshMissingFlags: false, cancellationToken);
+
+    internal static Task<ExportPreflightResult> ValidateAsync(
+        ProjectDocument project,
+        bool refreshMissingFlags,
+        CancellationToken cancellationToken)
+    {
+        ArgumentNullException.ThrowIfNull(project);
+        return Task.Run(
+            () => ValidateCore(
+                project,
+                refreshMissingFlags,
+                MediaImportService.SourceMatchesRecordedSnapshot,
+                cancellationToken),
+            cancellationToken);
+    }
 
     internal static Task<ExportPreflightResult> ValidateAsync(
         ProjectDocument project,
@@ -271,14 +275,14 @@ public static class ExportPreflight
         ArgumentNullException.ThrowIfNull(project);
         ArgumentNullException.ThrowIfNull(fileExists);
         return Task.Run(
-            () => ValidateCore(project, refreshMissingFlags, fileExists, cancellationToken),
+            () => ValidateCore(project, refreshMissingFlags, asset => fileExists(asset.SourcePath), cancellationToken),
             cancellationToken);
     }
 
     private static ExportPreflightResult ValidateCore(
         ProjectDocument project,
         bool refreshMissingFlags,
-        Func<string, bool> fileExists,
+        Func<ProjectAsset, bool> sourceIsCurrent,
         CancellationToken cancellationToken)
     {
         cancellationToken.ThrowIfCancellationRequested();
@@ -290,14 +294,18 @@ public static class ExportPreflight
         var assets = project.Assets.ToDictionary(asset => asset.Id);
         var missing = new List<string>();
         var missingNames = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-        var referencedAssetIds = project.VideoItems.Select(item => item.AssetId)
-            .Concat(project.AudioItems.Select(item => item.AssetId))
+        var referencedAssetIds = project.VideoItems
+            .Where(item => item.DurationMilliseconds > 0)
+            .Select(item => item.AssetId)
+            .Concat(project.AudioItems
+                .Where(item => item.DurationMilliseconds > 0)
+                .Select(item => item.AssetId))
             .Distinct();
         foreach (var assetId in referencedAssetIds)
         {
             cancellationToken.ThrowIfCancellationRequested();
             assets.TryGetValue(assetId, out var asset);
-            var exists = asset is not null && fileExists(asset.SourcePath);
+            var exists = asset is not null && sourceIsCurrent(asset);
             if (asset is not null && refreshMissingFlags)
             {
                 asset.IsMissing = !exists;
@@ -310,7 +318,7 @@ public static class ExportPreflight
 
         return missing.Count == 0
             ? new ExportPreflightResult(true, string.Empty, [])
-            : new ExportPreflightResult(false, $"Missing export media: {string.Join(", ", missing)}", missing);
+            : new ExportPreflightResult(false, $"Missing or changed export media: {string.Join(", ", missing)}", missing);
     }
 }
 

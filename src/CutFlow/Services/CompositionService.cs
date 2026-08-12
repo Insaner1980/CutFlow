@@ -1,5 +1,4 @@
 using CutFlow.Models;
-using System.Runtime.InteropServices;
 using Windows.Media.Editing;
 using Windows.Storage;
 using Windows.UI;
@@ -75,7 +74,7 @@ public sealed class CompositionService
                 }
                 catch (Exception exception) when (IsItemFailure(exception))
                 {
-                    errors.Add($"'{visual.AssetName}' could not be loaded and was replaced with black video: {exception.Message}");
+                    errors.Add($"'{visual.AssetName}' could not be loaded and was replaced with black video.");
                     clip = CreateBlackClip(visual.DurationMilliseconds);
                 }
             }
@@ -181,7 +180,7 @@ public sealed class CompositionService
     }
 
     private static bool IsItemFailure(Exception exception) =>
-        exception is IOException or UnauthorizedAccessException or ArgumentException or InvalidDataException or COMException;
+        MediaImportService.IsExpectedMediaFailure(exception);
 
     private static TimeSpan ToTimeSpan(long milliseconds) => TimeSpan.FromMilliseconds(Math.Clamp(
         milliseconds,

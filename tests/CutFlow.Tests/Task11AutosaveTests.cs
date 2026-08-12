@@ -25,7 +25,7 @@ public sealed class Task11AutosaveTests
     }
 
     [TestMethod]
-    public async Task FlushAsync_WhenEditCommitsDuringSave_PersistsTheLatestRevisionWithoutConcurrency()
+    public async Task FlushAsync_ConcurrentCallersWaitForEditCommittedDuringSave()
     {
         var saver = new ControlledSaver(blockFirstCall: true);
         using var coordinator = new DebouncedSaveCoordinator(saver.SaveAsync, _ => Task.CompletedTask);
@@ -33,9 +33,13 @@ public sealed class Task11AutosaveTests
         coordinator.NotifyEdited();
         await saver.WaitForCallsAsync(1);
         coordinator.NotifyEdited();
+        var firstFlush = coordinator.FlushAsync();
+        var secondFlush = coordinator.FlushAsync();
+
+        Assert.IsFalse(Task.WhenAll(firstFlush, secondFlush).IsCompleted);
         saver.ReleaseFirstCall();
 
-        await coordinator.FlushAsync();
+        await Task.WhenAll(firstFlush, secondFlush);
 
         Assert.AreEqual(2, saver.Calls);
         Assert.AreEqual(1, saver.MaximumConcurrentCalls);
@@ -43,7 +47,7 @@ public sealed class Task11AutosaveTests
     }
 
     [TestMethod]
-    public async Task FlushAsync_AfterFailedDebouncedSave_RetriesAndMarksSaved()
+    public async Task FlushAsync_ConcurrentCallersAfterFailedSave_RetryOnceAndMarkSaved()
     {
         var saver = new ControlledSaver(failFirstCall: true);
         using var coordinator = new DebouncedSaveCoordinator(saver.SaveAsync, _ => Task.CompletedTask);
@@ -51,10 +55,54 @@ public sealed class Task11AutosaveTests
         coordinator.NotifyEdited();
         await WaitUntilAsync(() => coordinator.State == DebouncedSaveState.SaveFailed);
 
-        await coordinator.FlushAsync();
+        await Task.WhenAll(coordinator.FlushAsync(), coordinator.FlushAsync());
 
         Assert.AreEqual(2, saver.Calls);
+        Assert.AreEqual(1, saver.MaximumConcurrentCalls);
         Assert.AreEqual(DebouncedSaveState.Saved, coordinator.State);
+    }
+
+    [TestMethod]
+    public async Task NotifyEdited_AfterFailedDebouncedSave_RetriesPendingRevision()
+    {
+        var saver = new ControlledSaver(failFirstCall: true);
+        using var coordinator = new DebouncedSaveCoordinator(saver.SaveAsync, _ => Task.CompletedTask);
+
+        coordinator.NotifyEdited();
+        await WaitUntilAsync(() => coordinator.State == DebouncedSaveState.SaveFailed);
+
+        coordinator.NotifyEdited();
+        await WaitUntilAsync(() => saver.Calls == 2 && coordinator.State == DebouncedSaveState.Saved);
+
+        Assert.AreEqual(2, saver.Calls);
+        Assert.AreEqual(1, saver.MaximumConcurrentCalls);
+    }
+
+    [TestMethod]
+    public void SuccessfulRetry_ClearsOnlyTheCurrentProjectSaveFailureInfoBar()
+    {
+        var source = File.ReadAllText(Path.Combine(
+            FindRepositoryRoot(),
+            "src",
+            "CutFlow",
+            "Views",
+            "EditorView.xaml.cs"));
+
+        var savedCase = source.IndexOf("case DebouncedSaveState.Saved:", StringComparison.Ordinal);
+        var savingCase = source.IndexOf("case DebouncedSaveState.Saving:", savedCase, StringComparison.Ordinal);
+        var clearOnSuccess = source.IndexOf("ClearProjectSaveFailure();", savedCase, StringComparison.Ordinal);
+        var showFailure = source.IndexOf("private void ShowProjectSaveFailure(string message)", StringComparison.Ordinal);
+        var clearFailure = source.IndexOf("private void ClearProjectSaveFailure()", StringComparison.Ordinal);
+        var genericMessage = source.IndexOf("private void ShowMessage(InfoBarSeverity severity", StringComparison.Ordinal);
+
+        Assert.IsTrue(savedCase >= 0);
+        Assert.IsTrue(clearOnSuccess > savedCase && clearOnSuccess < savingCase);
+        Assert.IsTrue(showFailure >= 0);
+        Assert.IsTrue(clearFailure > showFailure);
+        StringAssert.Contains(source[showFailure..clearFailure], "_projectSaveFailureInfoBarIsCurrent = true;");
+        StringAssert.Contains(source[clearFailure..], "if (!_projectSaveFailureInfoBarIsCurrent)");
+        StringAssert.Contains(source[clearFailure..], "EditorInfoBar.IsOpen = false;");
+        StringAssert.Contains(source[genericMessage..showFailure], "_projectSaveFailureInfoBarIsCurrent = false;");
     }
 
     [TestMethod]
@@ -79,6 +127,17 @@ public sealed class Task11AutosaveTests
         }
 
         Assert.IsTrue(condition());
+    }
+
+    private static string FindRepositoryRoot()
+    {
+        var directory = new DirectoryInfo(AppContext.BaseDirectory);
+        while (directory is not null && !File.Exists(Path.Combine(directory.FullName, "CutFlow.slnx")))
+        {
+            directory = directory.Parent;
+        }
+
+        return directory?.FullName ?? throw new DirectoryNotFoundException("Repository root was not found.");
     }
 
     private sealed class ControlledDelay

@@ -17,18 +17,37 @@ public sealed class Task13AcceptanceTests
     {
         var project = ProjectDocument.CreateNew("New project", DateTimeOffset.UtcNow);
         var viewModel = new EditorViewModel(project);
+        var committed = 0;
+        viewModel.EditCommitted += (_, _) => committed++;
 
         Assert.IsTrue(viewModel.RenameProject("  Final edit  "));
         Assert.AreEqual("Final edit", viewModel.ProjectName);
         Assert.AreEqual(EditorViewModel.UnsavedStatus, viewModel.SaveStatus);
+        Assert.AreEqual(1, committed);
+        Assert.IsFalse(viewModel.RenameProject("Final edit"));
+        Assert.AreEqual(1, committed);
 
         viewModel.Undo();
         Assert.AreEqual("New project", viewModel.ProjectName);
+        Assert.IsFalse(viewModel.CanUndo);
 
         viewModel.Redo();
         Assert.AreEqual("Final edit", viewModel.ProjectName);
         Assert.IsFalse(viewModel.RenameProject("   "));
+        Assert.IsFalse(viewModel.RenameProject(new string('N', ProjectDocument.MaximumNameLength + 1)));
         Assert.AreEqual("Final edit", viewModel.ProjectName);
+    }
+
+    [TestMethod]
+    public void RenameProject_UnchangedLegacyNameIsNotNormalizedOrAddedToUndoHistory()
+    {
+        var unusualName = "  Legacy\u0001name  ";
+        var viewModel = new EditorViewModel(ProjectDocument.CreateNew(unusualName, DateTimeOffset.UtcNow));
+
+        Assert.IsFalse(viewModel.RenameProject(unusualName));
+        Assert.AreEqual(unusualName, viewModel.ProjectName);
+        Assert.IsFalse(viewModel.CanUndo);
+        Assert.AreEqual(EditorViewModel.SavedStatus, viewModel.SaveStatus);
     }
 
     [TestMethod]
@@ -42,6 +61,28 @@ public sealed class Task13AcceptanceTests
         Assert.IsFalse(
             projectName.Ancestors().Any(element => (string?)element.Attribute(Xaml + "Name") == "TitleBarDragRegion"),
             "The editable project name must not be inside the non-client drag region.");
+    }
+
+    [TestMethod]
+    public void EditorClose_CommitsPendingProjectNameBeforeFlushingSave()
+    {
+        var source = File.ReadAllText(Path.Combine(
+            FindRepositoryRoot(),
+            "src",
+            "CutFlow",
+            "Views",
+            "EditorView.Export.cs"));
+        var closeStart = source.IndexOf("public async Task<bool> PrepareToCloseAsync()", StringComparison.Ordinal);
+        Assert.IsTrue(closeStart >= 0, "The editor close preparation route is missing.");
+        var closeEnd = source.IndexOf("public void CancelClosePreparation()", closeStart, StringComparison.Ordinal);
+        Assert.IsTrue(closeEnd > closeStart, "The editor close preparation route could not be isolated.");
+        var closeRoute = source[closeStart..closeEnd];
+        var commitIndex = closeRoute.IndexOf("CommitProjectName();", StringComparison.Ordinal);
+        var saveIndex = closeRoute.IndexOf("return await SaveAsync();", StringComparison.Ordinal);
+
+        Assert.IsTrue(
+            commitIndex >= 0 && saveIndex > commitIndex,
+            "Closing must commit the focused title-bar name before flushing the project save.");
     }
 
     [TestMethod]
@@ -134,6 +175,10 @@ public sealed class Task13AcceptanceTests
             FilePickerHelper.GetMediaExtensions(MediaImportScope.All).ToArray());
         Assert.IsTrue(MediaImportScope.Audio.Allows("voice.WAV"));
         Assert.IsFalse(MediaImportScope.Audio.Allows("clip.mp4"));
+        Assert.IsTrue(MediaImportScope.Visual.CanAcceptDrop(true, [".mp4"]));
+        Assert.IsFalse(MediaImportScope.Visual.CanAcceptDrop(true, [".wav"]));
+        Assert.IsTrue(MediaImportScope.Audio.CanAcceptDrop(true, [".wav", ".txt"]));
+        Assert.IsFalse(MediaImportScope.Audio.CanAcceptDrop(false, [".wav"]));
     }
 
     [TestMethod]
@@ -162,13 +207,15 @@ public sealed class Task13AcceptanceTests
         var source = File.ReadAllText(Path.Combine(FindRepositoryRoot(), "src", "CutFlow", "Views", "HomeView.xaml.cs"));
 
         StringAssert.Contains(source, "private bool IsProjectOperationActive");
-        Assert.AreEqual(5, source.Split("if (!_canContinue() || IsProjectOperationActive", StringSplitOptions.None).Length - 1);
+        Assert.AreEqual(
+            6,
+            source.Split("RunProjectOpenGateAsync", StringSplitOptions.None).Length - 1,
+            "Create, Open, Rename, Duplicate, and Delete must all use the shared atomic gate.");
     }
 
     [TestMethod]
     public void TimelineDurationLimit_RejectsUnsafeInputAndClampsTimelineEdits()
     {
-        Assert.AreEqual(86_400_000L, ProjectDocument.MaximumTimelineDurationMilliseconds);
         Assert.IsTrue(TimelineInput.TryParseSeconds("86400", out var maximum));
         Assert.AreEqual(ProjectDocument.MaximumTimelineDurationMilliseconds, maximum);
         Assert.IsFalse(TimelineInput.TryParseSeconds("86400.001", out _));

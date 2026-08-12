@@ -6,8 +6,8 @@ namespace CutFlow.Services;
 public sealed class UndoHistory
 {
     private readonly int _capacity;
-    private readonly List<string> _undoSnapshots = [];
-    private readonly List<string> _redoSnapshots = [];
+    private readonly List<byte[]> _undoSnapshots = [];
+    private readonly List<byte[]> _redoSnapshots = [];
 
     public UndoHistory(int capacity = 50)
     {
@@ -40,8 +40,11 @@ public sealed class UndoHistory
             return null;
         }
 
-        PushSnapshot(_redoSnapshots, Serialize(currentProject));
-        return Deserialize(PopSnapshot(_undoSnapshots));
+        var currentSnapshot = Serialize(currentProject);
+        var restored = Deserialize(_undoSnapshots[^1]);
+        PushSnapshot(_redoSnapshots, currentSnapshot);
+        PopSnapshot(_undoSnapshots);
+        return restored;
     }
 
     public ProjectDocument? Redo(ProjectDocument currentProject)
@@ -53,11 +56,14 @@ public sealed class UndoHistory
             return null;
         }
 
-        PushSnapshot(_undoSnapshots, Serialize(currentProject));
-        return Deserialize(PopSnapshot(_redoSnapshots));
+        var currentSnapshot = Serialize(currentProject);
+        var restored = Deserialize(_redoSnapshots[^1]);
+        PushSnapshot(_undoSnapshots, currentSnapshot);
+        PopSnapshot(_redoSnapshots);
+        return restored;
     }
 
-    private void PushSnapshot(List<string> snapshots, string snapshot)
+    private void PushSnapshot(List<byte[]> snapshots, byte[] snapshot)
     {
         if (snapshots.Count == _capacity)
         {
@@ -67,17 +73,18 @@ public sealed class UndoHistory
         snapshots.Add(snapshot);
     }
 
-    private static string PopSnapshot(List<string> snapshots)
+    private static void PopSnapshot(List<byte[]> snapshots)
     {
-        var index = snapshots.Count - 1;
-        var snapshot = snapshots[index];
-        snapshots.RemoveAt(index);
-        return snapshot;
+        snapshots.RemoveAt(snapshots.Count - 1);
     }
 
-    private static string Serialize(ProjectDocument project) => JsonSerializer.Serialize(project);
+    private static byte[] Serialize(ProjectDocument project) => JsonSerializer.SerializeToUtf8Bytes(project);
 
-    private static ProjectDocument Deserialize(string snapshot) =>
-        JsonSerializer.Deserialize<ProjectDocument>(snapshot)
-        ?? throw new InvalidOperationException("A project history snapshot could not be deserialized.");
+    private static ProjectDocument Deserialize(byte[] snapshot)
+    {
+        var project = JsonSerializer.Deserialize<ProjectDocument>(snapshot)
+            ?? throw new InvalidOperationException("A project history snapshot could not be deserialized.");
+        ProjectService.NormalizeSnapshot(project);
+        return project;
+    }
 }

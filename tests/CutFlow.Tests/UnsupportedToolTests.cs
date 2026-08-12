@@ -11,7 +11,7 @@ public sealed class UnsupportedToolTests
 {
     private static readonly XNamespace Xaml = "http://schemas.microsoft.com/winfx/2006/xaml";
 
-    [DataTestMethod]
+    [TestMethod]
     [DataRow(EditorTool.Stickers)]
     [DataRow(EditorTool.Effects)]
     [DataRow(EditorTool.Transitions)]

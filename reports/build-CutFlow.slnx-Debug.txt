@@ -1,0 +1,13 @@
+build CutFlow.slnx Debug
+Root: C:\Dev\CutFlow
+Command: dotnet build CutFlow.slnx -c Debug --no-restore
+Started: 2026-08-13 01.44.57
+
+  CutFlow -> C:\Dev\CutFlow\src\CutFlow\bin\x64\Debug\net10.0-windows10.0.26100.0\CutFlow.dll
+  CutFlow.Tests -> C:\Dev\CutFlow\tests\CutFlow.Tests\bin\x64\Debug\net10.0-windows10.0.26100.0\CutFlow.Tests.dll
+
+Build succeeded.
+    0 Warning(s)
+    0 Error(s)
+
+Time Elapsed 00:00:21.53

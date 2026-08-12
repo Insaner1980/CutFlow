@@ -14,7 +14,7 @@ using Windows.Storage;
 
 namespace CutFlow.Controls;
 
-public sealed partial class MediaPanel : UserControl
+public sealed partial class MediaPanel : UserControl, IDisposable
 {
     private readonly ObservableCollection<MediaAssetCard> _cards = [];
     private ProjectDocument? _project;
@@ -22,6 +22,7 @@ public sealed partial class MediaPanel : UserControl
     private EditorTool _tool = EditorTool.Media;
     private CancellationTokenSource? _lifetimeCts;
     private CancellationTokenSource? _thumbnailRefreshCts;
+    private bool _disposed;
 
     public MediaPanel()
     {
@@ -47,7 +48,7 @@ public sealed partial class MediaPanel : UserControl
 
     public void RefreshAssets()
     {
-        if (_project is null)
+        if (_disposed || _project is null)
         {
             return;
         }
@@ -106,8 +107,13 @@ public sealed partial class MediaPanel : UserControl
         RefreshAssets();
     }
 
-    private async Task LoadThumbnailSafelyAsync(ProjectAsset asset, MediaAssetCard card, CancellationToken cancellationToken)
+    private async Task LoadThumbnailSafelyAsync(
+        ProjectAsset asset,
+        MediaAssetCard card,
+        long cardGeneration,
+        CancellationToken cancellationToken)
     {
+        ThumbnailRequest? request = null;
         try
         {
             if (_thumbnailService is null)
@@ -115,27 +121,42 @@ public sealed partial class MediaPanel : UserControl
                 return;
             }
 
-            var request = ThumbnailService.CaptureRequest(asset, ThumbnailService.DefaultRequestedSize);
-            var source = await StorageFile.GetFileFromPathAsync(request.SourcePath);
-            cancellationToken.ThrowIfCancellationRequested();
-            if (!ThumbnailService.IsCurrentRequest(asset, request) || !_cards.Contains(card))
+            request = ThumbnailService.CaptureRequest(asset, ThumbnailService.DefaultRequestedSize);
+            var source = await StorageFile.GetFileFromPathAsync(request.Value.SourcePath).AsTask(cancellationToken);
+            if (!ThumbnailService.IsCurrentRequest(asset, request.Value) ||
+                !_cards.Contains(card) ||
+                !card.IsCurrentThumbnailRequest(cardGeneration))
             {
                 return;
             }
 
             var cachePath = await _thumbnailService.GetOrCreateThumbnailAsync(source, asset, cancellationToken: cancellationToken);
             cancellationToken.ThrowIfCancellationRequested();
-            if (cachePath is null || !ThumbnailService.IsCurrentRequest(asset, request) || !_cards.Contains(card))
+            if (cachePath is null || !_cards.Contains(card) || !card.IsCurrentThumbnailRequest(cardGeneration))
             {
                 return;
             }
 
-            var cachedFile = await StorageFile.GetFileFromPathAsync(cachePath);
-            using var stream = await cachedFile.OpenReadAsync();
+            string relativePath;
+            lock (asset)
+            {
+                request = ThumbnailService.CaptureRequest(asset, ThumbnailService.DefaultRequestedSize);
+                relativePath = asset.ThumbnailCachePath;
+            }
+            if (!ThumbnailService.IsCachePathForRequest(request.Value, relativePath))
+            {
+                return;
+            }
+
+            var cachedFile = await StorageFile.GetFileFromPathAsync(cachePath).AsTask(cancellationToken);
+            using var stream = await cachedFile.OpenReadAsync().AsTask(cancellationToken);
             var bitmap = new BitmapImage();
-            await bitmap.SetSourceAsync(stream);
+            await bitmap.SetSourceAsync(stream).AsTask(cancellationToken);
             cancellationToken.ThrowIfCancellationRequested();
-            if (_cards.Contains(card) && ThumbnailService.IsCurrentRequest(asset, request))
+            if (_cards.Contains(card) &&
+                card.IsCurrentThumbnailRequest(cardGeneration) &&
+                ThumbnailService.IsCurrentRequest(asset, request.Value) &&
+                string.Equals(asset.ThumbnailCachePath, relativePath, StringComparison.Ordinal))
             {
                 card.Thumbnail = bitmap;
             }
@@ -143,9 +164,13 @@ public sealed partial class MediaPanel : UserControl
         catch (OperationCanceledException)
         {
         }
-        catch (Exception exception) when (exception is IOException or UnauthorizedAccessException or InvalidDataException or ArgumentException or System.Runtime.InteropServices.COMException)
+        catch (Exception exception) when (MediaImportService.IsExpectedMediaFailure(exception))
         {
-            if (!cancellationToken.IsCancellationRequested && _cards.Contains(card))
+            if (!cancellationToken.IsCancellationRequested &&
+                _cards.Contains(card) &&
+                card.IsCurrentThumbnailRequest(cardGeneration) &&
+                request is { } failedRequest &&
+                ThumbnailService.IsCurrentRequest(asset, failedRequest))
             {
                 card.UseFallback();
             }
@@ -195,6 +220,11 @@ public sealed partial class MediaPanel : UserControl
 
     private void MediaPanel_Loaded(object sender, RoutedEventArgs e)
     {
+        if (_disposed)
+        {
+            return;
+        }
+
         _lifetimeCts?.Cancel();
         _lifetimeCts?.Dispose();
         _lifetimeCts = new CancellationTokenSource();
@@ -202,6 +232,22 @@ public sealed partial class MediaPanel : UserControl
     }
 
     private void MediaPanel_Unloaded(object sender, RoutedEventArgs e)
+    {
+        StopThumbnailWork();
+    }
+
+    public void Dispose()
+    {
+        if (_disposed)
+        {
+            return;
+        }
+
+        _disposed = true;
+        StopThumbnailWork();
+    }
+
+    private void StopThumbnailWork()
     {
         _thumbnailRefreshCts?.Cancel();
         _thumbnailRefreshCts?.Dispose();
@@ -231,7 +277,18 @@ public sealed partial class MediaPanel : UserControl
 
     private void AssetGrid_ContainerContentChanging(ListViewBase sender, ContainerContentChangingEventArgs args)
     {
-        if (args.InRecycleQueue || args.Item is not MediaAssetCard card || card.ThumbnailRequested || _project is null)
+        if (args.Item is not MediaAssetCard card)
+        {
+            return;
+        }
+
+        if (args.InRecycleQueue)
+        {
+            card.CancelThumbnailRequest();
+            return;
+        }
+
+        if (card.ThumbnailRequested || _project is null)
         {
             return;
         }
@@ -242,8 +299,8 @@ public sealed partial class MediaPanel : UserControl
             return;
         }
 
-        card.ThumbnailRequested = true;
-        _ = LoadThumbnailSafelyAsync(asset, card, _thumbnailRefreshCts?.Token ?? CancellationToken.None);
+        var work = card.BeginThumbnailRequest(_thumbnailRefreshCts?.Token ?? CancellationToken.None);
+        _ = LoadThumbnailSafelyAsync(asset, card, work.Generation, work.Token);
     }
 
     private void AssetGrid_DoubleTapped(object sender, DoubleTappedRoutedEventArgs e)
@@ -275,7 +332,8 @@ public sealed partial class MediaPanel : UserControl
             return;
         }
 
-        e.Data.SetData(MediaAssetDragPayload.FormatId, MediaAssetDragPayload.Create(card.AssetId));
+        var asset = _project!.Assets.First(candidate => candidate.Id == card.AssetId);
+        MediaAssetDragPayload.Set(e.Data, asset);
         e.Data.RequestedOperation = DataPackageOperation.Copy;
         e.Data.Properties.Title = card.FileName;
     }
@@ -319,7 +377,10 @@ public sealed partial class MediaPanel : UserControl
 
     private void PanelRoot_DragOver(object sender, DragEventArgs e)
     {
-        if (TryGetMediaImportScope(_tool, out _) && e.DataView.Contains(StandardDataFormats.StorageItems))
+        if (TryGetMediaImportScope(_tool, out var scope) &&
+            scope.CanAcceptDrop(
+                e.DataView.Contains(StandardDataFormats.StorageItems),
+                e.DataView.Properties.FileTypes))
         {
             e.AcceptedOperation = DataPackageOperation.Copy;
             e.DragUIOverride.Caption = "Import into this project";
@@ -355,30 +416,47 @@ public sealed partial class MediaPanel : UserControl
             {
                 MediaDropFailed?.Invoke(this, new MediaDropFailedEventArgs(result.ErrorMessage!, result.Exception));
             }
-            else if (result.Files.Count > 0)
+            else if (result.Files.Count > 0 || result.RejectedItems.Count > 0)
             {
-                var acceptedFiles = result.Files.Where(file => scope.Allows(file.Path)).ToList();
-                if (acceptedFiles.Count != result.Files.Count)
+                var acceptedFiles = new List<StorageFile>(result.Files.Count);
+                var resultSlots = new List<ImportResult?>(result.Files.Count + result.RejectedItems.Count);
+                foreach (var file in result.Files)
                 {
-                    MediaDropFailed?.Invoke(
-                        this,
-                        new MediaDropFailedEventArgs(
+                    if (!MediaImportService.TryResolveLocalSourcePath(file.Path, out var normalizedPath, out var pathError))
+                    {
+                        resultSlots.Add(ImportResult.Failure(file.Name, pathError!));
+                    }
+                    else if (!scope.Allows(normalizedPath))
+                    {
+                        resultSlots.Add(ImportResult.Failure(
+                            file.Name,
                             scope == MediaImportScope.Audio
                                 ? "Only MP3 and WAV files can be dropped into the Audio panel."
-                                : "Only MP4, PNG, and JPEG files can be dropped into the Media panel.",
-                            null));
+                                : "Only MP4, PNG, and JPEG files can be dropped into the Media panel."));
+                    }
+                    else
+                    {
+                        acceptedFiles.Add(file);
+                        resultSlots.Add(null);
+                    }
                 }
 
-                if (acceptedFiles.Count > 0)
+                resultSlots.AddRange(result.RejectedItems.Select(
+                    item => ImportResult.Failure(item.ItemName, item.Message)));
+                if (acceptedFiles.Count > 0 || resultSlots.Count > 0)
                 {
-                    MediaFilesDropped?.Invoke(this, new MediaFilesDroppedEventArgs(acceptedFiles));
+                    MediaFilesDropped?.Invoke(this, new MediaFilesDroppedEventArgs(acceptedFiles, resultSlots));
                 }
+
+                e.AcceptedOperation = acceptedFiles.Count > 0
+                    ? DataPackageOperation.Copy
+                    : DataPackageOperation.None;
             }
         }
         catch (OperationCanceledException)
         {
         }
-        catch (Exception exception)
+        catch (Exception exception) when (MediaImportService.IsExpectedMediaFailure(exception))
         {
             if (!cancellationToken.IsCancellationRequested)
             {
@@ -395,6 +473,12 @@ public sealed partial class MediaPanel : UserControl
     {
         _thumbnailRefreshCts?.Cancel();
         _thumbnailRefreshCts?.Dispose();
+        if (_disposed)
+        {
+            _thumbnailRefreshCts = null;
+            return;
+        }
+
         _thumbnailRefreshCts = _lifetimeCts is null
             ? new CancellationTokenSource()
             : CancellationTokenSource.CreateLinkedTokenSource(_lifetimeCts.Token);
@@ -414,6 +498,8 @@ public sealed class MediaImportRequestedEventArgs(MediaImportScope scope) : Even
 public sealed class MediaAssetCard : INotifyPropertyChanged
 {
     private BitmapImage? _thumbnail;
+    private CancellationTokenSource? _thumbnailCts;
+    private long _thumbnailGeneration;
 
     public MediaAssetCard(ProjectAsset asset)
     {
@@ -444,6 +530,27 @@ public sealed class MediaAssetCard : INotifyPropertyChanged
     public bool CanAdd { get; }
     public bool ThumbnailRequested { get; set; }
 
+    internal MediaAssetCardThumbnailRequest BeginThumbnailRequest(CancellationToken lifetimeToken)
+    {
+        StopThumbnailRequest();
+        var cancellation = CancellationTokenSource.CreateLinkedTokenSource(lifetimeToken);
+        _thumbnailCts = cancellation;
+        ThumbnailRequested = true;
+        return new MediaAssetCardThumbnailRequest(++_thumbnailGeneration, cancellation.Token);
+    }
+
+    internal void CancelThumbnailRequest()
+    {
+        StopThumbnailRequest();
+        ThumbnailRequested = false;
+        _thumbnailGeneration++;
+    }
+
+    internal bool IsCurrentThumbnailRequest(long generation) =>
+        ThumbnailRequested &&
+        generation == _thumbnailGeneration &&
+        _thumbnailCts is { IsCancellationRequested: false };
+
     public BitmapImage? Thumbnail
     {
         get => _thumbnail;
@@ -460,18 +567,30 @@ public sealed class MediaAssetCard : INotifyPropertyChanged
 
     public void UseFallback() => Thumbnail = null;
 
+    private void StopThumbnailRequest()
+    {
+        _thumbnailCts?.Cancel();
+        _thumbnailCts?.Dispose();
+        _thumbnailCts = null;
+    }
+
     private void OnPropertyChanged([CallerMemberName] string? propertyName = null) =>
         PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(propertyName));
 }
+
+internal readonly record struct MediaAssetCardThumbnailRequest(long Generation, CancellationToken Token);
 
 public sealed class AssetActionEventArgs(Guid assetId) : EventArgs
 {
     public Guid AssetId { get; } = assetId;
 }
 
-public sealed class MediaFilesDroppedEventArgs(IReadOnlyList<StorageFile> files) : EventArgs
+public sealed class MediaFilesDroppedEventArgs(
+    IReadOnlyList<StorageFile> files,
+    IReadOnlyList<ImportResult?> resultSlots) : EventArgs
 {
     public IReadOnlyList<StorageFile> Files { get; } = files;
+    public IReadOnlyList<ImportResult?> ResultSlots { get; } = resultSlots;
 }
 
 public sealed class MediaDropFailedEventArgs(string message, Exception? exception) : EventArgs

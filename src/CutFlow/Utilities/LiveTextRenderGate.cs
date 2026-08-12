@@ -49,7 +49,7 @@ internal sealed class LiveTextRenderKey : IEquatable<LiveTextRenderKey>
             .Select(item => new LiveTextItemRenderKey(
                 item.Id,
                 item.Text,
-                item.FontFamily,
+                TextStyle.NormalizeFontFamily(item.FontFamily),
                 item.FontSize,
                 item.FontWeight,
                 item.IsItalic,

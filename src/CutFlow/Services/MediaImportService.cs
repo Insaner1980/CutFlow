@@ -37,13 +37,12 @@ public sealed class MediaImportService
 
             try
             {
-                if (string.IsNullOrWhiteSpace(file.Path))
+                if (!TryResolveLocalSourcePath(file.Path, out var normalizedPath, out var pathError))
                 {
-                    results.Add(ImportResult.Failure(displayName, $"{AppInfo.ProductName} cannot access this file by a local path."));
+                    results.Add(ImportResult.Failure(displayName, pathError!));
                     continue;
                 }
 
-                var normalizedPath = NormalizePath(file.Path);
                 if (IsPathWithinDirectory(normalizedPath, managedProjectsRootPath))
                 {
                     results.Add(ImportResult.Failure(
@@ -58,7 +57,20 @@ public sealed class MediaImportService
                     continue;
                 }
 
-                var metadata = await ReadMetadataAsync(file, cancellationToken);
+                var metadata = await ReadMetadataAsync(file, normalizedPath, cancellationToken);
+                if (!TryResolveLocalSourcePath(file.Path, out var currentPath, out pathError) ||
+                    !string.Equals(currentPath, normalizedPath, StringComparison.OrdinalIgnoreCase))
+                {
+                    results.Add(ImportResult.Failure(displayName, pathError ?? "The file path changed during import. Choose the file again."));
+                    continue;
+                }
+
+                if (!MatchesSnapshot(normalizedPath, metadata))
+                {
+                    results.Add(ImportResult.Failure(displayName, "The file changed during import. Choose the file again."));
+                    continue;
+                }
+
                 results.Add(ImportResult.Success(CreateAsset(metadata)));
                 knownPaths.Add(normalizedPath);
             }
@@ -91,7 +103,11 @@ public sealed class MediaImportService
 
         try
         {
-            var normalizedPath = NormalizePath(replacement.Path);
+            if (!TryResolveLocalSourcePath(replacement.Path, out var normalizedPath, out var pathError))
+            {
+                return ImportResult.Failure(replacement.Name, pathError!);
+            }
+
             if (IsPathWithinDirectory(normalizedPath, managedProjectsRootPath))
             {
                 return ImportResult.Failure(
@@ -99,15 +115,23 @@ public sealed class MediaImportService
                     $"Choose source media outside {AppInfo.ProductName}'s managed project folders.");
             }
 
-            if (project.Assets.Any(candidate =>
-                    candidate.Id != asset.Id &&
-                    !string.IsNullOrWhiteSpace(candidate.SourcePath) &&
-                    string.Equals(NormalizePath(candidate.SourcePath), normalizedPath, StringComparison.OrdinalIgnoreCase)))
+            if (ContainsSourcePath(project, normalizedPath, asset.Id))
             {
                 return ImportResult.Failure(replacement.Name, "That file is already imported in this project.");
             }
 
-            var metadata = await ReadMetadataAsync(replacement, cancellationToken);
+            var metadata = await ReadMetadataAsync(replacement, normalizedPath, cancellationToken);
+            if (!TryResolveLocalSourcePath(replacement.Path, out var currentPath, out pathError) ||
+                !string.Equals(currentPath, normalizedPath, StringComparison.OrdinalIgnoreCase))
+            {
+                return ImportResult.Failure(replacement.Name, pathError ?? "The replacement path changed during relink. Choose the file again.");
+            }
+
+            if (!MatchesSnapshot(normalizedPath, metadata))
+            {
+                return ImportResult.Failure(replacement.Name, "The replacement file changed during relink. Choose the file again.");
+            }
+
             if (!TryApplyRelink(asset, metadata, project, out var error))
             {
                 return ImportResult.Failure(replacement.Name, error!);
@@ -131,23 +155,26 @@ public sealed class MediaImportService
     {
         ArgumentNullException.ThrowIfNull(project);
         return Task.Run(
-            () => RefreshMissing(project, path =>
-            {
-                cancellationToken.ThrowIfCancellationRequested();
-                return !string.IsNullOrWhiteSpace(path) && File.Exists(path);
-            }),
+            () => RefreshMissing(project, File.Exists, cancellationToken),
             cancellationToken);
     }
 
-    internal static int RefreshMissing(ProjectDocument project, Func<string, bool> pathExists)
+    internal static int RefreshMissing(
+        ProjectDocument project,
+        Func<string, bool> pathExists,
+        CancellationToken cancellationToken = default)
     {
-        ArgumentNullException.ThrowIfNull(project);
         ArgumentNullException.ThrowIfNull(pathExists);
+        ArgumentNullException.ThrowIfNull(project);
 
         var changed = 0;
         foreach (var asset in project.Assets)
         {
-            var missing = !pathExists(asset.SourcePath);
+            cancellationToken.ThrowIfCancellationRequested();
+            var exists = TryNormalizeCurrentSourcePath(asset.SourcePath, out var normalizedPath) &&
+                SourceExists(normalizedPath, pathExists);
+            cancellationToken.ThrowIfCancellationRequested();
+            var missing = !exists;
             if (asset.IsMissing != missing)
             {
                 asset.IsMissing = missing;
@@ -156,6 +183,62 @@ public sealed class MediaImportService
         }
 
         return changed;
+    }
+
+    private static bool TryNormalizeCurrentSourcePath(string? path, out string normalizedPath)
+    {
+        normalizedPath = string.Empty;
+        if (string.IsNullOrWhiteSpace(path) || !Path.IsPathFullyQualified(path))
+        {
+            return false;
+        }
+
+        try
+        {
+            normalizedPath = NormalizePath(path);
+            return true;
+        }
+        catch (Exception exception) when (exception is ArgumentException or NotSupportedException or PathTooLongException or
+                                              System.Security.SecurityException)
+        {
+            return false;
+        }
+    }
+
+    private static bool SourceExists(string normalizedPath, Func<string, bool> pathExists)
+    {
+        try
+        {
+            return pathExists(normalizedPath);
+        }
+        catch (Exception exception) when (exception is IOException or UnauthorizedAccessException or
+                                              ArgumentException or NotSupportedException or PathTooLongException or
+                                              System.Security.SecurityException)
+        {
+            return false;
+        }
+    }
+
+    internal static bool SourceMatchesRecordedSnapshot(ProjectAsset asset)
+    {
+        ArgumentNullException.ThrowIfNull(asset);
+        if (string.IsNullOrWhiteSpace(asset.SourcePath))
+        {
+            return false;
+        }
+
+        if (!TryReadSnapshot(asset.SourcePath, out var current))
+        {
+            return false;
+        }
+
+        if (asset.LastWriteUtc == default)
+        {
+            // Older project documents did not necessarily persist a source snapshot.
+            return true;
+        }
+
+        return current == new SourceFileSnapshot(asset.FileSize, asset.LastWriteUtc.ToUniversalTime());
     }
 
     public static bool TryGetKind(string path, out ProjectAssetKind kind)
@@ -176,6 +259,53 @@ public sealed class MediaImportService
         return Path.TrimEndingDirectorySeparator(Path.GetFullPath(path));
     }
 
+    internal static bool TryResolveLocalSourcePath(
+        string? path,
+        out string normalizedPath,
+        out string? error)
+    {
+        normalizedPath = string.Empty;
+        if (string.IsNullOrWhiteSpace(path))
+        {
+            error = $"{AppInfo.ProductName} needs a usable local file-system path. Download or copy this item to a local folder, then try again.";
+            return false;
+        }
+
+        try
+        {
+            if (!Path.IsPathFullyQualified(path))
+            {
+                error = $"{AppInfo.ProductName} needs a fully qualified local file-system path. Choose the file again.";
+                return false;
+            }
+
+            normalizedPath = NormalizePath(path);
+            if (normalizedPath.StartsWith(@"\\?\", StringComparison.Ordinal) ||
+                normalizedPath.StartsWith(@"\\.\", StringComparison.Ordinal))
+            {
+                normalizedPath = string.Empty;
+                error = "Windows device paths are not supported. Choose the file through File Explorer or copy it to a regular drive or network folder.";
+                return false;
+            }
+
+            if (!File.Exists(normalizedPath))
+            {
+                normalizedPath = string.Empty;
+                error = "The file is no longer available at its local path. Restore or download it, then try again.";
+                return false;
+            }
+
+            error = null;
+            return true;
+        }
+        catch (Exception exception) when (exception is ArgumentException or NotSupportedException or PathTooLongException)
+        {
+            normalizedPath = string.Empty;
+            error = $"{AppInfo.ProductName} cannot use this file-system path. Choose a local media file through File Explorer.";
+            return false;
+        }
+    }
+
     internal static bool IsPathWithinDirectory(string path, string directoryPath)
     {
         var normalizedPath = NormalizePath(path);
@@ -185,12 +315,67 @@ public sealed class MediaImportService
     }
 
     public static bool ContainsSourcePath(ProjectDocument project, string path)
+        => ContainsSourcePath(project, path, excludedAssetId: null);
+
+    internal static bool ContainsSourcePath(ProjectDocument project, string path, Guid? excludedAssetId)
     {
         ArgumentNullException.ThrowIfNull(project);
         var normalized = NormalizePath(path);
         return project.Assets.Any(asset =>
+            asset.Id != excludedAssetId &&
             !string.IsNullOrWhiteSpace(asset.SourcePath) &&
             string.Equals(NormalizePath(asset.SourcePath), normalized, StringComparison.OrdinalIgnoreCase));
+    }
+
+    internal static IReadOnlyList<ImportResult> RevalidateDuplicateResults(
+        ProjectDocument project,
+        IReadOnlyList<ImportResult> results)
+    {
+        ArgumentNullException.ThrowIfNull(project);
+        ArgumentNullException.ThrowIfNull(results);
+
+        var knownPaths = project.Assets
+            .Where(asset => !string.IsNullOrWhiteSpace(asset.SourcePath))
+            .Select(asset => NormalizePath(asset.SourcePath))
+            .ToHashSet(StringComparer.OrdinalIgnoreCase);
+        return results
+            .Select(result => result.Asset is not null && !knownPaths.Add(NormalizePath(result.Asset.SourcePath))
+                ? ImportResult.Duplicate(result.FileName)
+                : result)
+            .ToList();
+    }
+
+    internal static IReadOnlyList<ImportResult> MergeImportResults(
+        IReadOnlyList<ImportResult?> resultSlots,
+        IReadOnlyList<ImportResult> preparedResults)
+    {
+        ArgumentNullException.ThrowIfNull(resultSlots);
+        ArgumentNullException.ThrowIfNull(preparedResults);
+
+        var preparedIndex = 0;
+        var merged = new List<ImportResult>(resultSlots.Count);
+        foreach (var slot in resultSlots)
+        {
+            if (slot is not null)
+            {
+                merged.Add(slot);
+                continue;
+            }
+
+            if (preparedIndex >= preparedResults.Count)
+            {
+                throw new ArgumentException("The prepared import results do not match the batch slots.", nameof(preparedResults));
+            }
+
+            merged.Add(preparedResults[preparedIndex++]);
+        }
+
+        if (preparedIndex != preparedResults.Count)
+        {
+            throw new ArgumentException("The prepared import results do not match the batch slots.", nameof(preparedResults));
+        }
+
+        return merged;
     }
 
     public static ProjectAsset CreateAsset(MediaFileMetadata metadata)
@@ -248,17 +433,7 @@ public sealed class MediaImportService
             return false;
         }
 
-        var requiredSourceOut = asset.Kind == ProjectAssetKind.Audio
-            ? project.AudioItems
-                .Where(item => item.AssetId == asset.Id)
-                .Select(item => item.SourceOutMilliseconds)
-                .DefaultIfEmpty(0)
-                .Max()
-            : project.VideoItems
-                .Where(item => item.AssetId == asset.Id)
-                .Select(item => item.SourceOutMilliseconds)
-                .DefaultIfEmpty(0)
-                .Max();
+        var requiredSourceOut = GetRequiredSourceOutMilliseconds(project, asset.Id);
         if (mapped.DurationMilliseconds < requiredSourceOut)
         {
             error = $"'{mapped.FileName}' is too short for existing timeline references through {requiredSourceOut} ms.";
@@ -276,6 +451,19 @@ public sealed class MediaImportService
         asset.IsMissing = false;
         error = null;
         return true;
+    }
+
+    internal static long GetRequiredSourceOutMilliseconds(ProjectDocument project, Guid assetId)
+    {
+        ArgumentNullException.ThrowIfNull(project);
+        return project.VideoItems
+            .Where(item => item.AssetId == assetId)
+            .Select(item => item.SourceOutMilliseconds)
+            .Concat(project.AudioItems
+                .Where(item => item.AssetId == assetId)
+                .Select(item => item.SourceOutMilliseconds))
+            .DefaultIfEmpty(0)
+            .Max();
     }
 
     public static bool IsAssetReferenced(ProjectDocument project, Guid assetId)
@@ -299,16 +487,18 @@ public sealed class MediaImportService
         return removed;
     }
 
-    private static async Task<MediaFileMetadata> ReadMetadataAsync(StorageFile file, CancellationToken cancellationToken)
+    private static async Task<MediaFileMetadata> ReadMetadataAsync(
+        StorageFile file,
+        string normalizedPath,
+        CancellationToken cancellationToken)
     {
         cancellationToken.ThrowIfCancellationRequested();
-        if (!TryGetKind(file.Path, out var kind))
+        if (!TryGetKind(normalizedPath, out var kind))
         {
             throw new NotSupportedException("Supported formats are MP4, PNG, JPEG, MP3, and WAV.");
         }
 
-        var basic = await file.GetBasicPropertiesAsync();
-        cancellationToken.ThrowIfCancellationRequested();
+        var beforeValidation = await ReadSnapshotAsync(file, cancellationToken);
         long durationMilliseconds;
         int width = 0;
         int height = 0;
@@ -316,50 +506,98 @@ public sealed class MediaImportService
         switch (kind)
         {
             case ProjectAssetKind.Video:
-            {
-                var clip = await MediaClip.CreateFromFileAsync(file);
-                cancellationToken.ThrowIfCancellationRequested();
-                var properties = await file.Properties.GetVideoPropertiesAsync();
-                durationMilliseconds = ToMilliseconds(clip.OriginalDuration);
-                width = checked((int)properties.Width);
-                height = checked((int)properties.Height);
-                break;
-            }
+                {
+                    var clip = await MediaClip.CreateFromFileAsync(file);
+                    cancellationToken.ThrowIfCancellationRequested();
+                    var properties = clip.GetVideoEncodingProperties();
+                    if (properties.Width == 0 || properties.Height == 0)
+                    {
+                        throw new InvalidDataException("The file does not contain a decodable video stream.");
+                    }
+
+                    durationMilliseconds = ToMilliseconds(clip.OriginalDuration);
+                    width = checked((int)properties.Width);
+                    height = checked((int)properties.Height);
+                    break;
+                }
             case ProjectAssetKind.Audio:
-            {
-                var track = await BackgroundAudioTrack.CreateFromFileAsync(file);
-                cancellationToken.ThrowIfCancellationRequested();
-                durationMilliseconds = ToMilliseconds(track.OriginalDuration);
-                break;
-            }
+                {
+                    var track = await BackgroundAudioTrack.CreateFromFileAsync(file);
+                    cancellationToken.ThrowIfCancellationRequested();
+                    durationMilliseconds = ToMilliseconds(track.OriginalDuration);
+                    break;
+                }
             case ProjectAssetKind.Image:
-            {
-                using var stream = await file.OpenReadAsync();
-                var decoder = await BitmapDecoder.CreateAsync(stream);
-                cancellationToken.ThrowIfCancellationRequested();
-                width = checked((int)decoder.PixelWidth);
-                height = checked((int)decoder.PixelHeight);
-                durationMilliseconds = DefaultImageDurationMilliseconds;
-                break;
-            }
+                {
+                    using var stream = await file.OpenReadAsync();
+                    var decoder = await BitmapDecoder.CreateAsync(stream);
+                    cancellationToken.ThrowIfCancellationRequested();
+                    width = checked((int)decoder.OrientedPixelWidth);
+                    height = checked((int)decoder.OrientedPixelHeight);
+                    durationMilliseconds = DefaultImageDurationMilliseconds;
+                    break;
+                }
             default:
                 throw new NotSupportedException("Unsupported media kind.");
         }
 
+        var afterValidation = await ReadSnapshotAsync(file, cancellationToken);
+        if (beforeValidation != afterValidation)
+        {
+            throw new InvalidDataException("The file changed while Windows was validating it. Choose the file again.");
+        }
+
         return new MediaFileMetadata(
-            NormalizePath(file.Path),
-            file.Name,
+            normalizedPath,
+            Path.GetFileName(normalizedPath),
             kind,
             durationMilliseconds,
             width,
             height,
-            basic.Size,
-            basic.DateModified.ToUniversalTime());
+            afterValidation.FileSize,
+            afterValidation.LastWriteUtc);
+    }
+
+    private static async Task<SourceFileSnapshot> ReadSnapshotAsync(
+        StorageFile file,
+        CancellationToken cancellationToken)
+    {
+        var basic = await file.GetBasicPropertiesAsync();
+        cancellationToken.ThrowIfCancellationRequested();
+        return new SourceFileSnapshot(basic.Size, basic.DateModified.ToUniversalTime());
+    }
+
+    private static bool MatchesSnapshot(string path, MediaFileMetadata metadata) =>
+        TryReadSnapshot(path, out var current) &&
+        current == new SourceFileSnapshot(metadata.FileSize, metadata.LastWriteUtc.ToUniversalTime());
+
+    private static bool TryReadSnapshot(string path, out SourceFileSnapshot snapshot)
+    {
+        snapshot = default;
+        try
+        {
+            var file = new FileInfo(path);
+            if (!file.Exists)
+            {
+                return false;
+            }
+
+            snapshot = new SourceFileSnapshot(
+                checked((ulong)file.Length),
+                new DateTimeOffset(file.LastWriteTimeUtc));
+            return true;
+        }
+        catch (Exception exception) when (exception is IOException or UnauthorizedAccessException or
+                                              ArgumentException or NotSupportedException or PathTooLongException or
+                                              OverflowException or System.Security.SecurityException)
+        {
+            return false;
+        }
     }
 
     private static long ToMilliseconds(TimeSpan duration) => checked((long)Math.Round(duration.TotalMilliseconds));
 
-    private static bool IsExpectedMediaFailure(Exception exception) =>
+    internal static bool IsExpectedMediaFailure(Exception exception) =>
         exception is IOException or UnauthorizedAccessException or InvalidDataException or NotSupportedException or ArgumentException or OverflowException or System.Runtime.InteropServices.COMException;
 
     private static string ReadableReason(Exception exception) => exception switch
@@ -370,6 +608,8 @@ public sealed class MediaImportService
         _ => "The file may be unsupported, damaged, moved, or inaccessible."
     };
 }
+
+internal readonly record struct SourceFileSnapshot(ulong FileSize, DateTimeOffset LastWriteUtc);
 
 public sealed record MediaFileMetadata(
     string SourcePath,

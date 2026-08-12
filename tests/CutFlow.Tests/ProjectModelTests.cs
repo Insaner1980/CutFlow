@@ -29,6 +29,18 @@ public sealed class ProjectModelTests
     }
 
     [TestMethod]
+    public void CreateNew_NormalizesTimestampToUtcWithoutChangingTheInstant()
+    {
+        var localTimestamp = new DateTimeOffset(2026, 8, 9, 23, 59, 59, TimeSpan.FromHours(3));
+
+        var project = ProjectDocument.CreateNew("UTC project", localTimestamp);
+
+        Assert.AreEqual(localTimestamp.ToUniversalTime(), project.CreatedAt);
+        Assert.AreEqual(TimeSpan.Zero, project.CreatedAt.Offset);
+        Assert.AreEqual(project.CreatedAt, project.ModifiedAt);
+    }
+
+    [TestMethod]
     public void ApplyAspectRatio_Portrait_Uses1080By1920()
     {
         var settings = new ProjectSettings();
@@ -72,8 +84,26 @@ public sealed class ProjectModelTests
     }
 
     [TestMethod]
-    public void MinimumItemDuration_IsOneHundredMilliseconds()
+    public void VideoDurationFallback_SaturatesWhenSourceRangeExceedsLong()
     {
-        Assert.AreEqual(100L, ProjectDocument.MinimumItemDurationMilliseconds);
+        var item = new VideoTimelineItem
+        {
+            SourceInMilliseconds = long.MinValue,
+            SourceOutMilliseconds = long.MaxValue
+        };
+
+        Assert.AreEqual(long.MaxValue, item.DurationMilliseconds);
+    }
+
+    [TestMethod]
+    public void AudioDuration_SaturatesWhenSourceRangeExceedsLong()
+    {
+        var item = new AudioTimelineItem
+        {
+            SourceInMilliseconds = long.MinValue,
+            SourceOutMilliseconds = long.MaxValue
+        };
+
+        Assert.AreEqual(long.MaxValue, item.DurationMilliseconds);
     }
 }

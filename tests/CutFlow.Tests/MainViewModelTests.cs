@@ -1,3 +1,4 @@
+using System.Text.Json;
 using CutFlow.Models;
 using CutFlow.Services;
 using CutFlow.ViewModels;
@@ -77,6 +78,94 @@ public sealed class MainViewModelTests
     }
 
     [TestMethod]
+    public async Task ShowHomeAsync_WhenEditCommitsDuringImmediateSave_PersistsLatestRevisionBeforeNavigating()
+    {
+        using var directory = new TemporaryDirectory();
+        var initialService = new ProjectService(directory.Path);
+        var project = await initialService.CreateAsync("Initial");
+        var firstRevisionSerialized = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var releaseFirstSave = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var serializationCount = 0;
+        var jsonOptions = new JsonSerializerOptions { PropertyNamingPolicy = JsonNamingPolicy.CamelCase };
+        var service = new ProjectService(directory.Path, document =>
+        {
+            var json = JsonSerializer.Serialize(document, jsonOptions);
+            if (Interlocked.Increment(ref serializationCount) == 1)
+            {
+                firstRevisionSerialized.TrySetResult();
+                releaseFirstSave.Task.GetAwaiter().GetResult();
+            }
+
+            return json;
+        });
+        var viewModel = new MainViewModel(service);
+        await viewModel.OpenEditorAsync(project);
+        var editor = viewModel.Editor!;
+        editor.RenameProject("First revision");
+
+        var navigationTask = Task.Run(() => viewModel.ShowHomeAsync());
+        await firstRevisionSerialized.Task.WaitAsync(TimeSpan.FromSeconds(5));
+        editor.RenameProject("Latest revision");
+        releaseFirstSave.TrySetResult();
+
+        var navigated = await navigationTask;
+
+        Assert.IsTrue(navigated);
+        Assert.IsFalse(viewModel.IsEditorOpen);
+        Assert.AreEqual(2, serializationCount);
+        Assert.AreEqual("Latest revision", (await service.LoadAsync(project.Id)).Name);
+    }
+
+    [TestMethod]
+    public async Task ShowHomeAsync_WhenImmediateSaveIsCanceled_RemainsInEditorAndCanRetry()
+    {
+        using var directory = new TemporaryDirectory();
+        var service = new ProjectService(directory.Path);
+        var project = await service.CreateAsync("Canceled navigation");
+        var viewModel = new MainViewModel(service);
+        await viewModel.OpenEditorAsync(project);
+        var editor = viewModel.Editor!;
+        editor.RenameProject("Unsaved revision");
+        using var cancellation = new CancellationTokenSource();
+        cancellation.Cancel();
+
+        await Assert.ThrowsExactlyAsync<OperationCanceledException>(() => viewModel.ShowHomeAsync(cancellation.Token));
+
+        Assert.AreSame(editor, viewModel.Editor);
+        Assert.AreEqual(EditorViewModel.UnsavedStatus, editor.SaveStatus);
+        Assert.IsTrue(await viewModel.ShowHomeAsync());
+        Assert.AreEqual("Unsaved revision", (await service.LoadAsync(project.Id)).Name);
+    }
+
+    [TestMethod]
+    public async Task ShowHomeAsync_WhenSaveIsCanceledAfterTempFlush_RemainsUnsavedAndPreservesPriorJson()
+    {
+        using var directory = new TemporaryDirectory();
+        var initialService = new ProjectService(directory.Path);
+        var project = await initialService.CreateAsync("Persisted revision");
+        var projectPath = Path.Combine(directory.Path, "Projects", project.Id.ToString("D"), "project.json");
+        var originalJson = await File.ReadAllTextAsync(projectPath);
+        using var cancellation = new CancellationTokenSource();
+        var service = new ProjectService(
+            directory.Path,
+            writeAndFlushAsync: async (path, json, _) =>
+            {
+                await File.WriteAllTextAsync(path, json);
+                cancellation.Cancel();
+            });
+        var viewModel = new MainViewModel(service);
+        await viewModel.OpenEditorAsync(project);
+        var editor = viewModel.Editor!;
+        editor.RenameProject("Canceled revision");
+
+        await Assert.ThrowsExactlyAsync<OperationCanceledException>(() => viewModel.ShowHomeAsync(cancellation.Token));
+
+        Assert.AreSame(editor, viewModel.Editor);
+        Assert.AreEqual(EditorViewModel.UnsavedStatus, editor.SaveStatus);
+        Assert.AreEqual(originalJson, await File.ReadAllTextAsync(projectPath));
+    }
+
+    [TestMethod]
     public async Task ShowHomeAsync_RaisesViewChangeBeforeCompletingLoad()
     {
         using var directory = new TemporaryDirectory();
@@ -95,6 +184,77 @@ public sealed class MainViewModelTests
     }
 
     [TestMethod]
+    public async Task CurrentViewPropertyChanges_OnlyPublishCoherentStates()
+    {
+        using var directory = new TemporaryDirectory();
+        var viewModel = new MainViewModel(new ProjectService(directory.Path));
+        var project = ProjectDocument.CreateNew("Coherent transition", DateTimeOffset.UnixEpoch);
+        var observedIncoherentState = false;
+        viewModel.PropertyChanged += (_, _) =>
+        {
+            var currentProject = viewModel.CurrentProject;
+            var editor = viewModel.Editor;
+            observedIncoherentState |= (currentProject is null) != (editor is null) ||
+                (editor is not null && !ReferenceEquals(currentProject, editor.Project));
+        };
+
+        await viewModel.OpenEditorAsync(project);
+        await viewModel.ShowHomeAsync();
+
+        Assert.IsFalse(observedIncoherentState);
+    }
+
+    [TestMethod]
+    public async Task OpenEditorAsync_WhenPropertyObserverThrows_RestoresHomeState()
+    {
+        using var directory = new TemporaryDirectory();
+        var viewModel = new MainViewModel(new ProjectService(directory.Path));
+        var project = ProjectDocument.CreateNew("Failed property notification", DateTimeOffset.UnixEpoch);
+        var throwOnNextChange = true;
+        viewModel.PropertyChanged += (_, _) =>
+        {
+            if (throwOnNextChange)
+            {
+                throwOnNextChange = false;
+                throw new InvalidOperationException("Property observer failed.");
+            }
+        };
+
+        await Assert.ThrowsExactlyAsync<InvalidOperationException>(() => viewModel.OpenEditorAsync(project));
+
+        Assert.IsNull(viewModel.CurrentProject);
+        Assert.IsNull(viewModel.Editor);
+        Assert.IsFalse(viewModel.IsEditorOpen);
+    }
+
+    [TestMethod]
+    public async Task OpenEditorAsync_ReentrantHomeRequestDoesNotInterruptTransition()
+    {
+        using var directory = new TemporaryDirectory();
+        var viewModel = new MainViewModel(new ProjectService(directory.Path));
+        var project = ProjectDocument.CreateNew("Reentrant transition", DateTimeOffset.UnixEpoch);
+        bool? reentrantNavigationResult = null;
+        var attemptReentrantNavigation = true;
+        viewModel.CurrentViewChanged += (_, _) =>
+        {
+            if (!attemptReentrantNavigation)
+            {
+                return;
+            }
+
+            attemptReentrantNavigation = false;
+            reentrantNavigationResult = viewModel.ShowHomeAsync().GetAwaiter().GetResult();
+        };
+
+        await viewModel.OpenEditorAsync(project);
+
+        Assert.IsFalse(reentrantNavigationResult);
+        Assert.AreSame(project, viewModel.CurrentProject);
+        Assert.AreSame(project, viewModel.Editor?.Project);
+        Assert.IsTrue(viewModel.IsEditorOpen);
+    }
+
+    [TestMethod]
     public async Task OpenEditorAsync_WhenViewChangeFails_RestoresHomeState()
     {
         using var directory = new TemporaryDirectory();
@@ -107,6 +267,94 @@ public sealed class MainViewModelTests
         Assert.IsNull(viewModel.CurrentProject);
         Assert.IsNull(viewModel.Editor);
         Assert.IsFalse(viewModel.IsEditorOpen);
+    }
+
+    [TestMethod]
+    public async Task OpenEditorAsync_WhenLaterViewObserverFails_NotifiesEarlierObserverOfRollback()
+    {
+        using var directory = new TemporaryDirectory();
+        var viewModel = new MainViewModel(new ProjectService(directory.Path));
+        var project = ProjectDocument.CreateNew("Failed later observer", DateTimeOffset.UnixEpoch);
+        var observedEditorStates = new List<bool>();
+        viewModel.CurrentViewChanged += (_, _) => observedEditorStates.Add(viewModel.IsEditorOpen);
+        viewModel.CurrentViewChanged += (_, _) => throw new InvalidOperationException("Later observer failed.");
+
+        await Assert.ThrowsExactlyAsync<InvalidOperationException>(() => viewModel.OpenEditorAsync(project));
+
+        CollectionAssert.AreEqual(new[] { true, false }, observedEditorStates);
+        Assert.IsNull(viewModel.CurrentProject);
+        Assert.IsNull(viewModel.Editor);
+    }
+
+    [TestMethod]
+    public async Task OpenEditorAsync_WhenEditorIsAlreadyOpen_RejectsReplacementAndRetainsCurrentState()
+    {
+        using var directory = new TemporaryDirectory();
+        var viewModel = new MainViewModel(new ProjectService(directory.Path));
+        var currentProject = ProjectDocument.CreateNew("Current editor", DateTimeOffset.UnixEpoch);
+        var replacementProject = ProjectDocument.CreateNew("Replacement editor", DateTimeOffset.UnixEpoch);
+        await viewModel.OpenEditorAsync(currentProject);
+        var currentEditor = viewModel.Editor;
+
+        await Assert.ThrowsExactlyAsync<InvalidOperationException>(() => viewModel.OpenEditorAsync(replacementProject));
+
+        Assert.AreSame(currentProject, viewModel.CurrentProject);
+        Assert.AreSame(currentEditor, viewModel.Editor);
+    }
+
+    [TestMethod]
+    public async Task ReplaceEditorAsync_PublishesOneDirectEditorTransition()
+    {
+        using var directory = new TemporaryDirectory();
+        var viewModel = new MainViewModel(new ProjectService(directory.Path));
+        var currentProject = ProjectDocument.CreateNew("Current editor", DateTimeOffset.UnixEpoch);
+        var replacementProject = ProjectDocument.CreateNew("Replacement editor", DateTimeOffset.UnixEpoch);
+        await viewModel.OpenEditorAsync(currentProject);
+        var observedProjects = new List<ProjectDocument?>();
+        viewModel.CurrentViewChanged += (_, _) => observedProjects.Add(viewModel.CurrentProject);
+
+        await viewModel.ReplaceEditorAsync(replacementProject);
+
+        CollectionAssert.AreEqual(new[] { replacementProject }, observedProjects);
+        Assert.AreSame(replacementProject, viewModel.CurrentProject);
+        Assert.AreSame(replacementProject, viewModel.Editor?.Project);
+    }
+
+    [TestMethod]
+    public async Task ReplaceEditorAsync_WhenCanceled_PreservesCurrentEditor()
+    {
+        using var directory = new TemporaryDirectory();
+        var viewModel = new MainViewModel(new ProjectService(directory.Path));
+        var currentProject = ProjectDocument.CreateNew("Current editor", DateTimeOffset.UnixEpoch);
+        var replacementProject = ProjectDocument.CreateNew("Canceled replacement", DateTimeOffset.UnixEpoch);
+        await viewModel.OpenEditorAsync(currentProject);
+        var currentEditor = viewModel.Editor;
+        using var cancellation = new CancellationTokenSource();
+        cancellation.Cancel();
+
+        await Assert.ThrowsExactlyAsync<TaskCanceledException>(() =>
+            viewModel.ReplaceEditorAsync(replacementProject, cancellation.Token));
+
+        Assert.AreSame(currentProject, viewModel.CurrentProject);
+        Assert.AreSame(currentEditor, viewModel.Editor);
+    }
+
+    [TestMethod]
+    public async Task NewProjectCreationFailure_PreservesCurrentEditor()
+    {
+        using var directory = new TemporaryDirectory();
+        var service = new ProjectService(
+            directory.Path,
+            _ => throw new InvalidOperationException("Deterministic project creation failure."));
+        var viewModel = new MainViewModel(service);
+        var currentProject = ProjectDocument.CreateNew("Current editor", DateTimeOffset.UnixEpoch);
+        await viewModel.OpenEditorAsync(currentProject);
+        var currentEditor = viewModel.Editor;
+
+        await Assert.ThrowsExactlyAsync<InvalidOperationException>(() => viewModel.Home.CreateAsync());
+
+        Assert.AreSame(currentProject, viewModel.CurrentProject);
+        Assert.AreSame(currentEditor, viewModel.Editor);
     }
 
     [TestMethod]

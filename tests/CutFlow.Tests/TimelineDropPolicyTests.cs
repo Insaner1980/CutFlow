@@ -8,7 +8,7 @@ namespace CutFlow.Tests;
 [TestClass]
 public sealed class TimelineDropPolicyTests
 {
-    [DataTestMethod]
+    [TestMethod]
     [DataRow(-1d, TimelineTrackKind.None)]
     [DataRow(29.999d, TimelineTrackKind.None)]
     [DataRow(30d, TimelineTrackKind.Video)]
@@ -25,7 +25,7 @@ public sealed class TimelineDropPolicyTests
         Assert.AreEqual(expected, actual);
     }
 
-    [DataTestMethod]
+    [TestMethod]
     [DataRow(TimelineTrackKind.Video, ProjectAssetKind.Video, true)]
     [DataRow(TimelineTrackKind.Video, ProjectAssetKind.Image, true)]
     [DataRow(TimelineTrackKind.Video, ProjectAssetKind.Audio, false)]
@@ -64,6 +64,47 @@ public sealed class TimelineDropPolicyTests
     }
 
     [TestMethod]
+    public void DragOver_AdvertisedTypesMatchTheFinalTrackScope()
+    {
+        Assert.IsTrue(TimelineDropPolicy.CanAcceptDrag(
+            TimelineTrackKind.Video, false, true, false, [".mp4"]));
+        Assert.IsFalse(TimelineDropPolicy.CanAcceptDrag(
+            TimelineTrackKind.Video, false, true, false, [".wav"]));
+        Assert.IsTrue(TimelineDropPolicy.CanAcceptDrag(
+            TimelineTrackKind.Audio, false, true, false, [".wav"]));
+        Assert.IsFalse(TimelineDropPolicy.CanAcceptDrag(
+            TimelineTrackKind.Audio, false, true, false, [".jpg"]));
+        Assert.IsFalse(TimelineDropPolicy.CanAcceptDrag(
+            TimelineTrackKind.Text, false, true, false, [".mp4"]));
+    }
+
+    [TestMethod]
+    public void DragOver_UnknownExternalStorageCanBeInspectedButUnknownLibraryPayloadIsRejected()
+    {
+        Assert.IsTrue(TimelineDropPolicy.CanAcceptDrag(
+            TimelineTrackKind.Video, false, false, true, []));
+        Assert.IsFalse(TimelineDropPolicy.CanAcceptDrag(
+            TimelineTrackKind.Video, false, true, false, []));
+        Assert.IsFalse(TimelineDropPolicy.CanAcceptDrag(
+            TimelineTrackKind.Video, true, false, true, [".mp4"]));
+    }
+
+    [TestMethod]
+    public void AdvertisedFileType_CannotBypassFinalAssetKindValidation()
+    {
+        Assert.IsTrue(TimelineDropPolicy.CanAcceptDrag(
+            TimelineTrackKind.Video, false, true, false, [".mp4"]));
+
+        var finalDecision = TimelineDropPolicy.Evaluate(
+            TimelineTrackKind.Video,
+            ProjectAssetKind.Audio,
+            isLocked: false);
+
+        Assert.IsFalse(finalDecision.IsAllowed);
+        Assert.AreEqual(TimelineDropFailure.IncompatibleAsset, finalDecision.Failure);
+    }
+
+    [TestMethod]
     public void TrackLocks_BlockOnlyItemsOnTheLockedTrack()
     {
         var locks = new TimelineTrackLocks();
@@ -91,7 +132,24 @@ public sealed class TimelineDropPolicyTests
         Assert.IsFalse(MediaAssetDragPayload.TryParseAssetId(null, out _));
     }
 
-    [DataTestMethod]
+    [TestMethod]
+    public void LibraryAssetPayload_AdvertisesTheActualExtensionForDragOverFeedback()
+    {
+        var asset = new ProjectAsset
+        {
+            Id = Guid.NewGuid(),
+            Kind = ProjectAssetKind.Audio,
+            SourcePath = @"C:\Media\voice.WAV"
+        };
+        var data = new Windows.ApplicationModel.DataTransfer.DataPackage();
+
+        MediaAssetDragPayload.Set(data, asset);
+
+        Assert.IsTrue(data.GetView().Contains(MediaAssetDragPayload.FormatId));
+        CollectionAssert.Contains(data.Properties.FileTypes.ToArray(), ".WAV");
+    }
+
+    [TestMethod]
     [DataRow(VirtualKey.Enter, true, true)]
     [DataRow(VirtualKey.Space, true, true)]
     [DataRow(VirtualKey.Enter, false, false)]

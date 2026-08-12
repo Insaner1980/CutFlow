@@ -27,6 +27,6 @@ public sealed class TimecodeFormatterTests
     [TestMethod]
     public void Format_RejectsNonPositiveFrameRate()
     {
-        Assert.ThrowsException<ArgumentOutOfRangeException>(() => TimecodeFormatter.Format(0, 0));
+        Assert.ThrowsExactly<ArgumentOutOfRangeException>(() => TimecodeFormatter.Format(0, 0));
     }
 }

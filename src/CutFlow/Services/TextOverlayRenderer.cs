@@ -37,8 +37,12 @@ public sealed class TextOverlayRenderer
 
     public FrameworkElement? RenderHost { get; set; }
 
-    public string GetCachePath(ProjectDocument project, TextTimelineItem item) =>
-        Path.Combine(_cacheDirectory, GetCacheFileName(project, item));
+    public string GetCachePath(ProjectDocument project, TextTimelineItem item)
+    {
+        var cachePath = Path.Combine(_cacheDirectory, GetCacheFileName(project, item));
+        ProjectService.RejectReparsePoints(cachePath);
+        return cachePath;
+    }
 
     public async Task<string> RenderAsync(
         ProjectDocument project,
@@ -73,6 +77,7 @@ public sealed class TextOverlayRenderer
         ArgumentNullException.ThrowIfNull(renderAsync);
         cancellationToken.ThrowIfCancellationRequested();
         Directory.CreateDirectory(_cacheDirectory);
+        ProjectService.RejectReparsePoints(_cacheDirectory);
         var path = GetCachePath(project, item);
         if (await IsCacheFileValidAsync(path, project.Settings.Width, project.Settings.Height, cancellationToken))
         {
@@ -89,6 +94,7 @@ public sealed class TextOverlayRenderer
 
             cancellationToken.ThrowIfCancellationRequested();
             var temporaryPath = path + "." + Guid.NewGuid().ToString("N") + ".tmp";
+            ProjectService.RejectReparsePoints(temporaryPath);
             try
             {
                 await renderAsync(temporaryPath, cancellationToken);
@@ -125,6 +131,7 @@ public sealed class TextOverlayRenderer
             {
                 if (File.Exists(temporaryPath))
                 {
+                    ProjectService.RejectReparsePoints(temporaryPath);
                     File.Delete(temporaryPath);
                 }
             }
@@ -340,7 +347,7 @@ public sealed class TextOverlayRenderer
         var value = string.Join('|',
             CacheFormatVersion.ToString(CultureInfo.InvariantCulture),
             item.Text,
-            item.FontFamily,
+            TextStyle.NormalizeFontFamily(item.FontFamily),
             item.FontSize.ToString("R", CultureInfo.InvariantCulture),
             item.FontWeight.ToString(CultureInfo.InvariantCulture),
             item.IsItalic.ToString(CultureInfo.InvariantCulture),
@@ -378,6 +385,8 @@ public sealed class TextOverlayRenderer
         CancellationToken cancellationToken)
     {
         cancellationToken.ThrowIfCancellationRequested();
+        ProjectService.RejectReparsePoints(temporaryPath);
+        ProjectService.RejectReparsePoints(cachePath);
         File.Move(temporaryPath, cachePath, overwrite: true);
     }
 
@@ -426,13 +435,21 @@ public sealed class TextOverlayRenderer
 
     private void TrimCache(string currentPath)
     {
+        ProjectService.RejectReparsePoints(_cacheDirectory);
         foreach (var file in new DirectoryInfo(_cacheDirectory)
                      .EnumerateFiles("*.png")
                      .Where(file => !string.Equals(file.FullName, currentPath, StringComparison.OrdinalIgnoreCase))
                      .OrderByDescending(file => file.LastWriteTimeUtc)
                      .Skip(MaximumCachedFiles - 1))
         {
-            try { file.Delete(); } catch (IOException) { } catch (UnauthorizedAccessException) { }
+            try
+            {
+                ProjectService.RejectReparsePoints(file.FullName);
+                file.Delete();
+            }
+            catch (IOException) { }
+            catch (UnauthorizedAccessException) { }
+            catch (InvalidDataException) { }
         }
     }
 }

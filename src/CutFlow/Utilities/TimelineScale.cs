@@ -24,6 +24,20 @@ public sealed class TimelineScale
         return Math.Max(0, milliseconds) * PixelsPerSecond / 1_000d;
     }
 
+    public TimelineCardGeometry GetCardGeometry(
+        TimelineItemBounds bounds,
+        double minimumVisualWidth,
+        double margin)
+    {
+        var hitLeft = TimeToPixels(bounds.StartMilliseconds);
+        var hitWidth = TimeToPixels(bounds.DurationMilliseconds);
+        return new TimelineCardGeometry(
+            hitLeft,
+            hitWidth,
+            hitLeft + margin / 2,
+            Math.Max(minimumVisualWidth, hitWidth - margin));
+    }
+
     public long PixelsToTime(double pixels)
     {
         if (double.IsNaN(pixels) || pixels <= 0)
@@ -48,6 +62,15 @@ public sealed class TimelineScale
         }
 
         return RulerIntervalsMilliseconds[^1];
+    }
+
+    internal static string FormatRulerLabel(long milliseconds, long intervalMilliseconds)
+    {
+        var time = TimeSpan.FromMilliseconds(Math.Max(0, milliseconds));
+        var label = time.TotalHours >= 1
+            ? $"{(int)time.TotalHours}:{time.Minutes:00}:{time.Seconds:00}"
+            : $"{time.Minutes:00}:{time.Seconds:00}";
+        return intervalMilliseconds < 1_000 ? $"{label}.{time.Milliseconds:000}" : label;
     }
 
     public IReadOnlyList<RulerTick> GetVisibleRulerTicks(
@@ -89,7 +112,8 @@ public sealed class TimelineScale
         double oldHorizontalOffset,
         double pointerViewportX,
         long durationMilliseconds,
-        double viewportWidth)
+        double viewportWidth,
+        double contentEndPadding = 0)
     {
         if (!double.IsFinite(oldPixelsPerSecond) || oldPixelsPerSecond <= 0 ||
             !double.IsFinite(newPixelsPerSecond) || newPixelsPerSecond <= 0)
@@ -100,7 +124,8 @@ public sealed class TimelineScale
         var pointer = Math.Max(0, pointerViewportX);
         var anchoredTimeSeconds = (Math.Max(0, oldHorizontalOffset) + pointer) / oldPixelsPerSecond;
         var candidate = anchoredTimeSeconds * newPixelsPerSecond - pointer;
-        var contentWidth = Math.Max(0, durationMilliseconds) * newPixelsPerSecond / 1_000d;
+        var contentWidth = Math.Max(1_000, durationMilliseconds) * newPixelsPerSecond / 1_000d +
+            Math.Max(0, contentEndPadding);
         return ClampHorizontalOffset(candidate, contentWidth, viewportWidth);
     }
 
@@ -133,6 +158,38 @@ public sealed class TimelineScale
 }
 
 public readonly record struct RulerTick(long Milliseconds, double Pixel);
+
+public readonly record struct TimelineCardGeometry(
+    double HitLeft,
+    double HitWidth,
+    double VisualLeft,
+    double VisualWidth)
+{
+    public double HitRight => HitLeft + HitWidth;
+}
+
+public enum TimelineCardHit
+{
+    Start,
+    Body,
+    End
+}
+
+public static class TimelineCardHitTest
+{
+    public static TimelineCardHit Resolve(double localX, double hitWidth, double trimHitWidth)
+    {
+        var edgeWidth = Math.Min(Math.Max(0, trimHitWidth), Math.Max(0, hitWidth) / 2);
+        if (localX <= edgeWidth)
+        {
+            return TimelineCardHit.Start;
+        }
+
+        return localX >= hitWidth - edgeWidth
+            ? TimelineCardHit.End
+            : TimelineCardHit.Body;
+    }
+}
 
 public static class TimelineSnapper
 {

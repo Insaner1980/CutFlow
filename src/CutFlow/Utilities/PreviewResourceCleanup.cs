@@ -9,10 +9,34 @@ public static class PreviewResourceCleanup
         Action disposeSource,
         Action disposePlayer)
     {
-        pause();
-        clearSource();
-        detachElement();
-        disposeSource();
-        disposePlayer();
+        try
+        {
+            pause();
+        }
+        finally
+        {
+            try
+            {
+                clearSource();
+            }
+            finally
+            {
+                try
+                {
+                    detachElement();
+                }
+                finally
+                {
+                    try
+                    {
+                        disposeSource();
+                    }
+                    finally
+                    {
+                        disposePlayer();
+                    }
+                }
+            }
+        }
     }
 }

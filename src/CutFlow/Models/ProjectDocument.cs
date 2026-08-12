@@ -5,6 +5,7 @@ namespace CutFlow.Models;
 public sealed class ProjectDocument
 {
     public const int CurrentSchemaVersion = 1;
+    public const int MaximumNameLength = 120;
     public const long MinimumItemDurationMilliseconds = 100;
     public const long MaximumTimelineDurationMilliseconds = 24 * 60 * 60 * 1_000;
 
@@ -19,9 +20,11 @@ public sealed class ProjectDocument
     public string Name { get; set; } = string.Empty;
 
     [JsonPropertyName("createdAt")]
+    [JsonConverter(typeof(UtcDateTimeOffsetConverter))]
     public DateTimeOffset CreatedAt { get; set; }
 
     [JsonPropertyName("modifiedAt")]
+    [JsonConverter(typeof(UtcDateTimeOffsetConverter))]
     public DateTimeOffset ModifiedAt { get; set; }
 
     [JsonPropertyName("settings")]
@@ -42,13 +45,14 @@ public sealed class ProjectDocument
     public static ProjectDocument CreateNew(string name, DateTimeOffset createdAt)
     {
         ArgumentNullException.ThrowIfNull(name);
+        var createdAtUtc = createdAt.ToUniversalTime();
 
         return new ProjectDocument
         {
             Id = Guid.NewGuid(),
             Name = name,
-            CreatedAt = createdAt,
-            ModifiedAt = createdAt
+            CreatedAt = createdAtUtc,
+            ModifiedAt = createdAtUtc
         };
     }
 }
@@ -95,7 +99,7 @@ public sealed class ProjectSettings
     }
 }
 
-[JsonConverter(typeof(JsonStringEnumConverter<AspectRatioPreset>))]
+[JsonConverter(typeof(StableStringEnumConverter<AspectRatioPreset>))]
 public enum AspectRatioPreset
 {
     Landscape16By9,
@@ -103,7 +107,7 @@ public enum AspectRatioPreset
     Square1By1
 }
 
-[JsonConverter(typeof(JsonStringEnumConverter<ProjectAssetKind>))]
+[JsonConverter(typeof(StableStringEnumConverter<ProjectAssetKind>))]
 public enum ProjectAssetKind
 {
     Video,
@@ -114,9 +118,11 @@ public enum ProjectAssetKind
 public sealed class ProjectAsset
 {
     [JsonPropertyName("id")]
+    [JsonRequired]
     public Guid Id { get; set; }
 
     [JsonPropertyName("kind")]
+    [JsonRequired]
     public ProjectAssetKind Kind { get; set; }
 
     [JsonPropertyName("sourcePath")]
@@ -168,8 +174,20 @@ public sealed class VideoTimelineItem
     {
         get => _durationMilliseconds > 0
             ? _durationMilliseconds
-            : Math.Max(0, SourceOutMilliseconds - SourceInMilliseconds);
+            : CalculateFallbackDuration(SourceInMilliseconds, SourceOutMilliseconds);
         set => _durationMilliseconds = Math.Max(0, value);
+    }
+
+    private static long CalculateFallbackDuration(long sourceInMilliseconds, long sourceOutMilliseconds)
+    {
+        if (sourceOutMilliseconds <= sourceInMilliseconds)
+        {
+            return 0;
+        }
+
+        return sourceInMilliseconds < 0 && sourceOutMilliseconds > long.MaxValue + sourceInMilliseconds
+            ? long.MaxValue
+            : sourceOutMilliseconds - sourceInMilliseconds;
     }
 
     [JsonPropertyName("volume")]
@@ -209,7 +227,20 @@ public sealed class AudioTimelineItem
     public bool IsMuted { get; set; }
 
     [JsonIgnore]
-    public long DurationMilliseconds => Math.Max(0, SourceOutMilliseconds - SourceInMilliseconds);
+    public long DurationMilliseconds
+    {
+        get
+        {
+            if (SourceOutMilliseconds <= SourceInMilliseconds)
+            {
+                return 0;
+            }
+
+            return SourceInMilliseconds < 0 && SourceOutMilliseconds > long.MaxValue + SourceInMilliseconds
+                ? long.MaxValue
+                : SourceOutMilliseconds - SourceInMilliseconds;
+        }
+    }
 }
 
 public sealed class TextTimelineItem
@@ -268,7 +299,7 @@ public sealed class TextTimelineItem
     public double NormalizedY { get; set; } = 0.5;
 }
 
-[JsonConverter(typeof(JsonStringEnumConverter<TextHorizontalAlignment>))]
+[JsonConverter(typeof(StableStringEnumConverter<TextHorizontalAlignment>))]
 public enum TextHorizontalAlignment
 {
     Left,
@@ -276,7 +307,7 @@ public enum TextHorizontalAlignment
     Right
 }
 
-[JsonConverter(typeof(JsonStringEnumConverter<TextPreset>))]
+[JsonConverter(typeof(StableStringEnumConverter<TextPreset>))]
 public enum TextPreset
 {
     Default,

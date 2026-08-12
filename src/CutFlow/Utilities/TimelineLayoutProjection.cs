@@ -39,6 +39,38 @@ public static class TimelineLayoutProjection
         return bounds;
     }
 
+    public static int GetVideoTargetIndex(
+        IReadOnlyList<TimelineItemBounds> bounds,
+        Guid draggedItemId,
+        long pointerTimeMilliseconds)
+    {
+        ArgumentNullException.ThrowIfNull(bounds);
+        if (bounds.Count == 0)
+        {
+            return 0;
+        }
+
+        var targetIndex = 0;
+        foreach (var bound in bounds)
+        {
+            if (bound.ItemId == draggedItemId)
+            {
+                continue;
+            }
+
+            if (pointerTimeMilliseconds < TimelineMath.SaturatingAdd(
+                bound.StartMilliseconds,
+                bound.DurationMilliseconds / 2))
+            {
+                return targetIndex;
+            }
+
+            targetIndex++;
+        }
+
+        return Math.Min(targetIndex, bounds.Count - 1);
+    }
+
 }
 
 public readonly record struct TimelineItemBounds(

@@ -55,7 +55,6 @@
                         BorderThickness="0"
                         FontSize="14"
                         FontWeight="SemiBold"
-                        MaxLength="120"
                         Text="{x:Bind ViewModel.ProjectName, Mode=OneWay}"
                         AutomationProperties.Name="Project name"
                         KeyDown="ProjectNameBox_KeyDown"
@@ -133,6 +132,7 @@
                 PointerPressed="TimelineResizeHandle_PointerPressed"
                 PointerMoved="TimelineResizeHandle_PointerMoved"
                 PointerReleased="TimelineResizeHandle_PointerReleased"
+                PointerCanceled="TimelineResizeHandle_PointerCanceled"
                 PointerCaptureLost="TimelineResizeHandle_PointerCaptureLost">
             <Border Height="1" VerticalAlignment="Center" Background="{StaticResource BorderBrush}" IsHitTestVisible="False" />
         </Border>

@@ -802,7 +802,7 @@ Read `PROJECT.md`, then inspect the current CutFlow implementation and relevant 
 Trace every relevant call site and state transition rather than reviewing one method in isolation. If you find a genuine issue, explain the concrete failure mode, make the smallest safe in-scope correction, add or update focused regression tests, and run the relevant tests and Release build. Do not perform unrelated refactoring or redesign. AI code review can hallucinate issues. Do not assume that a defect exists, do not invent a finding, and do not change correct code merely to satisfy this request. If the current implementation is already correct and there is nothing genuinely worth fixing, say so clearly and make no code changes.
 ```
 
-### 099. ModifiedAt sorting stability
+### 099. ModifiedAt sorting stability SEURAAVA
 
 ```text
 Read `PROJECT.md`, then inspect the current CutFlow implementation and relevant tests. Treat the code under `src/CutFlow` and the executable tests under `tests/CutFlow.Tests` as the source of truth. Review project-card sorting by descending ModifiedAt. Verify UTC values are compared correctly, equal timestamps produce deterministic ordering, invalid or default timestamps cannot throw, and a failed save that restores ModifiedAt does not move a project incorrectly. Check whether localized display strings are ever used for sorting by mistake.

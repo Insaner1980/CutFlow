@@ -45,6 +45,22 @@ public sealed class Task11SettingsTests
     }
 
     [TestMethod]
+    [DataRow(600d, 720d, 300d)]
+    [DataRow(600d, 900d, 480d)]
+    [DataRow(600d, 1020d, 600d)]
+    [DataRow(600d, 600d, 180d)]
+    [DataRow(600d, 0d, 600d)]
+    public void TimelineHeight_IsLimitedByTheAvailableWindowHeight(
+        double requestedHeight,
+        double windowHeight,
+        double expectedHeight)
+    {
+        var height = AppSettings.NormalizeTimelineHeightForWindow(requestedHeight, windowHeight);
+
+        Assert.AreEqual(expectedHeight, height);
+    }
+
+    [TestMethod]
     public void PhysicalRestore_PreservesSavedPixelsAndUsesTargetDpiForMinimumSize()
     {
         var settings = new AppSettings
@@ -68,6 +84,132 @@ public sealed class Task11SettingsTests
     }
 
     [TestMethod]
+    public void CloseBounds_WhenWindowIsRestored_UseCurrentGeometry()
+    {
+        var current = new WindowGeometry(40, 60, 1400, 840);
+        var previous = new WindowGeometry(20, 30, 1180, 720);
+
+        var selected = WindowGeometry.SelectBoundsForPersistence(current, previous, isRestored: true);
+
+        Assert.AreEqual(current, selected);
+    }
+
+    [TestMethod]
+    public void CloseBounds_WhenWindowIsMaximized_UseLastRestoredGeometry()
+    {
+        var maximized = new WindowGeometry(0, 0, 1920, 1040);
+        var restored = new WindowGeometry(120, 80, 1400, 840);
+
+        var selected = WindowGeometry.SelectBoundsForPersistence(maximized, restored, isRestored: false);
+
+        Assert.AreEqual(restored, selected);
+    }
+
+    [TestMethod]
+    public void CloseBounds_WhenWindowIsMinimized_UseLastRestoredGeometry()
+    {
+        var minimized = new WindowGeometry(-32000, -32000, 160, 28);
+        var restored = new WindowGeometry(-1800, 120, 1600, 960);
+
+        var selected = WindowGeometry.SelectBoundsForPersistence(minimized, restored, isRestored: false);
+
+        Assert.AreEqual(restored, selected);
+    }
+
+    [TestMethod]
+    public void CloseBounds_WhenCapturedDisplayWasRemoved_ClampToCurrentWorkArea()
+    {
+        var captured = new WindowGeometry(3200, 120, 1600, 960);
+
+        var validated = WindowGeometry.ClampPhysicalToWorkArea(
+            captured,
+            new WindowGeometry(0, 0, 1920, 1040),
+            targetDpi: 96);
+
+        Assert.AreEqual(new WindowGeometry(320, 80, 1600, 960), validated);
+    }
+
+    [TestMethod]
+    public void TargetDisplay_WhenBoundsIntersectMultipleDisplays_SelectsLargestIntersectionBeforePrimary()
+    {
+        WindowDisplayGeometry[] displays =
+        [
+            new(new WindowGeometry(0, 0, 1920, 1080), 96, IsPrimary: true),
+            new(new WindowGeometry(1920, 0, 2560, 1440), 144)
+        ];
+
+        var targetDisplay = WindowGeometry.SelectTargetDisplay(
+            new WindowGeometry(1700, 100, 1180, 720),
+            displays);
+
+        Assert.AreEqual(1, targetDisplay);
+    }
+
+    [TestMethod]
+    public void TargetDisplay_WithNegativeCoordinates_SelectsIntersectingSecondaryDisplay()
+    {
+        WindowDisplayGeometry[] displays =
+        [
+            new(new WindowGeometry(0, 0, 1920, 1080), 96, IsPrimary: true),
+            new(new WindowGeometry(-2560, 0, 2560, 1440), 144)
+        ];
+
+        var targetDisplay = WindowGeometry.SelectTargetDisplay(
+            new WindowGeometry(-1800, 120, 1600, 960),
+            displays);
+
+        Assert.AreEqual(1, targetDisplay);
+    }
+
+    [TestMethod]
+    public void TargetDisplay_WhenSavedMonitorWasRemoved_SelectsNearestConnectedDisplay()
+    {
+        WindowDisplayGeometry[] displays =
+        [
+            new(new WindowGeometry(0, 0, 1920, 1080), 96, IsPrimary: true),
+            new(new WindowGeometry(1920, 0, 2560, 1440), 144)
+        ];
+
+        var targetDisplay = WindowGeometry.SelectTargetDisplay(
+            new WindowGeometry(5000, 100, 1600, 960),
+            displays);
+
+        Assert.AreEqual(1, targetDisplay);
+    }
+
+    [TestMethod]
+    public void TargetDisplay_WithEqualGeometry_IsIndependentOfDisplayEnumerationOrder()
+    {
+        var left = new WindowDisplayGeometry(new WindowGeometry(-1920, 0, 1920, 1080), 96);
+        var right = new WindowDisplayGeometry(new WindowGeometry(0, 0, 1920, 1080), 96);
+        var requested = new WindowGeometry(-590, 100, 1180, 720);
+
+        WindowDisplayGeometry[] leftFirst = [left, right];
+        WindowDisplayGeometry[] rightFirst = [right, left];
+        var firstSelection = WindowGeometry.SelectTargetDisplay(requested, leftFirst);
+        var secondSelection = WindowGeometry.SelectTargetDisplay(requested, rightFirst);
+
+        Assert.AreEqual(left, leftFirst[firstSelection]);
+        Assert.AreEqual(left, rightFirst[secondSelection]);
+    }
+
+    [TestMethod]
+    public void TargetDisplay_WithEqualGeometry_PrefersPrimaryDisplay()
+    {
+        WindowDisplayGeometry[] displays =
+        [
+            new(new WindowGeometry(-1920, 0, 1920, 1080), 96),
+            new(new WindowGeometry(0, 0, 1920, 1080), 96, IsPrimary: true)
+        ];
+
+        var targetDisplay = WindowGeometry.SelectTargetDisplay(
+            new WindowGeometry(-590, 100, 1180, 720),
+            displays);
+
+        Assert.AreEqual(1, targetDisplay);
+    }
+
+    [TestMethod]
     public void LegacyLogicalRestore_MigratesAtTargetDisplayDpi()
     {
         var requested = WindowGeometry.FromLegacyLogicalSettings(new AppSettings
@@ -79,6 +221,87 @@ public sealed class Task11SettingsTests
         }, targetDpi: 144);
 
         Assert.AreEqual(new WindowGeometry(60, 90, 2250, 1350), requested);
+    }
+
+    [TestMethod]
+    public void LegacyLogicalRestore_SelectsMixedDpiDisplayUsingEachDisplaysPhysicalCandidate()
+    {
+        var settings = new AppSettings
+        {
+            WindowX = 1300,
+            WindowY = 100,
+            WindowWidth = 1180,
+            WindowHeight = 720
+        };
+        WindowDisplayGeometry[] displays =
+        [
+            new(new WindowGeometry(0, 0, 1920, 1080), 96, IsPrimary: true),
+            new(new WindowGeometry(1920, 0, 2560, 1440), 144)
+        ];
+
+        var targetDisplay = WindowGeometry.SelectLegacyTargetDisplay(settings, displays);
+        var requested = WindowGeometry.FromLegacyLogicalSettings(settings, displays[targetDisplay].Dpi);
+
+        Assert.AreEqual(1, targetDisplay);
+        Assert.AreEqual(new WindowGeometry(1950, 150, 1770, 1080), requested);
+    }
+
+    [TestMethod]
+    public void LegacyLogicalRestore_MixedDpiCandidateSizeDoesNotBiasDisplaySelection()
+    {
+        var settings = new AppSettings
+        {
+            WindowX = 700,
+            WindowY = 100,
+            WindowWidth = 1180,
+            WindowHeight = 720
+        };
+        WindowDisplayGeometry[] displays =
+        [
+            new(new WindowGeometry(0, 0, 1920, 1080), 96, IsPrimary: true),
+            new(new WindowGeometry(1920, 0, 2560, 1440), 144)
+        ];
+
+        var targetDisplay = WindowGeometry.SelectLegacyTargetDisplay(settings, displays);
+
+        Assert.AreEqual(0, targetDisplay);
+    }
+
+    [TestMethod]
+    public void LegacyLogicalRestore_WhenOriginalDisplayIsDisconnected_SelectsNearestConnectedDisplay()
+    {
+        var settings = new AppSettings
+        {
+            WindowX = 4000,
+            WindowY = 100,
+            WindowWidth = 1180,
+            WindowHeight = 720
+        };
+        WindowDisplayGeometry[] displays =
+        [
+            new(new WindowGeometry(0, 0, 1920, 1080), 96, IsPrimary: true),
+            new(new WindowGeometry(1920, 0, 2560, 1440), 144)
+        ];
+
+        var targetDisplay = WindowGeometry.SelectLegacyTargetDisplay(settings, displays);
+        var requested = WindowGeometry.FromLegacyLogicalSettings(settings, displays[targetDisplay].Dpi);
+        var restored = WindowGeometry.ClampPhysicalToWorkArea(requested, displays[targetDisplay].PhysicalBounds, displays[targetDisplay].Dpi);
+
+        Assert.AreEqual(1, targetDisplay);
+        Assert.AreEqual(new WindowGeometry(2710, 150, 1770, 1080), restored);
+    }
+
+    [TestMethod]
+    public void LegacyLogicalRestore_InvalidDimensionsRemainPositiveAfterConversion()
+    {
+        var requested = WindowGeometry.FromLegacyLogicalSettings(new AppSettings
+        {
+            WindowWidth = double.Epsilon,
+            WindowHeight = double.NaN
+        }, targetDpi: 1);
+
+        Assert.IsTrue(requested.Width > 0);
+        Assert.IsTrue(requested.Height > 0);
     }
 
     [TestMethod]

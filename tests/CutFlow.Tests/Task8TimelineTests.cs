@@ -24,6 +24,95 @@ public sealed class Task8TimelineTests
     }
 
     [TestMethod]
+    public void ManyMinimumVideoClipsAtLowZoom_KeepVisualWidthSeparateFromTimeHitTargets()
+    {
+        var project = TestProjects.WithVideo(Enumerable.Repeat(100L, 50).ToArray());
+        var bounds = TimelineLayoutProjection.GetVideoBounds(project);
+        var scale = new TimelineScale(TimelineScale.MinimumPixelsPerSecond);
+        var cards = bounds.Select(bound => scale.GetCardGeometry(bound, 18, 3)).ToArray();
+
+        Assert.HasCount(50, cards);
+        for (var index = 0; index < cards.Length; index++)
+        {
+            Assert.AreEqual(2d, cards[index].HitWidth, 0.001);
+            Assert.AreEqual(18d, cards[index].VisualWidth, 0.001);
+            Assert.AreEqual(index, TimelineLayoutProjection.GetVideoTargetIndex(
+                bounds,
+                bounds[index].ItemId,
+                bounds[index].StartMilliseconds + 25));
+            Assert.AreEqual(index, TimelineLayoutProjection.GetVideoTargetIndex(
+                bounds,
+                bounds[index].ItemId,
+                bounds[index].StartMilliseconds + 75));
+            Assert.AreEqual(TimelineCardHit.Start, TimelineCardHitTest.Resolve(0.5, cards[index].HitWidth, 8));
+            Assert.AreEqual(TimelineCardHit.End, TimelineCardHitTest.Resolve(1.5, cards[index].HitWidth, 8));
+            if (index + 1 < cards.Length)
+            {
+                Assert.AreEqual(cards[index].HitRight, cards[index + 1].HitLeft, 0.001);
+                Assert.IsTrue(cards[index + 1].VisualLeft > cards[index].VisualLeft);
+                Assert.IsTrue(cards[index].VisualLeft + cards[index].VisualWidth > cards[index + 1].VisualLeft);
+            }
+        }
+
+        Assert.AreEqual(5_000L, bounds[^1].EndMilliseconds);
+        Assert.AreEqual(100d, scale.TimeToPixels(bounds[^1].EndMilliseconds), 0.001);
+        Assert.AreEqual(5_000L, scale.PixelsToTime(100));
+        CollectionAssert.AreEqual(
+            new long[] { 0, 5_000 },
+            scale.GetVisibleRulerTicks(0, 100, bounds[^1].EndMilliseconds)
+                .Select(tick => tick.Milliseconds)
+                .ToArray());
+    }
+
+    [TestMethod]
+    public void VideoReorderTarget_SkipsDraggedClipAndUsesRemainingMidpointTies()
+    {
+        var bounds = TimelineLayoutProjection.GetVideoBounds(TestProjects.WithVideo(1_000, 2_000, 3_000));
+
+        Assert.AreEqual(0, TimelineLayoutProjection.GetVideoTargetIndex(bounds, bounds[0].ItemId, 1_999));
+        Assert.AreEqual(1, TimelineLayoutProjection.GetVideoTargetIndex(bounds, bounds[0].ItemId, 2_000));
+        Assert.AreEqual(2, TimelineLayoutProjection.GetVideoTargetIndex(bounds, bounds[0].ItemId, 4_500));
+
+        Assert.AreEqual(0, TimelineLayoutProjection.GetVideoTargetIndex(bounds, bounds[1].ItemId, 499));
+        Assert.AreEqual(1, TimelineLayoutProjection.GetVideoTargetIndex(bounds, bounds[1].ItemId, 500));
+        Assert.AreEqual(1, TimelineLayoutProjection.GetVideoTargetIndex(bounds, bounds[1].ItemId, 4_499));
+        Assert.AreEqual(2, TimelineLayoutProjection.GetVideoTargetIndex(bounds, bounds[1].ItemId, 4_500));
+
+        Assert.AreEqual(0, TimelineLayoutProjection.GetVideoTargetIndex(bounds, bounds[2].ItemId, 499));
+        Assert.AreEqual(1, TimelineLayoutProjection.GetVideoTargetIndex(bounds, bounds[2].ItemId, 500));
+        Assert.AreEqual(1, TimelineLayoutProjection.GetVideoTargetIndex(bounds, bounds[2].ItemId, 1_999));
+        Assert.AreEqual(2, TimelineLayoutProjection.GetVideoTargetIndex(bounds, bounds[2].ItemId, 2_000));
+    }
+
+    [TestMethod]
+    public void VideoReorderTarget_ScrolledContentCoordinateKeepsPointerTime()
+    {
+        var bounds = TimelineLayoutProjection.GetVideoBounds(TestProjects.WithVideo(5_000, 5_000, 5_000));
+        var scale = new TimelineScale(100);
+        const double horizontalOffset = 900;
+        const double pointerViewportX = 200;
+
+        var pointerTime = scale.PixelsToTime(horizontalOffset + pointerViewportX);
+
+        Assert.AreEqual(11_000L, pointerTime);
+        Assert.AreEqual(1, TimelineLayoutProjection.GetVideoTargetIndex(bounds, bounds[1].ItemId, pointerTime));
+    }
+
+    [TestMethod]
+    public void OverlappingAudioSelection_CyclesEveryFullyCoveredItemInRenderOrder()
+    {
+        var first = TestProjects.Audio(startMilliseconds: 1_000, sourceOutMilliseconds: 2_000);
+        var second = TestProjects.Audio(startMilliseconds: 1_000, sourceOutMilliseconds: 2_000);
+        var third = TestProjects.Audio(startMilliseconds: 1_000, sourceOutMilliseconds: 2_000);
+        IReadOnlyList<AudioTimelineItem> items = [first, second, third];
+
+        Assert.AreEqual(second.Id, TimelineOverlapSelection.GetPreviousAudioItemId(items, 1_500, third.Id));
+        Assert.AreEqual(first.Id, TimelineOverlapSelection.GetPreviousAudioItemId(items, 1_500, second.Id));
+        Assert.AreEqual(third.Id, TimelineOverlapSelection.GetPreviousAudioItemId(items, 1_500, first.Id));
+        Assert.AreEqual(third.Id, TimelineOverlapSelection.GetPreviousAudioItemId(items, 500, third.Id));
+    }
+
+    [TestMethod]
     public void VisibleRulerTicks_OnlyReturnsViewportAndOneIntervalBuffer()
     {
         var scale = new TimelineScale(100);
@@ -51,6 +140,43 @@ public sealed class Task8TimelineTests
     }
 
     [TestMethod]
+    public void ZoomOffset_UsesTrailingContentExtentToPreservePointerTimeNearEnd()
+    {
+        var offset = TimelineScale.CalculateAnchoredOffset(
+            oldPixelsPerSecond: TimelineScale.MinimumPixelsPerSecond,
+            newPixelsPerSecond: TimelineScale.MaximumPixelsPerSecond,
+            oldHorizontalOffset: 1_727_548,
+            pointerViewportX: 450,
+            durationMilliseconds: ProjectDocument.MaximumTimelineDurationMilliseconds,
+            viewportWidth: 500,
+            contentEndPadding: 48);
+
+        Assert.AreEqual(34_559_510d, offset, 0.001);
+        Assert.AreEqual(
+            86_399_900d,
+            (offset + 450) * 1_000d / TimelineScale.MaximumPixelsPerSecond,
+            0.001);
+    }
+
+    [TestMethod]
+    [DataRow(0L)]
+    [DataRow(500L)]
+    public void ZoomOffset_UsesOneSecondMinimumForEmptyAndSubSecondProjects(long durationMilliseconds)
+    {
+        var offset = TimelineScale.CalculateAnchoredOffset(
+            oldPixelsPerSecond: 80,
+            newPixelsPerSecond: TimelineScale.MaximumPixelsPerSecond,
+            oldHorizontalOffset: 28,
+            pointerViewportX: 50,
+            durationMilliseconds,
+            viewportWidth: 100,
+            contentEndPadding: 48);
+
+        Assert.AreEqual(340d, offset, 0.001);
+        Assert.AreEqual(975d, (offset + 50) * 1_000d / TimelineScale.MaximumPixelsPerSecond, 0.001);
+    }
+
+    [TestMethod]
     public void WheelZoom_UsesWheelDirectionAndScaleBounds()
     {
         Assert.AreEqual(112d, TimelineScale.CalculateWheelZoomTarget(100, 120), 0.001);
@@ -60,7 +186,34 @@ public sealed class Task8TimelineTests
         Assert.AreEqual(100d, TimelineScale.CalculateWheelZoomTarget(100, 0), 0.001);
     }
 
-    [DataTestMethod]
+    [TestMethod]
+    public void WheelZoom_RepeatedInAndOutCyclesDoNotDriftFromThePointerTime()
+    {
+        const long durationMilliseconds = 100_000;
+        const double viewportWidth = 500;
+        const double pointerViewportX = 250;
+        var zoom = 80d;
+        var offset = 1_000d;
+        var initialPointerTime = (offset + pointerViewportX) / zoom;
+
+        for (var cycle = 0; cycle < 1_000; cycle++)
+        {
+            var nextZoom = TimelineScale.CalculateWheelZoomTarget(zoom, 120);
+            offset = TimelineScale.CalculateAnchoredOffset(
+                zoom, nextZoom, offset, pointerViewportX, durationMilliseconds, viewportWidth, contentEndPadding: 48);
+            zoom = nextZoom;
+
+            nextZoom = TimelineScale.CalculateWheelZoomTarget(zoom, -120);
+            offset = TimelineScale.CalculateAnchoredOffset(
+                zoom, nextZoom, offset, pointerViewportX, durationMilliseconds, viewportWidth, contentEndPadding: 48);
+            zoom = nextZoom;
+        }
+
+        Assert.AreEqual(80d, zoom, 1e-12);
+        Assert.AreEqual(initialPointerTime, (offset + pointerViewportX) / zoom, 1e-9);
+    }
+
+    [TestMethod]
     [DataRow((int)TimelineDragOperation.VideoTrimStart, 250L)]
     [DataRow((int)TimelineDragOperation.VideoTrimEnd, 1_750L)]
     [DataRow((int)TimelineDragOperation.AudioMove, 600L)]
@@ -80,7 +233,7 @@ public sealed class Task8TimelineTests
         Assert.AreEqual(expected, value);
     }
 
-    [DataTestMethod]
+    [TestMethod]
     [DataRow((int)TimelineDragOperation.VideoTrimStart)]
     [DataRow((int)TimelineDragOperation.VideoTrimEnd)]
     public void DragInitialValue_ImageTrimPreservesTimelineDuration(int operationValue)
@@ -124,7 +277,41 @@ public sealed class Task8TimelineTests
         Assert.AreEqual(new TimelineVideoTrimPreview(3_047, 2_047, 2_297), disabled);
     }
 
-    [DataTestMethod]
+    [TestMethod]
+    public void AudioTrimEnd_ExtremePointerValueSaturatesInsteadOfWrapping()
+    {
+        var project = ProjectDocument.CreateNew("Extreme audio trim", DateTimeOffset.UnixEpoch);
+        var asset = new ProjectAsset
+        {
+            Id = Guid.NewGuid(),
+            Kind = ProjectAssetKind.Audio,
+            DurationMilliseconds = ProjectDocument.MaximumTimelineDurationMilliseconds
+        };
+        var item = new AudioTimelineItem
+        {
+            Id = Guid.NewGuid(),
+            AssetId = asset.Id,
+            StartMilliseconds = 0,
+            SourceInMilliseconds = 1_000,
+            SourceOutMilliseconds = 2_000
+        };
+        project.Assets.Add(asset);
+        project.AudioItems.Add(item);
+        var sourceOut = TimelineDragPreview.CalculateAudioTrimEndSource(
+            item.SourceOutMilliseconds,
+            boundaryMilliseconds: long.MaxValue,
+            originalBoundaryMilliseconds: item.DurationMilliseconds);
+        var viewModel = new EditorViewModel(project);
+
+        Assert.AreEqual(long.MaxValue, sourceOut);
+        Assert.IsTrue(viewModel.TrimAudioEnd(item.Id, sourceOut));
+        Assert.AreEqual(
+            ProjectDocument.MaximumTimelineDurationMilliseconds,
+            viewModel.Project.AudioItems.Single().SourceOutMilliseconds);
+        Assert.IsTrue(TimelineEditingService.IsWithinProjectDurationLimit(viewModel.Project));
+    }
+
+    [TestMethod]
     [DataRow(EditorSelectionKind.VideoItem, true)]
     [DataRow(EditorSelectionKind.AudioItem, true)]
     [DataRow(EditorSelectionKind.TextItem, true)]
@@ -136,7 +323,7 @@ public sealed class Task8TimelineTests
         Assert.AreEqual(expected, TimelineContextCommands.SupportsDuplicate(kind));
     }
 
-    [DataTestMethod]
+    [TestMethod]
     [DataRow(EditorSelectionKind.VideoItem, true, true, true)]
     [DataRow(EditorSelectionKind.VideoItem, false, true, false)]
     [DataRow(EditorSelectionKind.VideoItem, true, false, false)]
@@ -180,6 +367,35 @@ public sealed class Task8TimelineTests
     }
 
     [TestMethod]
+    public void AudioTrims_ClampCompatibilityFadesToTrimmedDuration()
+    {
+        var project = CreateProjectWithAudio();
+        var itemId = project.AudioItems.Single().Id;
+        project.AudioItems.Single().FadeInMilliseconds = 2_400;
+        project.AudioItems.Single().FadeOutMilliseconds = 2_000;
+        var viewModel = new EditorViewModel(project);
+
+        Assert.IsTrue(viewModel.TrimAudioStart(itemId, 2_500));
+        var trimmed = viewModel.Project.AudioItems.Single();
+        Assert.AreEqual(500L, trimmed.DurationMilliseconds);
+        Assert.AreEqual(500L, trimmed.FadeInMilliseconds);
+        Assert.AreEqual(500L, trimmed.FadeOutMilliseconds);
+
+        Assert.IsTrue(viewModel.TrimAudioEnd(itemId, 2_700));
+        trimmed = viewModel.Project.AudioItems.Single();
+        Assert.AreEqual(200L, trimmed.DurationMilliseconds);
+        Assert.AreEqual(200L, trimmed.FadeInMilliseconds);
+        Assert.AreEqual(200L, trimmed.FadeOutMilliseconds);
+
+        viewModel.Select(new EditorSelection(EditorSelectionKind.AudioItem, itemId));
+        Assert.IsTrue(viewModel.DuplicateSelection());
+        var duplicate = viewModel.Project.AudioItems.Single(candidate => candidate.Id != itemId);
+        Assert.AreEqual(200L, duplicate.DurationMilliseconds);
+        Assert.AreEqual(200L, duplicate.FadeInMilliseconds);
+        Assert.AreEqual(200L, duplicate.FadeOutMilliseconds);
+    }
+
+    [TestMethod]
     public void TextEdgeTrims_ClampToMinimumDurationAndMoveBody()
     {
         var project = new ProjectDocument();
@@ -195,7 +411,7 @@ public sealed class Task8TimelineTests
         Assert.AreEqual(500L, item.StartMilliseconds);
     }
 
-    [DataTestMethod]
+    [TestMethod]
     [DataRow("")]
     [DataRow("NaN")]
     [DataRow("Infinity")]
@@ -251,6 +467,33 @@ public sealed class Task8TimelineTests
         Assert.AreEqual(1, committed);
         viewModel.Undo();
         Assert.AreEqual(2_000L, viewModel.Project.VideoItems.Single().DurationMilliseconds);
+    }
+
+    [TestMethod]
+    public void NoOpReorder_PreservesProjectItemsSourceRangesAndHistory()
+    {
+        var project = TestProjects.WithVideo(1_000, 2_000, 3_000);
+        project.VideoItems[1].SourceInMilliseconds = 250;
+        project.VideoItems[1].SourceOutMilliseconds = 1_750;
+        project.VideoItems[1].DurationMilliseconds = 1_500;
+        var viewModel = new EditorViewModel(project);
+        var originalProject = viewModel.Project;
+        var originalItems = viewModel.Project.VideoItems
+            .Select(item => (item.Id, item.AssetId, item.SourceInMilliseconds, item.SourceOutMilliseconds, item.DurationMilliseconds))
+            .ToArray();
+        var committed = 0;
+        viewModel.EditCommitted += (_, _) => committed++;
+
+        Assert.IsFalse(viewModel.ReorderVideoItem(project.VideoItems[1].Id, 1));
+
+        Assert.AreSame(originalProject, viewModel.Project);
+        CollectionAssert.AreEqual(originalItems, viewModel.Project.VideoItems
+            .Select(item => (item.Id, item.AssetId, item.SourceInMilliseconds, item.SourceOutMilliseconds, item.DurationMilliseconds))
+            .ToArray());
+        Assert.AreEqual(0L, viewModel.Revision);
+        Assert.AreEqual(0, committed);
+        Assert.IsFalse(viewModel.CanUndo);
+        Assert.IsFalse(viewModel.CanRedo);
     }
 
     [TestMethod]

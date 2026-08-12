@@ -13,28 +13,117 @@ public sealed class ThumbnailServiceTests
         var first = ThumbnailService.CreateCacheKey(@"C:\Media\Folder\..\CLIP.mp4", 100, modified, 256);
         var same = ThumbnailService.CreateCacheKey(@"c:\media\clip.mp4", 100, modified, 256);
         var differentSize = ThumbnailService.CreateCacheKey(@"c:\media\clip.mp4", 101, modified, 256);
+        var differentLastWrite = ThumbnailService.CreateCacheKey(@"c:\media\clip.mp4", 100, modified.AddTicks(1), 256);
         var differentRequest = ThumbnailService.CreateCacheKey(@"c:\media\clip.mp4", 100, modified, 128);
 
         Assert.AreEqual(first, same);
         Assert.AreNotEqual(first, differentSize);
+        Assert.AreNotEqual(first, differentLastWrite);
         Assert.AreNotEqual(first, differentRequest);
         Assert.AreEqual(64, first.Length);
+        Assert.IsTrue(first.All(character => character is >= '0' and <= '9' or >= 'a' and <= 'f'));
+    }
+
+    [TestMethod]
+    public void RequestedSize_IsNormalizedBeforeRequestCaptureAndCacheKeying()
+    {
+        var modified = new DateTimeOffset(2026, 8, 5, 10, 0, 0, TimeSpan.Zero);
+        var asset = new Models.ProjectAsset
+        {
+            Id = Guid.NewGuid(),
+            Kind = Models.ProjectAssetKind.Image,
+            SourcePath = @"C:\Media\image.jpg",
+            FileSize = 100,
+            LastWriteUtc = modified
+        };
+
+        var defaultRequest = ThumbnailService.CaptureRequest(asset, ThumbnailService.DefaultRequestedSize);
+        var maximumRequest = ThumbnailService.CaptureRequest(asset, ThumbnailService.MaximumRequestedSize);
+
+        foreach (var requestedSize in new[] { 0, -1, int.MinValue })
+        {
+            var request = ThumbnailService.CaptureRequest(asset, requestedSize);
+
+            Assert.AreEqual(ThumbnailService.DefaultRequestedSize, request.RequestedSize);
+            Assert.AreEqual(defaultRequest.CacheKey, request.CacheKey);
+            Assert.AreEqual(
+                defaultRequest.CacheKey,
+                ThumbnailService.CreateCacheKey(asset.SourcePath, asset.FileSize, asset.LastWriteUtc, requestedSize));
+        }
+
+        foreach (var requestedSize in new[] { ThumbnailService.MaximumRequestedSize + 1, int.MaxValue })
+        {
+            var request = ThumbnailService.CaptureRequest(asset, requestedSize);
+
+            Assert.AreEqual(ThumbnailService.MaximumRequestedSize, request.RequestedSize);
+            Assert.AreEqual(maximumRequest.CacheKey, request.CacheKey);
+            Assert.AreEqual(
+                maximumRequest.CacheKey,
+                ThumbnailService.CreateCacheKey(asset.SourcePath, asset.FileSize, asset.LastWriteUtc, requestedSize));
+        }
     }
 
     [TestMethod]
     public void RelativeCachePath_IsProjectRelativeAndResolvesInsideProject()
     {
+        using var project = new TemporaryProjectRoot();
         var key = new string('a', 64);
         var relative = ThumbnailService.CreateRelativeCachePath(key);
-        var projectRoot = Path.Combine(Path.GetTempPath(), "CutFlow.Tests", Guid.NewGuid().ToString("N"));
-        var resolved = ThumbnailService.ResolveProjectCachePath(projectRoot, relative);
+        var resolved = ThumbnailService.ResolveProjectCachePath(project.Path, relative);
+        var json = System.Text.Json.JsonSerializer.Serialize(new Models.ProjectAsset { ThumbnailCachePath = relative });
 
         Assert.IsFalse(Path.IsPathRooted(relative));
-        StringAssert.StartsWith(relative.Replace('/', '\\'), @"cache\thumbnails\");
-        StringAssert.EndsWith(relative, ".jpg");
-        StringAssert.StartsWith(resolved, Path.GetFullPath(projectRoot), StringComparison.OrdinalIgnoreCase);
-        Assert.ThrowsException<InvalidDataException>(() => ThumbnailService.ResolveProjectCachePath(projectRoot, @"..\source.mp4"));
-        Assert.ThrowsException<InvalidDataException>(() => ThumbnailService.ResolveProjectCachePath(projectRoot, @"C:\outside.jpg"));
+        Assert.AreEqual($"cache/thumbnails/{key}.jpg", relative);
+        Assert.AreEqual(Path.Combine(project.Path, "cache", "thumbnails", $"{key}.jpg"), resolved);
+        StringAssert.Contains(json, $"\"thumbnailCachePath\":\"cache/thumbnails/{key}.jpg\"");
+        Assert.IsFalse(Directory.Exists(Path.Combine(project.Path, "cache", "thumbnails")));
+        Assert.ThrowsExactly<InvalidDataException>(() => ThumbnailService.ResolveProjectCachePath(project.Path, @"..\source.mp4"));
+        Assert.ThrowsExactly<InvalidDataException>(() => ThumbnailService.ResolveProjectCachePath(project.Path, @"C:\outside.jpg"));
+    }
+
+    [TestMethod]
+    public void CachePaths_RejectMalformedHashesAndNoncanonicalSeparators()
+    {
+        using var project = new TemporaryProjectRoot();
+        var lowercaseKey = new string('a', 64);
+        var uppercaseKey = new string('A', 64);
+
+        foreach (var malformedKey in new[] { uppercaseKey, new string('a', 63), new string('a', 65), new string('g', 64) })
+        {
+            Assert.ThrowsExactly<ArgumentException>(() => ThumbnailService.CreateRelativeCachePath(malformedKey));
+        }
+
+        foreach (var malformedPath in new[]
+                 {
+                     $@"cache\thumbnails\{lowercaseKey}.jpg",
+                     $"cache/thumbnails/{uppercaseKey}.jpg",
+                     $"cache/thumbnails/{new string('g', 64)}.jpg",
+                     $"cache/thumbnails/{lowercaseKey}.jpeg",
+                     $"cache/thumbnails/nested/{lowercaseKey}.jpg"
+                 })
+        {
+            Assert.ThrowsExactly<InvalidDataException>(() =>
+                ThumbnailService.ResolveProjectCachePath(project.Path, malformedPath));
+        }
+    }
+
+    [TestMethod]
+    public async Task TryDeleteCachedThumbnail_LinkedCacheDirectoryRejectsWithoutDeletingTarget()
+    {
+        using var project = new TemporaryProjectRoot();
+        var cacheDirectory = Directory.CreateDirectory(Path.Combine(project.Path, "cache"));
+        var externalDirectory = Directory.CreateDirectory(Path.Combine(project.Path, "external"));
+        var linkedThumbnailsPath = Path.Combine(cacheDirectory.FullName, "thumbnails");
+        Directory.CreateSymbolicLink(linkedThumbnailsPath, externalDirectory.FullName);
+        var relativePath = ThumbnailService.CreateRelativeCachePath(new string('a', 64));
+        var externalPath = Path.Combine(externalDirectory.FullName, Path.GetFileName(relativePath));
+        await File.WriteAllTextAsync(externalPath, "preserve external thumbnail");
+        var asset = new Models.ProjectAsset { ThumbnailCachePath = relativePath };
+
+        var service = new ThumbnailService(project.Path);
+
+        Assert.ThrowsExactly<InvalidDataException>(() => service.TryDeleteCachedThumbnail(asset));
+        Assert.AreEqual("preserve external thumbnail", await File.ReadAllTextAsync(externalPath));
     }
 
     [TestMethod]
@@ -49,8 +138,142 @@ public sealed class ThumbnailServiceTests
 
         await using var tooLarge = new MemoryStream(new byte[65]);
         await using var rejectedDestination = new MemoryStream();
-        await Assert.ThrowsExceptionAsync<InvalidDataException>(() =>
+        await Assert.ThrowsExactlyAsync<InvalidDataException>(() =>
             ThumbnailService.CopyBoundedAsync(tooLarge, rejectedDestination, 64, CancellationToken.None));
+        Assert.AreEqual(0, tooLarge.Position);
+        Assert.AreEqual(0, rejectedDestination.Length);
+    }
+
+    [TestMethod]
+    public async Task GetOrCreateThumbnailAsync_DoesNotAcceptAnExistingCorruptJpeg()
+    {
+        using var project = new TemporaryProjectRoot();
+        var sourcePath = Path.Combine(AppContext.BaseDirectory, "TestMedia", "valid-image.jpg");
+        var sourceInfo = new FileInfo(sourcePath);
+        var asset = new Models.ProjectAsset
+        {
+            Id = Guid.NewGuid(),
+            Kind = Models.ProjectAssetKind.Image,
+            SourcePath = sourcePath,
+            FileSize = checked((ulong)sourceInfo.Length),
+            LastWriteUtc = sourceInfo.LastWriteTimeUtc
+        };
+        var request = ThumbnailService.CaptureRequest(asset, ThumbnailService.DefaultRequestedSize);
+        var relativePath = ThumbnailService.CreateRelativeCachePath(request.CacheKey);
+        var cachePath = ThumbnailService.ResolveProjectCachePath(project.Path, relativePath);
+        Directory.CreateDirectory(Path.GetDirectoryName(cachePath)!);
+        await File.WriteAllBytesAsync(cachePath, [0xFF, 0xD8, 0xFF, 0xD9]);
+        var source = await Windows.Storage.StorageFile.GetFileFromPathAsync(sourcePath);
+
+        var result = await new ThumbnailService(project.Path).GetOrCreateThumbnailAsync(source, asset);
+
+        Assert.IsNotNull(result);
+        Assert.IsTrue(await ThumbnailService.IsUsableCachedThumbnailAsync(result, CancellationToken.None));
+    }
+
+    [TestMethod]
+    public async Task CachedThumbnailValidation_RejectsCorruptAndOversizedFilesAndReleasesHandles()
+    {
+        using var project = new TemporaryProjectRoot();
+        var validPath = Path.Combine(project.Path, "valid.jpg");
+        var corruptPath = Path.Combine(project.Path, "corrupt.jpg");
+        var oversizedPath = Path.Combine(project.Path, "oversized.jpg");
+        File.Copy(Path.Combine(AppContext.BaseDirectory, "TestMedia", "valid-image.jpg"), validPath);
+        await File.WriteAllTextAsync(corruptPath, "not a jpeg");
+        await using (var oversized = new FileStream(oversizedPath, FileMode.CreateNew, FileAccess.Write, FileShare.None))
+        {
+            oversized.SetLength(ThumbnailService.MaximumCachedThumbnailBytes + 1);
+        }
+
+        Assert.IsTrue(await ThumbnailService.IsUsableCachedThumbnailAsync(validPath, CancellationToken.None));
+        Assert.IsFalse(await ThumbnailService.IsUsableCachedThumbnailAsync(corruptPath, CancellationToken.None));
+        Assert.IsFalse(await ThumbnailService.IsUsableCachedThumbnailAsync(oversizedPath, CancellationToken.None));
+
+        foreach (var path in new[] { validPath, corruptPath, oversizedPath })
+        {
+            using var exclusive = new FileStream(path, FileMode.Open, FileAccess.ReadWrite, FileShare.None);
+        }
+    }
+
+    [TestMethod]
+    public async Task GetOrCreateThumbnailAsync_WhenSourceChangesInPlace_UsesNewKeyAndPreservesOldCache()
+    {
+        using var project = new TemporaryProjectRoot();
+        var sourcePath = Path.Combine(project.Path, "source.jpg");
+        File.Copy(Path.Combine(AppContext.BaseDirectory, "TestMedia", "valid-image.jpg"), sourcePath);
+        var originalInfo = new FileInfo(sourcePath);
+        var asset = new Models.ProjectAsset
+        {
+            Id = Guid.NewGuid(),
+            Kind = Models.ProjectAssetKind.Image,
+            SourcePath = sourcePath,
+            FileSize = checked((ulong)originalInfo.Length),
+            LastWriteUtc = originalInfo.LastWriteTimeUtc
+        };
+        var service = new ThumbnailService(project.Path);
+        var source = await Windows.Storage.StorageFile.GetFileFromPathAsync(sourcePath);
+        var originalCachePath = await service.GetOrCreateThumbnailAsync(source, asset);
+        Assert.IsNotNull(originalCachePath);
+        var originalRequest = ThumbnailService.CaptureRequest(asset, ThumbnailService.DefaultRequestedSize);
+
+        await using (var stream = new FileStream(sourcePath, FileMode.Append, FileAccess.Write, FileShare.Read))
+        {
+            await stream.WriteAsync(new byte[] { 0 });
+        }
+        File.SetLastWriteTimeUtc(sourcePath, originalInfo.LastWriteTimeUtc.AddMinutes(1));
+        source = await Windows.Storage.StorageFile.GetFileFromPathAsync(sourcePath);
+
+        var refreshedCachePath = await service.GetOrCreateThumbnailAsync(source, asset);
+        var currentInfo = new FileInfo(sourcePath);
+        var refreshedRequest = ThumbnailService.CaptureRequest(asset, ThumbnailService.DefaultRequestedSize);
+
+        Assert.IsNotNull(refreshedCachePath);
+        Assert.AreNotEqual(originalRequest.CacheKey, refreshedRequest.CacheKey);
+        Assert.AreNotEqual(originalCachePath, refreshedCachePath);
+        Assert.AreEqual(checked((ulong)currentInfo.Length), asset.FileSize);
+        Assert.AreEqual(currentInfo.LastWriteTimeUtc, asset.LastWriteUtc.UtcDateTime);
+        Assert.AreEqual(
+            ThumbnailService.CreateRelativeCachePath(refreshedRequest.CacheKey),
+            asset.ThumbnailCachePath);
+        Assert.IsTrue(File.Exists(originalCachePath), "The old cache may still be referenced and must not be deleted during metadata refresh.");
+        Assert.IsTrue(File.Exists(refreshedCachePath));
+    }
+
+    [TestMethod]
+    public async Task SourceMetadataRefresh_InvalidatesAnOlderInFlightRequest()
+    {
+        using var project = new TemporaryProjectRoot();
+        var sourcePath = Path.Combine(project.Path, "source.jpg");
+        File.Copy(Path.Combine(AppContext.BaseDirectory, "TestMedia", "valid-image.jpg"), sourcePath);
+        var originalInfo = new FileInfo(sourcePath);
+        var asset = new Models.ProjectAsset
+        {
+            Id = Guid.NewGuid(),
+            Kind = Models.ProjectAssetKind.Image,
+            SourcePath = sourcePath,
+            FileSize = checked((ulong)originalInfo.Length),
+            LastWriteUtc = originalInfo.LastWriteTimeUtc
+        };
+        var service = new ThumbnailService(project.Path);
+        var oldRequest = ThumbnailService.CaptureRequest(asset, ThumbnailService.DefaultRequestedSize);
+        var oldRelativePath = ThumbnailService.CreateRelativeCachePath(oldRequest.CacheKey);
+        var oldFinalPath = ThumbnailService.ResolveProjectCachePath(project.Path, oldRelativePath);
+        Directory.CreateDirectory(Path.GetDirectoryName(oldFinalPath)!);
+        var oldTemporaryPath = oldFinalPath + ".old.tmp";
+        File.Copy(Path.Combine(AppContext.BaseDirectory, "TestMedia", "valid-image.jpg"), oldTemporaryPath);
+
+        await using (var stream = new FileStream(sourcePath, FileMode.Append, FileAccess.Write, FileShare.Read))
+        {
+            await stream.WriteAsync(new byte[] { 0 });
+        }
+        File.SetLastWriteTimeUtc(sourcePath, originalInfo.LastWriteTimeUtc.AddMinutes(1));
+        var source = await Windows.Storage.StorageFile.GetFileFromPathAsync(sourcePath);
+
+        Assert.IsNotNull(await service.GetOrCreateThumbnailAsync(source, asset));
+        Assert.IsFalse(service.TryCommitGeneratedThumbnail(asset, oldRequest, oldTemporaryPath, oldRelativePath));
+        Assert.IsFalse(File.Exists(oldTemporaryPath));
+        Assert.IsFalse(File.Exists(oldFinalPath));
+        Assert.AreNotEqual(oldRequest.CacheKey, ThumbnailService.CaptureRequest(asset, ThumbnailService.DefaultRequestedSize).CacheKey);
     }
 
     [TestMethod]
@@ -82,6 +305,63 @@ public sealed class ThumbnailServiceTests
         Assert.IsFalse(File.Exists(temporaryPath));
         Assert.IsFalse(File.Exists(finalPath));
         Assert.AreEqual(string.Empty, asset.ThumbnailCachePath);
+    }
+
+    [TestMethod]
+    public void CanceledRequest_DoesNotPromoteFileOrAssignCachePath()
+    {
+        using var project = new TemporaryProjectRoot();
+        var service = new ThumbnailService(project.Path);
+        var asset = new Models.ProjectAsset
+        {
+            Id = Guid.NewGuid(),
+            Kind = Models.ProjectAssetKind.Image,
+            SourcePath = @"C:\Media\image.png",
+            FileSize = 100,
+            LastWriteUtc = DateTimeOffset.UnixEpoch
+        };
+        var request = ThumbnailService.CaptureRequest(asset, ThumbnailService.DefaultRequestedSize);
+        var relativePath = ThumbnailService.CreateRelativeCachePath(request.CacheKey);
+        var finalPath = ThumbnailService.ResolveProjectCachePath(project.Path, relativePath);
+        Directory.CreateDirectory(Path.GetDirectoryName(finalPath)!);
+        var temporaryPath = finalPath + ".test.tmp";
+        File.WriteAllBytes(temporaryPath, [0xFF, 0xD8, 0xFF, 0xD9]);
+        using var cancellation = new CancellationTokenSource();
+        cancellation.Cancel();
+
+        Assert.ThrowsExactly<OperationCanceledException>(() =>
+            service.TryCommitGeneratedThumbnail(asset, request, temporaryPath, relativePath, cancellation.Token));
+        Assert.ThrowsExactly<OperationCanceledException>(() =>
+            ThumbnailService.TryCommitCacheHit(asset, request, relativePath, cancellation.Token));
+        Assert.IsTrue(File.Exists(temporaryPath));
+        Assert.IsFalse(File.Exists(finalPath));
+        Assert.AreEqual(string.Empty, asset.ThumbnailCachePath);
+    }
+
+    [TestMethod]
+    public void MediaAssetCard_CancellationInvalidatesTheOldGeneration()
+    {
+        var card = new Controls.MediaAssetCard(new Models.ProjectAsset
+        {
+            Id = Guid.NewGuid(),
+            Kind = Models.ProjectAssetKind.Image,
+            SourcePath = @"C:\Media\image.png"
+        });
+
+        var first = card.BeginThumbnailRequest(CancellationToken.None);
+        Assert.IsTrue(card.IsCurrentThumbnailRequest(first.Generation));
+
+        card.CancelThumbnailRequest();
+
+        Assert.IsTrue(first.Token.IsCancellationRequested);
+        Assert.IsFalse(card.IsCurrentThumbnailRequest(first.Generation));
+        Assert.IsFalse(card.ThumbnailRequested);
+
+        var second = card.BeginThumbnailRequest(CancellationToken.None);
+        Assert.AreNotEqual(first.Generation, second.Generation);
+        Assert.IsFalse(card.IsCurrentThumbnailRequest(first.Generation));
+        Assert.IsTrue(card.IsCurrentThumbnailRequest(second.Generation));
+        card.CancelThumbnailRequest();
     }
 
     [TestMethod]

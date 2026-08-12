@@ -1,0 +1,14 @@
+dependency vulnerabilities
+Root: C:\Dev\CutFlow
+Command: dotnet package list --project CutFlow.slnx --vulnerable --include-transitive
+Started: 2026-08-13 01.43.52
+
+  Determining projects to restore...
+  All projects are up-to-date for restore.
+
+The following sources were used:
+   https://api.nuget.org/v3/index.json
+   C:\Program Files (x86)\Microsoft SDKs\NuGetPackages\
+
+The given project `CutFlow` has no vulnerable packages given the current sources.
+The given project `CutFlow.Tests` has no vulnerable packages given the current sources.

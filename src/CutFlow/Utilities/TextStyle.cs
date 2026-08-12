@@ -16,8 +16,18 @@ public static class TextStyle
     public static bool IsArgb(string? value) =>
         value is { Length: 9 } && value[0] == '#' && value.AsSpan(1).IndexOfAnyExcept("0123456789abcdefABCDEF") < 0;
 
-    public static double ClampNormalized(double value, double fallback = 0.5) =>
-        Math.Clamp(double.IsFinite(value) ? value : fallback, 0, 1);
+    public static double ClampNormalized(double value, double fallback = 0.5)
+    {
+        var normalized = double.IsFinite(value)
+            ? value
+            : double.IsFinite(fallback) ? fallback : 0.5;
+        if (normalized <= 0)
+        {
+            return 0;
+        }
+
+        return normalized >= 1 ? 1 : normalized;
+    }
 
     public static double ClampOpacity(double value) =>
         Math.Clamp(double.IsFinite(value) ? value : TextTimelineItem.DefaultOpacity, 0, 1);

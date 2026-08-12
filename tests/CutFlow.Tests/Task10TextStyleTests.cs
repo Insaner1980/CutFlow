@@ -52,7 +52,37 @@ public sealed class Task10TextStyleTests
         Assert.AreEqual(0.35, roundTrip.Opacity, 0.0001);
     }
 
-    [DataTestMethod]
+    [TestMethod]
+    public async Task SchemaOneTextStyles_FontFamiliesNormalizeToSupportedCanonicalChoices()
+    {
+        using var directory = new TemporaryDirectory();
+        var id = Guid.NewGuid();
+        var projectDirectory = Directory.CreateDirectory(Path.Combine(directory.Path, "Projects", id.ToString("D")));
+        await File.WriteAllTextAsync(Path.Combine(projectDirectory.FullName, "project.json"), $$"""
+            {
+              "schemaVersion": 1,
+              "id": "{{id}}",
+              "name": "Font families",
+              "textItems": [
+                { "id": "{{Guid.NewGuid()}}", "durationMilliseconds": 3000 },
+                { "id": "{{Guid.NewGuid()}}", "durationMilliseconds": 3000, "fontFamily": null },
+                { "id": "{{Guid.NewGuid()}}", "durationMilliseconds": 3000, "fontFamily": "   " },
+                { "id": "{{Guid.NewGuid()}}", "durationMilliseconds": 3000, "fontFamily": "Local Custom Font" },
+                { "id": "{{Guid.NewGuid()}}", "durationMilliseconds": 3000, "fontFamily": "aRiAl" },
+                { "id": "{{Guid.NewGuid()}}", "durationMilliseconds": 3000, "fontFamily": "  Georgia  " }
+              ]
+            }
+            """);
+
+        var loaded = await new ProjectService(directory.Path).LoadAsync(id);
+
+        CollectionAssert.AreEqual(
+            new[] { "Segoe UI", "Segoe UI", "Segoe UI", "Segoe UI", "Arial", "Georgia" },
+            loaded.TextItems.Select(item => item.FontFamily).ToArray());
+        Assert.IsTrue(loaded.TextItems.All(item => TextStyle.SupportedFontFamilies.Contains(item.FontFamily)));
+    }
+
+    [TestMethod]
     [DataRow(-2d, 0d)]
     [DataRow(2d, 1d)]
     public async Task SchemaOneTextStyles_OutOfRangeOpacityIsClamped(double opacity, double expected)
@@ -120,6 +150,19 @@ public sealed class Task10TextStyleTests
         Assert.IsTrue(viewModel.SetTextVerticalPosition(item.Id, -1));
         Assert.AreEqual(1d, viewModel.Project.TextItems.Single().NormalizedX);
         Assert.AreEqual(0d, viewModel.Project.TextItems.Single().NormalizedY);
+    }
+
+    [TestMethod]
+    public void UnknownTextAlignment_IsRejectedByEditingAndRenderedAsCenter()
+    {
+        var item = new TextTimelineItem { Id = Guid.NewGuid() };
+        var viewModel = CreateViewModel(item);
+
+        Assert.IsFalse(viewModel.SetTextAlignment(item.Id, (TextHorizontalAlignment)99));
+        Assert.AreEqual(TextHorizontalAlignment.Center, viewModel.Project.TextItems.Single().Alignment);
+
+        item.Alignment = (TextHorizontalAlignment)99;
+        Assert.AreEqual(Microsoft.UI.Xaml.TextAlignment.Center, TextStyle.ResolveAlignment(item));
     }
 
     [TestMethod]
@@ -221,6 +264,36 @@ public sealed class Task10TextStyleTests
         item.Opacity = 0.4;
         Assert.AreNotEqual(originalHash, TextOverlayRenderer.CalculateStyleHash(project, item));
         Assert.AreNotEqual(originalLiveKey, LiveTextRenderKey.Create(project, selection, 100, 1280, 720));
+    }
+
+    [TestMethod]
+    public void EquivalentFontFamilyInputs_UseSameLiveAndExportRenderKeys()
+    {
+        var project = ProjectDocument.CreateNew("Font render keys", DateTimeOffset.UnixEpoch);
+        var item = new TextTimelineItem { Id = Guid.NewGuid(), Text = "Render", DurationMilliseconds = 3_000 };
+        project.TextItems.Add(item);
+        var selection = new EditorSelection(EditorSelectionKind.TextItem, item.Id);
+        var cases = new (string Canonical, string? Equivalent)[]
+        {
+            ("Segoe UI", null),
+            ("Segoe UI", "   "),
+            ("Segoe UI", "Local Custom Font"),
+            ("Arial", "aRiAl"),
+            ("Georgia", "  Georgia  ")
+        };
+
+        foreach (var (canonical, equivalent) in cases)
+        {
+            item.FontFamily = canonical;
+            var canonicalHash = TextOverlayRenderer.CalculateStyleHash(project, item);
+            var canonicalLiveKey = LiveTextRenderKey.Create(project, selection, 100, 1280, 720);
+
+            item.FontFamily = equivalent!;
+
+            Assert.AreEqual(canonical, TextStyle.NormalizeFontFamily(equivalent));
+            Assert.AreEqual(canonicalHash, TextOverlayRenderer.CalculateStyleHash(project, item));
+            Assert.AreEqual(canonicalLiveKey, LiveTextRenderKey.Create(project, selection, 100, 1280, 720));
+        }
     }
 
     [TestMethod]

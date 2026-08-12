@@ -10,6 +10,8 @@ public sealed class MainViewModel : ViewModelBase
     private readonly Func<bool> _canContinue;
     private ProjectDocument? _currentProject;
     private EditorViewModel? _editor;
+    private bool _isChangingCurrentView;
+    private bool _isShowingHome;
 
     public MainViewModel(
         ProjectService projectService,
@@ -26,75 +28,88 @@ public sealed class MainViewModel : ViewModelBase
 
     public HomeViewModel Home { get; }
 
-    public ProjectDocument? CurrentProject
-    {
-        get => _currentProject;
-        private set => SetProperty(ref _currentProject, value);
-    }
+    public ProjectDocument? CurrentProject => _currentProject;
 
-    public EditorViewModel? Editor
-    {
-        get => _editor;
-        private set => SetProperty(ref _editor, value);
-    }
+    public EditorViewModel? Editor => _editor;
 
     public bool IsEditorOpen => Editor is not null;
 
     public async Task<bool> ShowHomeAsync(CancellationToken cancellationToken = default)
     {
-        if (!_canContinue())
+        if (!_canContinue() || _isChangingCurrentView || _isShowingHome)
         {
             return false;
         }
 
-        if (Editor is not null && Editor.SaveStatus != EditorViewModel.SavedStatus)
+        _isShowingHome = true;
+        try
         {
-            try
+            var editor = Editor;
+            if (editor is not null && editor.SaveStatus != EditorViewModel.SavedStatus)
             {
-                await _projectService.SaveAsync(Editor.Project, cancellationToken);
-                if (!_canContinue())
+                try
                 {
+                    while (true)
+                    {
+                        var revision = editor.Revision;
+                        await _projectService.SaveAsync(editor.Project, cancellationToken);
+                        if (!_canContinue())
+                        {
+                            return false;
+                        }
+
+                        if (editor.TryMarkSaved(revision))
+                        {
+                            break;
+                        }
+                    }
+                }
+                catch (Exception exception) when (exception is IOException or UnauthorizedAccessException or InvalidDataException)
+                {
+                    if (!_canContinue())
+                    {
+                        return false;
+                    }
+
+                    editor.MarkSaveFailed();
+                    Home.ReportError(exception.Message);
                     return false;
                 }
+            }
 
-                Editor.MarkSaved();
+            SetCurrentView(null, null);
+
+            try
+            {
+                await Home.LoadAsync(cancellationToken);
             }
             catch (Exception exception) when (exception is IOException or UnauthorizedAccessException or InvalidDataException)
             {
-                if (!_canContinue())
+                if (_canContinue())
                 {
-                    return false;
+                    Home.ReportError(exception.Message);
                 }
-
-                Editor.MarkSaveFailed();
-                Home.ReportError(exception.Message);
-                return false;
             }
+
+            return _canContinue();
         }
-
-        SetCurrentView(null, null);
-
-        try
+        finally
         {
-            await Home.LoadAsync(cancellationToken);
+            _isShowingHome = false;
         }
-        catch (Exception exception) when (exception is IOException or UnauthorizedAccessException or InvalidDataException)
-        {
-            if (_canContinue())
-            {
-                Home.ReportError(exception.Message);
-            }
-        }
-
-        return _canContinue();
     }
 
     public async Task OpenEditorAsync(ProjectDocument project, CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(project);
-        if (!_canContinue())
+        if (!_canContinue() || _isChangingCurrentView)
         {
             return;
+        }
+
+        if (Editor is not null)
+        {
+            throw new InvalidOperationException("Return Home before opening another project.");
         }
 
         await _mediaImportService.RefreshMissingAsync(project, cancellationToken);
@@ -106,24 +121,72 @@ public sealed class MainViewModel : ViewModelBase
         SetCurrentView(project, new EditorViewModel(project));
     }
 
+    public async Task ReplaceEditorAsync(ProjectDocument project, CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(project);
+        if (!_canContinue() || _isChangingCurrentView || Editor is null)
+        {
+            return;
+        }
+
+        var currentEditor = Editor;
+        await _mediaImportService.RefreshMissingAsync(project, cancellationToken);
+        if (!_canContinue() || !ReferenceEquals(Editor, currentEditor))
+        {
+            return;
+        }
+
+        SetCurrentView(project, new EditorViewModel(project));
+    }
+
     private void SetCurrentView(ProjectDocument? project, EditorViewModel? editor)
     {
-        var previousProject = CurrentProject;
-        var previousEditor = Editor;
-        CurrentProject = project;
-        Editor = editor;
-        OnPropertyChanged(nameof(IsEditorOpen));
+        if ((project is null) != (editor is null) ||
+            (editor is not null && !ReferenceEquals(project, editor.Project)))
+        {
+            throw new ArgumentException("The editor and current project must describe the same view state.");
+        }
 
+        var previousProject = _currentProject;
+        var previousEditor = _editor;
+        _isChangingCurrentView = true;
         try
         {
+            ApplyCurrentView(project, editor);
+            NotifyCurrentViewPropertiesChanged();
             CurrentViewChanged?.Invoke(this, EventArgs.Empty);
         }
         catch
         {
-            CurrentProject = previousProject;
-            Editor = previousEditor;
-            OnPropertyChanged(nameof(IsEditorOpen));
+            ApplyCurrentView(previousProject, previousEditor);
+            try
+            {
+                NotifyCurrentViewPropertiesChanged();
+                CurrentViewChanged?.Invoke(this, EventArgs.Empty);
+            }
+            catch
+            {
+                // Preserve the original transition failure after best-effort rollback notification.
+            }
+
             throw;
         }
+        finally
+        {
+            _isChangingCurrentView = false;
+        }
+    }
+
+    private void ApplyCurrentView(ProjectDocument? project, EditorViewModel? editor)
+    {
+        _currentProject = project;
+        _editor = editor;
+    }
+
+    private void NotifyCurrentViewPropertiesChanged()
+    {
+        OnPropertyChanged(nameof(CurrentProject));
+        OnPropertyChanged(nameof(Editor));
+        OnPropertyChanged(nameof(IsEditorOpen));
     }
 }

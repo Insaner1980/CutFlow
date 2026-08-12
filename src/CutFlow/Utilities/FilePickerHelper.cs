@@ -108,7 +108,14 @@ public static class FilePickerHelper
 
         try
         {
-            return Path.GetFullPath(path.Trim());
+            var value = path.Trim();
+            if (!Path.IsPathFullyQualified(value))
+            {
+                return null;
+            }
+
+            var fullPath = Path.GetFullPath(value);
+            return Directory.Exists(fullPath) ? fullPath : null;
         }
         catch (Exception exception) when (exception is ArgumentException or NotSupportedException or PathTooLongException)
         {
@@ -147,5 +154,22 @@ public enum MediaImportScope
 public static class MediaImportScopeExtensions
 {
     public static bool Allows(this MediaImportScope scope, string path) =>
-        FilePickerHelper.GetMediaExtensions(scope).Contains(Path.GetExtension(path), StringComparer.OrdinalIgnoreCase);
+        scope.AllowsExtension(Path.GetExtension(path));
+
+    internal static bool AllowsExtension(this MediaImportScope scope, string extension) =>
+        FilePickerHelper.GetMediaExtensions(scope).Contains(extension, StringComparer.OrdinalIgnoreCase);
+
+    internal static bool CanAcceptDrop(
+        this MediaImportScope scope,
+        bool hasStorageItems,
+        IEnumerable<string> advertisedFileTypes)
+    {
+        if (!hasStorageItems)
+        {
+            return false;
+        }
+
+        var fileTypes = advertisedFileTypes.Where(type => !string.IsNullOrWhiteSpace(type)).ToList();
+        return fileTypes.Count == 0 || fileTypes.Any(type => scope.AllowsExtension(type));
+    }
 }

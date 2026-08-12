@@ -35,7 +35,8 @@ public sealed class InternalVisibilityTests
         var refreshMissingParameterTypes = new[]
         {
             typeof(ProjectDocument),
-            typeof(Func<string, bool>)
+            typeof(Func<string, bool>),
+            typeof(CancellationToken)
         };
         Assert.IsNull(typeof(MediaImportService).GetMethod(
             "RefreshMissing",

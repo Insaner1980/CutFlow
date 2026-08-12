@@ -275,14 +275,23 @@ public sealed partial class PreviewPane : UserControl, IDisposable
         _positionTimer.Tick -= PositionTimer_Tick;
         _playerEventGeneration.Advance();
         DetachPlayerEvents();
-        PreviewResourceCleanup.Run(
-            () => _player.Pause(),
-            () => _player.Source = null,
-            () => PlayerElement.SetMediaPlayer(null),
-            () => _source?.Dispose(),
-            () => _player.Dispose());
-        _source = null;
-        _composition = null;
+        try
+        {
+            PreviewResourceCleanup.Run(
+                () => _player.Pause(),
+                () => _player.Source = null,
+                () => PlayerElement.SetMediaPlayer(null),
+                () => _source?.Dispose(),
+                () => _player.Dispose());
+        }
+        finally
+        {
+            _source = null;
+            _composition = null;
+            _textProject = null;
+            _dragTextElement = null;
+            TextOverlayCanvas.Children.Clear();
+        }
     }
 
     private void AttachPlayerEvents()

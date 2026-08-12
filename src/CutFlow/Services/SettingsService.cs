@@ -79,22 +79,21 @@ public sealed class AppSettings
             ? DefaultTimelineHeight
             : Math.Clamp(value, MinimumTimelineHeight, MaximumTimelineHeight);
 
-    private static string NormalizeFolderPath(string? value)
+    internal static double NormalizeTimelineHeightForWindow(double value, double windowHeight)
     {
-        if (string.IsNullOrWhiteSpace(value))
+        var normalized = NormalizeTimelineHeight(value);
+        if (!double.IsFinite(windowHeight) || windowHeight <= 0)
         {
-            return string.Empty;
+            return normalized;
         }
 
-        try
-        {
-            return Path.GetFullPath(value.Trim());
-        }
-        catch (Exception exception) when (exception is ArgumentException or NotSupportedException or PathTooLongException)
-        {
-            return string.Empty;
-        }
+        var minimumNonTimelineHeight = MinimumWindowHeight - DefaultTimelineHeight;
+        var availableTimelineHeight = Math.Max(MinimumTimelineHeight, windowHeight - minimumNonTimelineHeight);
+        return Math.Min(normalized, availableTimelineHeight);
     }
+
+    private static string NormalizeFolderPath(string? value) =>
+        FilePickerHelper.ResolveSuggestedExportFolder(value) ?? string.Empty;
 }
 
 public sealed class SettingsService

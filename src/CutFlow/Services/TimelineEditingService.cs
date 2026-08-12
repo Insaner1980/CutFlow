@@ -182,13 +182,14 @@ public static class TimelineEditingService
         }
 
         var clampedSourceOut = Math.Clamp(sourceOutMilliseconds, minimumSourceOut, maximumSourceOut);
-        if (item.SourceOutMilliseconds == clampedSourceOut)
+        var duration = clampedSourceOut - item.SourceInMilliseconds;
+        if (item.SourceOutMilliseconds == clampedSourceOut && item.DurationMilliseconds == duration)
         {
             return false;
         }
 
         item.SourceOutMilliseconds = clampedSourceOut;
-        item.DurationMilliseconds = item.SourceOutMilliseconds - item.SourceInMilliseconds;
+        item.DurationMilliseconds = duration;
         return true;
     }
 
@@ -293,6 +294,8 @@ public static class TimelineEditingService
 
         item.SourceInMilliseconds = clampedSourceIn;
         item.StartMilliseconds = desiredStart;
+        item.FadeInMilliseconds = Math.Clamp(item.FadeInMilliseconds, 0, item.DurationMilliseconds);
+        item.FadeOutMilliseconds = Math.Clamp(item.FadeOutMilliseconds, 0, item.DurationMilliseconds);
         return true;
     }
 
@@ -323,6 +326,8 @@ public static class TimelineEditingService
         }
 
         item.SourceOutMilliseconds = clampedSourceOut;
+        item.FadeInMilliseconds = Math.Clamp(item.FadeInMilliseconds, 0, item.DurationMilliseconds);
+        item.FadeOutMilliseconds = Math.Clamp(item.FadeOutMilliseconds, 0, item.DurationMilliseconds);
         return true;
     }
 
@@ -444,82 +449,82 @@ public static class TimelineEditingService
         switch (selection.Kind)
         {
             case EditorSelectionKind.VideoItem:
-            {
-                var index = project.VideoItems.FindIndex(item => item.Id == itemId);
-                if (index < 0)
                 {
-                    return false;
-                }
+                    var index = project.VideoItems.FindIndex(item => item.Id == itemId);
+                    if (index < 0)
+                    {
+                        return false;
+                    }
 
-                var source = project.VideoItems[index];
-                var copy = new VideoTimelineItem
-                {
-                    Id = Guid.NewGuid(),
-                    AssetId = source.AssetId,
-                    SourceInMilliseconds = source.SourceInMilliseconds,
-                    SourceOutMilliseconds = source.SourceOutMilliseconds,
-                    DurationMilliseconds = source.DurationMilliseconds,
-                    Volume = source.Volume,
-                    IsMuted = source.IsMuted
-                };
-                project.VideoItems.Insert(index + 1, copy);
-                duplicatedSelection = new EditorSelection(EditorSelectionKind.VideoItem, copy.Id);
-                return true;
-            }
+                    var source = project.VideoItems[index];
+                    var copy = new VideoTimelineItem
+                    {
+                        Id = Guid.NewGuid(),
+                        AssetId = source.AssetId,
+                        SourceInMilliseconds = source.SourceInMilliseconds,
+                        SourceOutMilliseconds = source.SourceOutMilliseconds,
+                        DurationMilliseconds = source.DurationMilliseconds,
+                        Volume = source.Volume,
+                        IsMuted = source.IsMuted
+                    };
+                    project.VideoItems.Insert(index + 1, copy);
+                    duplicatedSelection = new EditorSelection(EditorSelectionKind.VideoItem, copy.Id);
+                    return true;
+                }
             case EditorSelectionKind.AudioItem:
-            {
-                var source = project.AudioItems.FirstOrDefault(item => item.Id == itemId);
-                if (source is null)
                 {
-                    return false;
-                }
+                    var source = project.AudioItems.FirstOrDefault(item => item.Id == itemId);
+                    if (source is null)
+                    {
+                        return false;
+                    }
 
-                var copy = new AudioTimelineItem
-                {
-                    Id = Guid.NewGuid(),
-                    AssetId = source.AssetId,
-                    StartMilliseconds = TimelineMath.End(source.StartMilliseconds, source.DurationMilliseconds),
-                    SourceInMilliseconds = source.SourceInMilliseconds,
-                    SourceOutMilliseconds = source.SourceOutMilliseconds,
-                    Volume = source.Volume,
-                    FadeInMilliseconds = source.FadeInMilliseconds,
-                    FadeOutMilliseconds = source.FadeOutMilliseconds,
-                    IsMuted = source.IsMuted
-                };
-                project.AudioItems.Add(copy);
-                duplicatedSelection = new EditorSelection(EditorSelectionKind.AudioItem, copy.Id);
-                return true;
-            }
+                    var copy = new AudioTimelineItem
+                    {
+                        Id = Guid.NewGuid(),
+                        AssetId = source.AssetId,
+                        StartMilliseconds = TimelineMath.End(source.StartMilliseconds, source.DurationMilliseconds),
+                        SourceInMilliseconds = source.SourceInMilliseconds,
+                        SourceOutMilliseconds = source.SourceOutMilliseconds,
+                        Volume = source.Volume,
+                        FadeInMilliseconds = source.FadeInMilliseconds,
+                        FadeOutMilliseconds = source.FadeOutMilliseconds,
+                        IsMuted = source.IsMuted
+                    };
+                    project.AudioItems.Add(copy);
+                    duplicatedSelection = new EditorSelection(EditorSelectionKind.AudioItem, copy.Id);
+                    return true;
+                }
             case EditorSelectionKind.TextItem:
-            {
-                var source = project.TextItems.FirstOrDefault(item => item.Id == itemId);
-                if (source is null)
                 {
-                    return false;
-                }
+                    var source = project.TextItems.FirstOrDefault(item => item.Id == itemId);
+                    if (source is null)
+                    {
+                        return false;
+                    }
 
-                var copy = new TextTimelineItem
-                {
-                    Id = Guid.NewGuid(),
-                    StartMilliseconds = TimelineMath.End(source.StartMilliseconds, source.DurationMilliseconds),
-                    DurationMilliseconds = source.DurationMilliseconds,
-                    Text = source.Text,
-                    FontFamily = source.FontFamily,
-                    FontSize = source.FontSize,
-                    FontWeight = source.FontWeight,
-                    IsItalic = source.IsItalic,
-                    TextColor = source.TextColor,
-                    BackgroundColor = source.BackgroundColor,
-                    BackgroundEnabled = source.BackgroundEnabled,
-                    Opacity = source.Opacity,
-                    Alignment = source.Alignment,
-                    NormalizedX = source.NormalizedX,
-                    NormalizedY = source.NormalizedY
-                };
-                project.TextItems.Add(copy);
-                duplicatedSelection = new EditorSelection(EditorSelectionKind.TextItem, copy.Id);
-                return true;
-            }
+                    var copy = new TextTimelineItem
+                    {
+                        Id = Guid.NewGuid(),
+                        StartMilliseconds = TimelineMath.End(source.StartMilliseconds, source.DurationMilliseconds),
+                        DurationMilliseconds = source.DurationMilliseconds,
+                        Text = source.Text,
+                        FontFamily = source.FontFamily,
+                        FontSize = source.FontSize,
+                        FontWeight = source.FontWeight,
+                        IsItalic = source.IsItalic,
+                        TextColor = source.TextColor,
+                        BackgroundColor = source.BackgroundColor,
+                        BackgroundEnabled = source.BackgroundEnabled,
+                        Opacity = source.Opacity,
+                        Alignment = source.Alignment,
+                        NormalizedX = source.NormalizedX,
+                        NormalizedY = source.NormalizedY
+                    };
+                    project.TextItems.Add(copy);
+                    duplicatedSelection = new EditorSelection(EditorSelectionKind.TextItem, copy.Id);
+                    return true;
+                }
             default:
                 return false;
         }

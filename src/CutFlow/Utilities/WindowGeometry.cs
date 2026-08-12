@@ -46,6 +46,66 @@ public readonly record struct WindowGeometry(int X, int Y, int Width, int Height
             ScaleLogical(normalized.WindowHeight, targetDpi));
     }
 
+    public static WindowGeometry SelectBoundsForPersistence(
+        WindowGeometry currentBounds,
+        WindowGeometry? restoredBounds,
+        bool isRestored) =>
+        isRestored || restoredBounds is null ? currentBounds : restoredBounds.Value;
+
+    public static int SelectTargetDisplay(WindowGeometry requested, IReadOnlyList<WindowDisplayGeometry> displays) =>
+        SelectTargetDisplay(displays, _ => requested);
+
+    public static int SelectLegacyTargetDisplay(AppSettings settings, IReadOnlyList<WindowDisplayGeometry> displays)
+    {
+        ArgumentNullException.ThrowIfNull(settings);
+        return SelectTargetDisplay(displays, display => FromLegacyLogicalSettings(settings, display.Dpi));
+    }
+
+    private static int SelectTargetDisplay(
+        IReadOnlyList<WindowDisplayGeometry> displays,
+        Func<WindowDisplayGeometry, WindowGeometry> getRequestedBounds)
+    {
+        ArgumentNullException.ThrowIfNull(displays);
+        if (displays.Count == 0)
+        {
+            throw new ArgumentException("At least one display is required.", nameof(displays));
+        }
+
+        var bestIndex = 0;
+        var bestCoverage = -1d;
+        var bestDistance = double.PositiveInfinity;
+        for (var index = 0; index < displays.Count; index++)
+        {
+            var display = displays[index];
+            var requested = getRequestedBounds(display);
+            var coverage = GetIntersectionCoverage(requested, display.PhysicalBounds);
+            var distance = GetSquaredDistance(requested, display.PhysicalBounds);
+            if (coverage > bestCoverage ||
+                coverage == bestCoverage && distance < bestDistance ||
+                coverage == bestCoverage && distance == bestDistance && IsPreferredTieBreak(display, displays[bestIndex]))
+            {
+                bestIndex = index;
+                bestCoverage = coverage;
+                bestDistance = distance;
+            }
+        }
+
+        return bestIndex;
+    }
+
+    private static bool IsPreferredTieBreak(WindowDisplayGeometry candidate, WindowDisplayGeometry current)
+    {
+        if (candidate.IsPrimary != current.IsPrimary)
+        {
+            return candidate.IsPrimary;
+        }
+
+        var candidateBounds = candidate.PhysicalBounds;
+        var currentBounds = current.PhysicalBounds;
+        return (candidateBounds.X, candidateBounds.Y, candidateBounds.Width, candidateBounds.Height, candidate.Dpi, candidate.StableId)
+            .CompareTo((currentBounds.X, currentBounds.Y, currentBounds.Width, currentBounds.Height, current.Dpi, current.StableId)) < 0;
+    }
+
     public static WindowGeometry ClampPhysicalToWorkArea(
         WindowGeometry requested,
         WindowGeometry physicalWorkArea,
@@ -72,7 +132,39 @@ public readonly record struct WindowGeometry(int X, int Y, int Width, int Height
     private static int ScaleMinimum(double value, uint targetDpi) =>
         (int)Math.Ceiling(value * NormalizeDpi(targetDpi) / StandardDpi);
 
+    private static double GetIntersectionCoverage(WindowGeometry first, WindowGeometry second)
+    {
+        var width = Math.Max(0L, Math.Min((long)first.X + first.Width, (long)second.X + second.Width) - Math.Max(first.X, second.X));
+        var height = Math.Max(0L, Math.Min((long)first.Y + first.Height, (long)second.Y + second.Height) - Math.Max(first.Y, second.Y));
+        return width * (double)height / (first.Width * (double)first.Height);
+    }
+
+    private static double GetSquaredDistance(WindowGeometry first, WindowGeometry second)
+    {
+        var horizontal = GetAxisDistance(first.X, first.Width, second.X, second.Width);
+        var vertical = GetAxisDistance(first.Y, first.Height, second.Y, second.Height);
+        return horizontal * horizontal + vertical * vertical;
+    }
+
+    private static double GetAxisDistance(int firstStart, int firstLength, int secondStart, int secondLength)
+    {
+        var firstEnd = (long)firstStart + firstLength;
+        var secondEnd = (long)secondStart + secondLength;
+        if (firstEnd < secondStart)
+        {
+            return secondStart - firstEnd;
+        }
+
+        return secondEnd < firstStart ? firstStart - secondEnd : 0;
+    }
+
     private static uint NormalizeDpi(uint dpi) => dpi == 0 ? StandardDpi : dpi;
 }
 
 public readonly record struct WindowMinimumSize(int Width, int Height);
+
+public readonly record struct WindowDisplayGeometry(
+    WindowGeometry PhysicalBounds,
+    uint Dpi,
+    bool IsPrimary = false,
+    ulong StableId = 0);

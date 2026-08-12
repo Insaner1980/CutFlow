@@ -18,6 +18,7 @@ public sealed class EditorViewModel : ViewModelBase
     private long _playheadMilliseconds;
     private bool _isPlaying;
     private string _saveStatus = SavedStatus;
+    private long _revision;
 
     public EditorViewModel(ProjectDocument project)
     {
@@ -103,12 +104,19 @@ public sealed class EditorViewModel : ViewModelBase
 
     public bool CanRedo => _history.CanRedo;
 
+    internal long Revision => _revision;
+
     public void RequestReturnHome() => ReturnHomeRequested?.Invoke(this, EventArgs.Empty);
 
     public void RequestImport() => ImportRequested?.Invoke(this, EventArgs.Empty);
 
     public bool RenameProject(string name)
     {
+        if (string.Equals(name, Project.Name, StringComparison.Ordinal))
+        {
+            return false;
+        }
+
         string normalizedName;
         try
         {
@@ -158,7 +166,65 @@ public sealed class EditorViewModel : ViewModelBase
 
     public bool AddAssetToTimeline(Guid assetId)
     {
-        var asset = Project.Assets.FirstOrDefault(candidate => candidate.Id == assetId);
+        var selection = EditorSelection.None;
+        if (!TryCommitEdit(project => TryAddAssetToTimeline(project, assetId, PlayheadMilliseconds, out selection)))
+        {
+            return false;
+        }
+
+        Select(selection);
+        return true;
+    }
+
+    public IReadOnlyList<bool> AddImportedAssetsToTimeline(
+        IEnumerable<ProjectAsset> assets,
+        IReadOnlyList<Guid> assetIds)
+    {
+        ArgumentNullException.ThrowIfNull(assets);
+        ArgumentNullException.ThrowIfNull(assetIds);
+        var additions = assets.ToList();
+        var added = new bool[assetIds.Count];
+        var selection = EditorSelection.None;
+        var committed = TryCommitEdit(project =>
+        {
+            project.Assets.AddRange(additions);
+            var changed = additions.Count > 0;
+            for (var index = 0; index < assetIds.Count; index++)
+            {
+                if (!TryAddAssetToTimeline(project, assetIds[index], PlayheadMilliseconds, out var itemSelection))
+                {
+                    continue;
+                }
+
+                added[index] = true;
+                selection = itemSelection;
+                changed = true;
+            }
+
+            return changed;
+        });
+        if (!committed)
+        {
+            Array.Clear(added);
+            return added;
+        }
+
+        if (selection != EditorSelection.None)
+        {
+            Select(selection);
+        }
+
+        return added;
+    }
+
+    private static bool TryAddAssetToTimeline(
+        ProjectDocument project,
+        Guid assetId,
+        long playheadMilliseconds,
+        out EditorSelection selection)
+    {
+        selection = EditorSelection.None;
+        var asset = project.Assets.FirstOrDefault(candidate => candidate.Id == assetId);
         if (asset is null || asset.IsMissing ||
             asset.DurationMilliseconds < ProjectDocument.MinimumItemDurationMilliseconds)
         {
@@ -167,10 +233,16 @@ public sealed class EditorViewModel : ViewModelBase
 
         var timelineStart = asset.Kind == ProjectAssetKind.Audio
             ? Math.Clamp(
-                PlayheadMilliseconds,
+                playheadMilliseconds,
                 0,
                 ProjectDocument.MaximumTimelineDurationMilliseconds - ProjectDocument.MinimumItemDurationMilliseconds)
-            : TimelineLayoutProjection.GetVideoBounds(Project).LastOrDefault().EndMilliseconds;
+            : TimelineLayoutProjection.GetVideoBounds(project).LastOrDefault().EndMilliseconds;
+        if (asset.Kind == ProjectAssetKind.Audio &&
+            asset.DurationMilliseconds > ProjectDocument.MaximumTimelineDurationMilliseconds - timelineStart)
+        {
+            return false;
+        }
+
         var duration = Math.Min(
             asset.DurationMilliseconds,
             ProjectDocument.MaximumTimelineDurationMilliseconds - timelineStart);
@@ -179,7 +251,6 @@ public sealed class EditorViewModel : ViewModelBase
             return false;
         }
 
-        EditorSelection selection;
         if (asset.Kind == ProjectAssetKind.Audio)
         {
             var item = new AudioTimelineItem
@@ -190,7 +261,7 @@ public sealed class EditorViewModel : ViewModelBase
                 SourceInMilliseconds = 0,
                 SourceOutMilliseconds = duration
             };
-            CommitEdit(project => project.AudioItems.Add(item));
+            project.AudioItems.Add(item);
             selection = new EditorSelection(EditorSelectionKind.AudioItem, item.Id);
         }
         else
@@ -203,11 +274,10 @@ public sealed class EditorViewModel : ViewModelBase
                 SourceOutMilliseconds = duration,
                 DurationMilliseconds = duration
             };
-            CommitEdit(project => project.VideoItems.Add(item));
+            project.VideoItems.Add(item);
             selection = new EditorSelection(EditorSelectionKind.VideoItem, item.Id);
         }
 
-        Select(selection);
         return true;
     }
 
@@ -239,9 +309,26 @@ public sealed class EditorViewModel : ViewModelBase
     {
         ArgumentNullException.ThrowIfNull(updatedAsset);
         var existing = Project.Assets.FirstOrDefault(asset => asset.Id == updatedAsset.Id);
-        if (existing is null || existing.Kind != updatedAsset.Kind)
+        if (existing is null ||
+            existing.Kind != updatedAsset.Kind ||
+            updatedAsset.DurationMilliseconds < MediaImportService.GetRequiredSourceOutMilliseconds(Project, updatedAsset.Id) ||
+            MediaImportService.ContainsSourcePath(Project, updatedAsset.SourcePath, updatedAsset.Id))
         {
             return false;
+        }
+
+        if (string.Equals(existing.SourcePath, updatedAsset.SourcePath, StringComparison.Ordinal) &&
+            string.Equals(existing.FileName, updatedAsset.FileName, StringComparison.Ordinal) &&
+            existing.DurationMilliseconds == updatedAsset.DurationMilliseconds &&
+            existing.Width == updatedAsset.Width &&
+            existing.Height == updatedAsset.Height &&
+            existing.FileSize == updatedAsset.FileSize &&
+            existing.LastWriteUtc == updatedAsset.LastWriteUtc &&
+            string.Equals(existing.ThumbnailCachePath, updatedAsset.ThumbnailCachePath, StringComparison.Ordinal) &&
+            existing.IsMissing == updatedAsset.IsMissing)
+        {
+            Select(new EditorSelection(EditorSelectionKind.Asset, updatedAsset.Id));
+            return true;
         }
 
         CommitEdit(project =>
@@ -325,9 +412,22 @@ public sealed class EditorViewModel : ViewModelBase
         return changed;
     }
 
-    public bool DuplicateSelection()
+    public bool DuplicateSelection() => DuplicateSelection(Selection);
+
+    public bool DuplicateTimelineItem(Guid itemId)
     {
-        var selection = Selection;
+        var selection = Project.VideoItems.Any(item => item.Id == itemId)
+            ? new EditorSelection(EditorSelectionKind.VideoItem, itemId)
+            : Project.AudioItems.Any(item => item.Id == itemId)
+                ? new EditorSelection(EditorSelectionKind.AudioItem, itemId)
+                : Project.TextItems.Any(item => item.Id == itemId)
+                    ? new EditorSelection(EditorSelectionKind.TextItem, itemId)
+                    : EditorSelection.None;
+        return DuplicateSelection(selection);
+    }
+
+    private bool DuplicateSelection(EditorSelection selection)
+    {
         var duplicated = EditorSelection.None;
         var changed = TryCommitEdit(project =>
             TimelineEditingService.DuplicateSelection(project, selection, out duplicated));
@@ -590,6 +690,7 @@ public sealed class EditorViewModel : ViewModelBase
         ArgumentNullException.ThrowIfNull(edit);
         _history.Record(Project);
         edit(Project);
+        _revision++;
         ClampPlayheadToProjectDuration();
         SaveStatus = UnsavedStatus;
         OnPropertyChanged(nameof(CanUndo));
@@ -609,6 +710,7 @@ public sealed class EditorViewModel : ViewModelBase
 
         _history.Record(Project);
         Project = candidate;
+        _revision++;
         ClampPlayheadToProjectDuration();
         SaveStatus = UnsavedStatus;
         NormalizeSelection();
@@ -628,9 +730,10 @@ public sealed class EditorViewModel : ViewModelBase
         }
 
         Project = restored;
+        _revision++;
         ClampPlayheadToProjectDuration();
         NormalizeSelection();
-        SaveStatus = _history.CanUndo ? UnsavedStatus : SavedStatus;
+        SaveStatus = UnsavedStatus;
         OnPropertyChanged(nameof(CanUndo));
         OnPropertyChanged(nameof(CanRedo));
         EditCommitted?.Invoke(this, EventArgs.Empty);
@@ -645,6 +748,7 @@ public sealed class EditorViewModel : ViewModelBase
         }
 
         Project = restored;
+        _revision++;
         ClampPlayheadToProjectDuration();
         NormalizeSelection();
         SaveStatus = UnsavedStatus;
@@ -654,6 +758,17 @@ public sealed class EditorViewModel : ViewModelBase
     }
 
     public void MarkSaved() => SaveStatus = SavedStatus;
+
+    internal bool TryMarkSaved(long revision)
+    {
+        if (_revision != revision)
+        {
+            return false;
+        }
+
+        MarkSaved();
+        return true;
+    }
 
     public void MarkSaving() => SaveStatus = SavingStatus;
 

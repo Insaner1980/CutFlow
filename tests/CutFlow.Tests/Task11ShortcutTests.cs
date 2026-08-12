@@ -7,7 +7,7 @@ namespace CutFlow.Tests;
 [TestClass]
 public sealed class Task11ShortcutTests
 {
-    [DataTestMethod]
+    [TestMethod]
     [DataRow(false, false, true, VirtualKey.N, false, true)]
     [DataRow(false, false, true, VirtualKey.N, true, false)]
     [DataRow(true, false, true, VirtualKey.N, false, false)]
@@ -45,8 +45,38 @@ public sealed class Task11ShortcutTests
 
         var handled = route.IndexOf("e.Handled = true;", StringComparison.Ordinal);
         var save = route.IndexOf("await SaveAsync()", StringComparison.Ordinal);
-        Assert.IsTrue(handled >= 0 && save > handled);
+        var request = route.IndexOf("NewProjectRequested?.Invoke", StringComparison.Ordinal);
+        Assert.IsTrue(handled >= 0 && save > handled && request > save);
         StringAssert.Contains(source, "e.KeyStatus.WasKeyDown");
+    }
+
+    [TestMethod]
+    public void EditorNavigation_RechecksExportStateAfterAsynchronousSave()
+    {
+        var source = File.ReadAllText(Path.Combine(
+            FindRepositoryRoot(),
+            "src",
+            "CutFlow",
+            "Views",
+            "EditorView.xaml.cs"));
+        var backStart = source.IndexOf("private async void Back_Click", StringComparison.Ordinal);
+        var backEnd = source.IndexOf("private void ProjectNameBox_KeyDown", backStart, StringComparison.Ordinal);
+        var backRoute = source[backStart..backEnd];
+        var newProjectStart = source.IndexOf("case VirtualKey.N:", StringComparison.Ordinal);
+        var newProjectEnd = source.IndexOf("case VirtualKey.Z:", newProjectStart, StringComparison.Ordinal);
+        var newProjectRoute = source[newProjectStart..newProjectEnd];
+
+        AssertStateIsCheckedBeforeAndAfterSave(backRoute, "if (_isRendering)");
+        AssertStateIsCheckedBeforeAndAfterSave(newProjectRoute, "if (_isExporting)");
+    }
+
+    private static void AssertStateIsCheckedBeforeAndAfterSave(string route, string check)
+    {
+        var save = route.IndexOf("await SaveAsync()", StringComparison.Ordinal);
+        var firstCheck = route.IndexOf(check, StringComparison.Ordinal);
+        var secondCheck = route.IndexOf(check, firstCheck + 1, StringComparison.Ordinal);
+
+        Assert.IsTrue(firstCheck >= 0 && save > firstCheck && secondCheck > save);
     }
 
     private static string FindRepositoryRoot()

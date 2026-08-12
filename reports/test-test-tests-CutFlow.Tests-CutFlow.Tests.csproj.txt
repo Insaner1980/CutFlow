@@ -1,0 +1,11 @@
+test tests\CutFlow.Tests\CutFlow.Tests.csproj
+Root: C:\Dev\CutFlow
+Command: dotnet test tests\CutFlow.Tests\CutFlow.Tests.csproj -c Debug --no-restore
+Started: 2026-08-13 01.47.11
+
+  CutFlow -> C:\Dev\CutFlow\src\CutFlow\bin\x64\Debug\net10.0-windows10.0.26100.0\CutFlow.dll
+  CutFlow.Tests -> C:\Dev\CutFlow\tests\CutFlow.Tests\bin\x64\Debug\net10.0-windows10.0.26100.0\CutFlow.Tests.dll
+Test run for C:\Dev\CutFlow\tests\CutFlow.Tests\bin\x64\Debug\net10.0-windows10.0.26100.0\CutFlow.Tests.dll (.NETCoreApp,Version=v10.0)
+A total of 1 test files matched the specified pattern.
+
+Passed!  - Failed:     0, Passed:   602, Skipped:     0, Total:   602, Duration: 9 s - CutFlow.Tests.dll (net10.0)

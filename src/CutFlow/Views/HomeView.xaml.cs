@@ -63,14 +63,8 @@ public sealed partial class HomeView : UserControl
 
     public async Task CreateProjectAsync()
     {
-        if (!_canContinue() || IsProjectOperationActive)
+        await RunProjectOpenGateAsync(async () =>
         {
-            return;
-        }
-
-        await _projectOpenGate.RunAsync(async () =>
-        {
-            BusyIndicator.IsActive = true;
             try
             {
                 var project = await ViewModel.CreateAsync();
@@ -86,10 +80,6 @@ public sealed partial class HomeView : UserControl
                 ShowError(exception.Message);
             }
         });
-        if (_canContinue())
-        {
-            BusyIndicator.IsActive = IsProjectOperationActive;
-        }
     }
 
     private async void ProjectOpen_Click(object sender, RoutedEventArgs e) => await OpenFromTagAsync((FrameworkElement)sender);
@@ -98,19 +88,13 @@ public sealed partial class HomeView : UserControl
 
     private async Task OpenFromTagAsync(FrameworkElement source)
     {
-        if (!_canContinue() || IsProjectOperationActive)
-        {
-            return;
-        }
-
         if (!TryGetProjectId(source.Tag, out var projectId))
         {
             return;
         }
 
-        await _projectOpenGate.RunAsync(async () =>
+        await RunProjectOpenGateAsync(async () =>
         {
-            BusyIndicator.IsActive = true;
             try
             {
                 var project = await ViewModel.OpenAsync(projectId);
@@ -126,10 +110,27 @@ public sealed partial class HomeView : UserControl
                 ShowError(exception.Message);
             }
         });
+    }
+
+    internal async Task<bool> RunProjectOpenGateAsync(Func<Task> action)
+    {
+        ArgumentNullException.ThrowIfNull(action);
+        if (!_canContinue() || IsProjectOperationActive)
+        {
+            return false;
+        }
+
+        var ran = await _projectOpenGate.RunAsync(async () =>
+        {
+            BusyIndicator.IsActive = true;
+            await action();
+        });
         if (_canContinue())
         {
             BusyIndicator.IsActive = IsProjectOperationActive;
         }
+
+        return ran;
     }
 
     private Task RequestProjectOpenAsync(ProjectDocument project) =>
@@ -137,93 +138,102 @@ public sealed partial class HomeView : UserControl
 
     private async void RenameProject_Click(object sender, RoutedEventArgs e)
     {
-        if (!_canContinue() || IsProjectOperationActive || !TryGetProject((FrameworkElement)sender, out var project))
+        if (!TryGetProject((FrameworkElement)sender, out var project))
         {
             return;
         }
 
-        var nameBox = new TextBox
+        await RunProjectOpenGateAsync(async () =>
         {
-            Text = project.Name,
-            SelectionStart = 0,
-            SelectionLength = project.Name.Length,
-            MaxLength = 120,
-            Header = "Project name"
-        };
-        AutomationProperties.SetName(nameBox, "Project name");
-        var dialog = CreateDialog("Rename project", nameBox, "Rename");
-        dialog.PrimaryButtonClick += (_, args) =>
-        {
-            if (nameBox.Text.Trim().Length == 0)
+            var nameBox = new TextBox
             {
-                nameBox.Header = "Project name is required";
-                args.Cancel = true;
+                Text = project.Name,
+                SelectionStart = 0,
+                SelectionLength = project.Name.Length,
+                MaxLength = ProjectDocument.MaximumNameLength,
+                Header = "Project name"
+            };
+            AutomationProperties.SetName(nameBox, "Project name");
+            var dialog = CreateDialog("Rename project", nameBox, "Rename");
+            dialog.PrimaryButtonClick += (_, args) =>
+            {
+                if (nameBox.Text.Trim().Length == 0)
+                {
+                    nameBox.Header = "Project name is required";
+                    args.Cancel = true;
+                }
+            };
+            var result = await dialog.ShowAsync();
+            if (!_canContinue() || result != ContentDialogResult.Primary)
+            {
+                return;
             }
-        };
-        var result = await dialog.ShowAsync();
-        if (!_canContinue() || result != ContentDialogResult.Primary)
-        {
-            return;
-        }
 
-        var name = nameBox.Text.Trim();
+            var name = nameBox.Text.Trim();
 
-        try
-        {
-            await ViewModel.RenameAsync(project.Id, name);
-        }
-        catch (Exception exception)
-        {
-            ShowError(exception.Message);
-        }
+            try
+            {
+                await ViewModel.RenameAsync(project.Id, name);
+            }
+            catch (Exception exception)
+            {
+                ShowError(exception.Message);
+            }
+        });
     }
 
     private async void DuplicateProject_Click(object sender, RoutedEventArgs e)
     {
-        if (!_canContinue() || IsProjectOperationActive || !TryGetProjectId(((FrameworkElement)sender).Tag, out var projectId))
+        if (!TryGetProjectId(((FrameworkElement)sender).Tag, out var projectId))
         {
             return;
         }
 
-        try
+        await RunProjectOpenGateAsync(async () =>
         {
-            await ViewModel.DuplicateAsync(projectId);
-        }
-        catch (Exception exception)
-        {
-            ShowError(exception.Message);
-        }
+            try
+            {
+                await ViewModel.DuplicateAsync(projectId);
+            }
+            catch (Exception exception)
+            {
+                ShowError(exception.Message);
+            }
+        });
     }
 
     private async void DeleteProject_Click(object sender, RoutedEventArgs e)
     {
-        if (!_canContinue() || IsProjectOperationActive || !TryGetProject((FrameworkElement)sender, out var project))
+        if (!TryGetProject((FrameworkElement)sender, out var project))
         {
             return;
         }
 
-        var dialog = CreateDialog(
-            "Delete project?",
-            new TextBlock
+        await RunProjectOpenGateAsync(async () =>
+        {
+            var dialog = CreateDialog(
+                "Delete project?",
+                new TextBlock
+                {
+                    Text = $"Delete '{project.Name}' and its {AppInfo.ProductName} project cache? Imported source media will not be deleted.",
+                    TextWrapping = TextWrapping.Wrap
+                },
+                "Delete");
+            var result = await dialog.ShowAsync();
+            if (!_canContinue() || result != ContentDialogResult.Primary)
             {
-                Text = $"Delete '{project.Name}' and its {AppInfo.ProductName} project cache? Imported source media will not be deleted.",
-                TextWrapping = TextWrapping.Wrap
-            },
-            "Delete");
-        var result = await dialog.ShowAsync();
-        if (!_canContinue() || result != ContentDialogResult.Primary)
-        {
-            return;
-        }
+                return;
+            }
 
-        try
-        {
-            await ViewModel.DeleteAsync(project.Id);
-        }
-        catch (Exception exception)
-        {
-            ShowError(exception.Message);
-        }
+            try
+            {
+                await ViewModel.DeleteAsync(project.Id);
+            }
+            catch (Exception exception)
+            {
+                ShowError(exception.Message);
+            }
+        });
     }
 
     private void HomeNavigation_SelectionChanged(NavigationView sender, NavigationViewSelectionChangedEventArgs args)

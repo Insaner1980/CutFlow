@@ -1,3 +1,5 @@
+using System.ComponentModel;
+using System.Runtime.InteropServices;
 using System.Text;
 using System.Text.Json;
 using System.Text.Json.Serialization;
@@ -18,13 +20,22 @@ public sealed class ProjectService
 
     private readonly string _projectsRootPath;
     private readonly Func<ProjectDocument, string> _serialize;
+    private readonly Func<DateTimeOffset> _utcNow;
+    private readonly Func<string, string, CancellationToken, Task> _writeAndFlushAsync;
+    private readonly Action<string> _createProjectDirectory;
+    private readonly SemaphoreSlim _saveGate = new(1, 1);
 
     public ProjectService()
         : this(null)
     {
     }
 
-    internal ProjectService(string? rootPath, Func<ProjectDocument, string>? serialize = null)
+    internal ProjectService(
+        string? rootPath,
+        Func<ProjectDocument, string>? serialize = null,
+        Func<DateTimeOffset>? utcNow = null,
+        Func<string, string, CancellationToken, Task>? writeAndFlushAsync = null,
+        Action<string>? createProjectDirectory = null)
     {
         var localRootPath = rootPath ?? ApplicationData.Current.LocalFolder.Path;
         if (string.IsNullOrWhiteSpace(localRootPath))
@@ -34,26 +45,46 @@ public sealed class ProjectService
 
         _projectsRootPath = Path.GetFullPath(Path.Combine(localRootPath, "Projects"));
         _serialize = serialize ?? (project => JsonSerializer.Serialize(project, JsonOptions));
+        _utcNow = utcNow ?? (() => DateTimeOffset.UtcNow);
+        _writeAndFlushAsync = writeAndFlushAsync ?? WriteAndFlushAsync;
+        _createProjectDirectory = createProjectDirectory ?? CreateNewDirectory;
     }
 
     public async Task<ProjectDocument> CreateAsync(string name, CancellationToken cancellationToken = default)
     {
         cancellationToken.ThrowIfCancellationRequested();
-        var project = ProjectDocument.CreateNew(NormalizeName(name), DateTimeOffset.UtcNow);
+        var project = ProjectDocument.CreateNew(NormalizeName(name), GetUtcNow());
         var projectDirectory = GetProjectDirectoryPath(project.Id);
-        var createdProjectDirectory = !Directory.Exists(projectDirectory);
+        var createdProjectDirectory = false;
         try
         {
-            Directory.CreateDirectory(projectDirectory);
+            Directory.CreateDirectory(_projectsRootPath);
+            RejectReparsePoints(_projectsRootPath);
+            _createProjectDirectory(projectDirectory);
+            createdProjectDirectory = true;
             Directory.CreateDirectory(GetCachePath(project.Id));
-            await SaveAsync(project, cancellationToken);
+            await SaveCoreAsync(project, overwriteExisting: false, cancellationToken: cancellationToken);
             return project;
         }
-        catch
+        catch (Exception exception)
         {
             if (createdProjectDirectory && Directory.Exists(projectDirectory))
             {
-                Directory.Delete(projectDirectory, recursive: true);
+                try
+                {
+                    RejectReparsePoints(projectDirectory);
+                    var cacheDirectory = GetCachePath(project.Id);
+                    if (Directory.Exists(cacheDirectory))
+                    {
+                        Directory.Delete(cacheDirectory, recursive: false);
+                    }
+
+                    Directory.Delete(projectDirectory, recursive: false);
+                }
+                catch (Exception cleanupException)
+                {
+                    exception.Data["ProjectDirectoryCleanupException"] = cleanupException;
+                }
             }
 
             throw;
@@ -62,6 +93,7 @@ public sealed class ProjectService
 
     public async Task<IReadOnlyList<ProjectDocument>> ListAsync(CancellationToken cancellationToken = default)
     {
+        cancellationToken.ThrowIfCancellationRequested();
         if (!Directory.Exists(_projectsRootPath))
         {
             return [];
@@ -71,7 +103,9 @@ public sealed class ProjectService
         foreach (var directory in Directory.EnumerateDirectories(_projectsRootPath))
         {
             cancellationToken.ThrowIfCancellationRequested();
-            if (!Guid.TryParse(Path.GetFileName(directory), out var projectId))
+            var directoryName = Path.GetFileName(directory);
+            if (!Guid.TryParseExact(directoryName, "D", out var projectId) ||
+                !string.Equals(directoryName, projectId.ToString("D"), StringComparison.OrdinalIgnoreCase))
             {
                 continue;
             }
@@ -94,7 +128,10 @@ public sealed class ProjectService
             }
         }
 
-        return projects.OrderByDescending(project => project.ModifiedAt).ToList();
+        return projects
+            .OrderByDescending(project => project.ModifiedAt)
+            .ThenBy(project => project.Id)
+            .ToList();
     }
 
     public async Task<ProjectDocument> LoadAsync(Guid projectId, CancellationToken cancellationToken = default)
@@ -113,17 +150,35 @@ public sealed class ProjectService
         ProjectDocument project;
         try
         {
-            project = JsonSerializer.Deserialize<ProjectDocument>(json, JsonOptions)
+            using var jsonDocument = JsonDocument.Parse(json);
+            var root = jsonDocument.RootElement;
+            if (root.ValueKind != JsonValueKind.Object)
+            {
+                throw new InvalidDataException("The project JSON did not contain a document.");
+            }
+
+            if (!root.TryGetProperty("schemaVersion", out var schemaVersionElement))
+            {
+                throw new InvalidDataException("The project schema version is missing.");
+            }
+
+            if (schemaVersionElement.ValueKind != JsonValueKind.Number ||
+                !schemaVersionElement.TryGetInt32(out var schemaVersion))
+            {
+                throw new InvalidDataException("The project schema version is invalid.");
+            }
+
+            if (schemaVersion != ProjectDocument.CurrentSchemaVersion)
+            {
+                throw new InvalidDataException($"Unsupported project schema version {schemaVersion}.");
+            }
+
+            project = root.Deserialize<ProjectDocument>(JsonOptions)
                 ?? throw new InvalidDataException("The project JSON did not contain a document.");
         }
         catch (JsonException exception)
         {
             throw new InvalidDataException("The project JSON could not be read.", exception);
-        }
-
-        if (project.SchemaVersion != ProjectDocument.CurrentSchemaVersion)
-        {
-            throw new InvalidDataException($"Unsupported project schema version {project.SchemaVersion}.");
         }
 
         if (project.Id != projectId)
@@ -135,7 +190,13 @@ public sealed class ProjectService
         return project;
     }
 
-    public async Task SaveAsync(ProjectDocument project, CancellationToken cancellationToken = default)
+    public Task SaveAsync(ProjectDocument project, CancellationToken cancellationToken = default) =>
+        SaveCoreAsync(project, overwriteExisting: true, cancellationToken: cancellationToken);
+
+    private async Task SaveCoreAsync(
+        ProjectDocument project,
+        bool overwriteExisting,
+        CancellationToken cancellationToken)
     {
         ArgumentNullException.ThrowIfNull(project);
         if (project.Id == Guid.Empty)
@@ -148,40 +209,74 @@ public sealed class ProjectService
             throw new InvalidDataException($"Unsupported project schema version {project.SchemaVersion}.");
         }
 
-        var projectDirectory = GetProjectDirectoryPath(project.Id);
-        Normalize(project, _projectsRootPath);
-        var previousModifiedAt = project.ModifiedAt;
-        var candidateModifiedAt = DateTimeOffset.UtcNow;
-        var projectPath = GetProjectFilePath(project.Id);
-        var temporaryPath = projectPath + ".tmp";
-
+        cancellationToken.ThrowIfCancellationRequested();
+        await _saveGate.WaitAsync(cancellationToken);
         try
         {
-            project.ModifiedAt = candidateModifiedAt;
             cancellationToken.ThrowIfCancellationRequested();
-            Directory.CreateDirectory(projectDirectory);
-            var json = _serialize(project);
-            await WriteAndFlushAsync(temporaryPath, json, cancellationToken);
-            if (File.Exists(projectPath))
+            var projectDirectory = GetProjectDirectoryPath(project.Id);
+            Normalize(project, _projectsRootPath);
+            cancellationToken.ThrowIfCancellationRequested();
+            var candidateModifiedAt = GetUtcNow();
+            var snapshot = ProjectDocumentCloner.Clone(project, JsonOptions);
+            snapshot.ModifiedAt = candidateModifiedAt;
+            var projectPath = GetProjectFilePath(project.Id);
+            var temporaryPath = $"{projectPath}.{Guid.NewGuid():N}.tmp";
+            var replaceExisting = overwriteExisting && File.Exists(projectPath);
+            var committed = false;
+            Exception? saveException = null;
+
+            try
             {
-                File.Replace(temporaryPath, projectPath, destinationBackupFileName: null);
+                cancellationToken.ThrowIfCancellationRequested();
+                Directory.CreateDirectory(projectDirectory);
+                RejectReparsePoints(projectDirectory);
+                RejectReparsePoints(projectPath);
+                RejectReparsePoints(temporaryPath);
+                var json = _serialize(snapshot);
+                cancellationToken.ThrowIfCancellationRequested();
+                await _writeAndFlushAsync(temporaryPath, json, cancellationToken);
+                cancellationToken.ThrowIfCancellationRequested();
+                RejectReparsePoints(projectPath);
+                RejectReparsePoints(temporaryPath);
+                cancellationToken.ThrowIfCancellationRequested();
+                if (replaceExisting)
+                {
+                    File.Replace(temporaryPath, projectPath, destinationBackupFileName: null);
+                }
+                else
+                {
+                    File.Move(temporaryPath, projectPath);
+                }
+
+                committed = true;
+                project.CreatedAt = snapshot.CreatedAt;
+                project.ModifiedAt = candidateModifiedAt;
             }
-            else
+            catch (Exception exception)
             {
-                File.Move(temporaryPath, projectPath);
+                saveException = exception;
+                throw;
             }
-        }
-        catch
-        {
-            project.ModifiedAt = previousModifiedAt;
-            throw;
+            finally
+            {
+                if (!committed && File.Exists(temporaryPath))
+                {
+                    try
+                    {
+                        RejectReparsePoints(temporaryPath);
+                        File.Delete(temporaryPath);
+                    }
+                    catch (Exception cleanupException) when (saveException is not null)
+                    {
+                        saveException.Data["TemporaryFileCleanupException"] = cleanupException;
+                    }
+                }
+            }
         }
         finally
         {
-            if (File.Exists(temporaryPath))
-            {
-                File.Delete(temporaryPath);
-            }
+            _saveGate.Release();
         }
     }
 
@@ -198,11 +293,11 @@ public sealed class ProjectService
         var original = await LoadAsync(projectId, cancellationToken);
         var duplicate = ProjectDocumentCloner.Clone(original, JsonOptions);
         duplicate.Id = Guid.NewGuid();
-        duplicate.Name = NormalizeName(name ?? $"{original.Name} copy");
-        var now = DateTimeOffset.UtcNow;
+        duplicate.Name = name is null ? CreateDuplicateName(original.Name) : NormalizeName(name);
+        var now = GetUtcNow();
         duplicate.CreatedAt = now;
         duplicate.ModifiedAt = now;
-        await SaveAsync(duplicate, cancellationToken);
+        await SaveCoreAsync(duplicate, overwriteExisting: false, cancellationToken: cancellationToken);
         return duplicate;
     }
 
@@ -217,17 +312,30 @@ public sealed class ProjectService
                 await LoadAsync(projectId, cancellationToken);
             }
 
+            RejectReparsePoints(projectDirectory);
             await Task.Run(() => Directory.Delete(projectDirectory, recursive: true), cancellationToken);
         }
     }
 
-    public string GetCachePath(Guid projectId) => Path.Combine(GetProjectDirectoryPath(projectId), "cache");
+    public string GetCachePath(Guid projectId)
+    {
+        var cachePath = Path.Combine(GetProjectDirectoryPath(projectId), "cache");
+        RejectReparsePoints(cachePath);
+        return cachePath;
+    }
 
     public string GetProjectPath(Guid projectId) => GetProjectDirectoryPath(projectId);
 
     internal string GetProjectsPath() => _projectsRootPath;
 
-    private string GetProjectFilePath(Guid projectId) => Path.Combine(GetProjectDirectoryPath(projectId), "project.json");
+    private DateTimeOffset GetUtcNow() => _utcNow().ToUniversalTime();
+
+    private string GetProjectFilePath(Guid projectId)
+    {
+        var projectPath = Path.Combine(GetProjectDirectoryPath(projectId), "project.json");
+        RejectReparsePoints(projectPath);
+        return projectPath;
+    }
 
     private string GetProjectDirectoryPath(Guid projectId)
     {
@@ -243,7 +351,40 @@ public sealed class ProjectService
             throw new InvalidOperationException("The resolved project directory is outside the configured Projects directory.");
         }
 
+        RejectReparsePoints(projectDirectory);
+
         return projectDirectory;
+    }
+
+    internal static void RejectReparsePoints(string path)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(path);
+        var currentPath = Path.GetFullPath(path);
+        while (true)
+        {
+            System.IO.FileAttributes attributes;
+            try
+            {
+                attributes = File.GetAttributes(currentPath);
+            }
+            catch (Exception exception) when (exception is FileNotFoundException or DirectoryNotFoundException)
+            {
+                attributes = 0;
+            }
+
+            if ((attributes & System.IO.FileAttributes.ReparsePoint) != 0)
+            {
+                throw new InvalidDataException("Managed project paths cannot contain symbolic links or reparse points.");
+            }
+
+            var parentPath = Directory.GetParent(currentPath)?.FullName;
+            if (parentPath is null || PathsEqual(parentPath, currentPath))
+            {
+                return;
+            }
+
+            currentPath = parentPath;
+        }
     }
 
     private static async Task WriteAndFlushAsync(string path, string json, CancellationToken cancellationToken)
@@ -251,7 +392,7 @@ public sealed class ProjectService
         var bytes = Encoding.UTF8.GetBytes(json);
         await using var stream = new FileStream(
             path,
-            FileMode.Create,
+            FileMode.CreateNew,
             FileAccess.Write,
             FileShare.None,
             bufferSize: 4096,
@@ -261,14 +402,45 @@ public sealed class ProjectService
         stream.Flush(flushToDisk: true);
     }
 
-    private static void Normalize(ProjectDocument project, string projectsRootPath)
+    private static void CreateNewDirectory(string path)
+    {
+        if (CreateDirectoryW(path, 0))
+        {
+            return;
+        }
+
+        var error = Marshal.GetLastWin32Error();
+        throw new IOException(
+            error == 183
+                ? "The project directory already exists."
+                : "The project directory could not be created.",
+            new Win32Exception(error));
+    }
+
+    [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool CreateDirectoryW(string path, nint securityAttributes);
+
+    internal static void NormalizeSnapshot(ProjectDocument project)
+    {
+        ArgumentNullException.ThrowIfNull(project);
+        if (project.SchemaVersion != ProjectDocument.CurrentSchemaVersion)
+        {
+            throw new InvalidDataException($"Unsupported project schema version {project.SchemaVersion}.");
+        }
+
+        Normalize(project, projectsRootPath: null);
+    }
+
+    private static void Normalize(ProjectDocument project, string? projectsRootPath)
     {
         project.Name ??= string.Empty;
         project.Settings ??= new ProjectSettings();
-        if (!TimelineInput.IsOpaqueArgb(project.Settings.BackgroundColor))
-        {
-            project.Settings.BackgroundColor = ProjectSettings.DefaultBackgroundColor;
-        }
+        project.Settings.ApplyAspectRatio(project.Settings.AspectRatio);
+        project.Settings.FrameRate = 30;
+        project.Settings.BackgroundColor = TimelineInput.IsOpaqueArgb(project.Settings.BackgroundColor)
+            ? project.Settings.BackgroundColor.ToUpperInvariant()
+            : ProjectSettings.DefaultBackgroundColor;
 
         project.Assets ??= [];
         project.VideoItems ??= [];
@@ -282,26 +454,80 @@ public sealed class ProjectService
             throw new InvalidDataException("Project collections cannot contain null items.");
         }
 
+        var assetsById = new Dictionary<Guid, ProjectAsset>();
         foreach (var asset in project.Assets)
         {
             asset.SourcePath ??= string.Empty;
             asset.FileName ??= string.Empty;
             asset.ThumbnailCachePath ??= string.Empty;
-            if (!string.IsNullOrWhiteSpace(asset.SourcePath))
+            if (asset.ThumbnailCachePath.Length > 0 &&
+                !ThumbnailService.IsCanonicalRelativeCachePath(asset.ThumbnailCachePath))
             {
-                try
+                asset.ThumbnailCachePath = string.Empty;
+            }
+
+            if (asset.Id == Guid.Empty || !assetsById.TryAdd(asset.Id, asset))
+            {
+                throw new InvalidDataException("Project assets must have unique non-empty identities.");
+            }
+
+            if (string.IsNullOrWhiteSpace(asset.SourcePath))
+            {
+                QuarantineAssetSource(asset);
+                continue;
+            }
+
+            try
+            {
+                if (!Path.IsPathFullyQualified(asset.SourcePath))
                 {
-                    if (MediaImportService.IsPathWithinDirectory(asset.SourcePath, projectsRootPath))
-                    {
-                        throw new InvalidDataException(
-                            $"Source media must remain outside {AppInfo.ProductName}'s managed project folders.");
-                    }
+                    QuarantineAssetSource(asset);
+                    continue;
                 }
-                catch (Exception exception) when (exception is ArgumentException or NotSupportedException or PathTooLongException)
+
+                var normalizedSourcePath = MediaImportService.NormalizePath(asset.SourcePath);
+                if (projectsRootPath is not null &&
+                    MediaImportService.IsPathWithinDirectory(normalizedSourcePath, projectsRootPath))
                 {
-                    throw new InvalidDataException("A source media path is invalid.", exception);
+                    throw new InvalidDataException(
+                        $"Source media must remain outside {AppInfo.ProductName}'s managed project folders.");
+                }
+
+                if (!MediaImportService.TryGetKind(normalizedSourcePath, out var sourceKind) || sourceKind != asset.Kind)
+                {
+                    QuarantineAssetSource(asset);
+                    continue;
+                }
+
+                asset.SourcePath = normalizedSourcePath;
+                if (string.IsNullOrWhiteSpace(asset.FileName))
+                {
+                    asset.FileName = Path.GetFileName(normalizedSourcePath);
                 }
             }
+            catch (Exception exception) when (exception is ArgumentException or NotSupportedException or PathTooLongException)
+            {
+                QuarantineAssetSource(asset);
+            }
+        }
+
+        var timelineItemIds = new HashSet<Guid>();
+        if (project.VideoItems.Select(static item => item.Id)
+            .Concat(project.AudioItems.Select(static item => item.Id))
+            .Concat(project.TextItems.Select(static item => item.Id))
+            .Any(itemId => itemId == Guid.Empty || !timelineItemIds.Add(itemId)))
+        {
+            throw new InvalidDataException("Timeline items must have unique non-empty identities.");
+        }
+
+        if (project.VideoItems.Any(item =>
+                assetsById.TryGetValue(item.AssetId, out var asset) &&
+                asset.Kind is not (ProjectAssetKind.Video or ProjectAssetKind.Image)) ||
+            project.AudioItems.Any(item =>
+                assetsById.TryGetValue(item.AssetId, out var asset) &&
+                asset.Kind != ProjectAssetKind.Audio))
+        {
+            throw new InvalidDataException("A timeline item references an incompatible asset kind.");
         }
 
         long videoStart = 0;
@@ -309,35 +535,71 @@ public sealed class ProjectService
         {
             if (videoStart > ProjectDocument.MaximumTimelineDurationMilliseconds - ProjectDocument.MinimumItemDurationMilliseconds)
             {
-                project.VideoItems.RemoveRange(index, project.VideoItems.Count - index);
-                break;
+                throw new InvalidDataException(
+                    "The V1 timeline exceeds the 24-hour limit and cannot be repaired without removing items.");
             }
 
             var item = project.VideoItems[index];
             item.Volume = double.IsFinite(item.Volume) ? Math.Clamp(item.Volume, 0, 1) : 1;
+            var hasKnownVisualAsset = assetsById.TryGetValue(item.AssetId, out var asset) &&
+                asset.Kind is ProjectAssetKind.Video or ProjectAssetKind.Image &&
+                asset.DurationMilliseconds >= ProjectDocument.MinimumItemDurationMilliseconds;
+            var maximumSourceOut = hasKnownVisualAsset
+                ? Math.Min(asset!.DurationMilliseconds, ProjectDocument.MaximumTimelineDurationMilliseconds)
+                : ProjectDocument.MaximumTimelineDurationMilliseconds;
             item.SourceInMilliseconds = Math.Clamp(
                 item.SourceInMilliseconds,
                 0,
-                ProjectDocument.MaximumTimelineDurationMilliseconds - ProjectDocument.MinimumItemDurationMilliseconds);
+                maximumSourceOut - ProjectDocument.MinimumItemDurationMilliseconds);
             item.SourceOutMilliseconds = Math.Clamp(
                 item.SourceOutMilliseconds,
                 item.SourceInMilliseconds + ProjectDocument.MinimumItemDurationMilliseconds,
-                ProjectDocument.MaximumTimelineDurationMilliseconds);
-            item.DurationMilliseconds = TimelineMath.ClampItemDuration(item.DurationMilliseconds, videoStart);
+                maximumSourceOut);
+            var isVideo = hasKnownVisualAsset && asset!.Kind == ProjectAssetKind.Video;
+            var duration = isVideo
+                ? item.SourceOutMilliseconds - item.SourceInMilliseconds
+                : item.DurationMilliseconds;
+            item.DurationMilliseconds = TimelineMath.ClampItemDuration(duration, videoStart);
+            if (isVideo)
+            {
+                item.SourceOutMilliseconds = item.SourceInMilliseconds + item.DurationMilliseconds;
+            }
+
             videoStart += item.DurationMilliseconds;
         }
 
         foreach (var item in project.AudioItems)
         {
+            var originalSourceIn = item.SourceInMilliseconds;
+            var maximumSourceOut = assetsById.TryGetValue(item.AssetId, out var asset) &&
+                asset.DurationMilliseconds >= ProjectDocument.MinimumItemDurationMilliseconds
+                    ? Math.Min(asset.DurationMilliseconds, ProjectDocument.MaximumTimelineDurationMilliseconds)
+                    : ProjectDocument.MaximumTimelineDurationMilliseconds;
             item.SourceInMilliseconds = Math.Clamp(
                 item.SourceInMilliseconds,
                 0,
-                ProjectDocument.MaximumTimelineDurationMilliseconds - ProjectDocument.MinimumItemDurationMilliseconds);
+                maximumSourceOut - ProjectDocument.MinimumItemDurationMilliseconds);
             item.SourceOutMilliseconds = Math.Clamp(
                 item.SourceOutMilliseconds,
                 item.SourceInMilliseconds + ProjectDocument.MinimumItemDurationMilliseconds,
-                ProjectDocument.MaximumTimelineDurationMilliseconds);
-            item.StartMilliseconds = TimelineMath.ClampItemStart(item.StartMilliseconds, item.DurationMilliseconds);
+                maximumSourceOut);
+
+            var shiftedStart = (decimal)item.StartMilliseconds + item.SourceInMilliseconds - originalSourceIn;
+            var normalizedStart = shiftedStart > long.MaxValue
+                ? long.MaxValue
+                : shiftedStart < long.MinValue
+                    ? long.MinValue
+                    : (long)shiftedStart;
+            if (normalizedStart < 0)
+            {
+                var availableLeftTrim = item.DurationMilliseconds - ProjectDocument.MinimumItemDurationMilliseconds;
+                var requiredLeftTrim = normalizedStart == long.MinValue ? long.MaxValue : -normalizedStart;
+                var leftTrim = Math.Min(availableLeftTrim, requiredLeftTrim);
+                item.SourceInMilliseconds += leftTrim;
+                normalizedStart = TimelineMath.SaturatingAdd(normalizedStart, leftTrim);
+            }
+
+            item.StartMilliseconds = TimelineMath.ClampItemStart(Math.Max(0, normalizedStart), item.DurationMilliseconds);
             item.Volume = double.IsFinite(item.Volume) ? Math.Clamp(item.Volume, 0, 1) : 1;
             item.FadeInMilliseconds = Math.Clamp(item.FadeInMilliseconds, 0, item.DurationMilliseconds);
             item.FadeOutMilliseconds = Math.Clamp(item.FadeOutMilliseconds, 0, item.DurationMilliseconds);
@@ -345,11 +607,14 @@ public sealed class ProjectService
 
         foreach (var item in project.TextItems)
         {
+            var duration = item.StartMilliseconds < 0
+                ? TimelineMath.SaturatingAdd(item.StartMilliseconds, Math.Max(0, item.DurationMilliseconds))
+                : item.DurationMilliseconds;
             item.StartMilliseconds = Math.Clamp(
                 item.StartMilliseconds,
                 0,
                 ProjectDocument.MaximumTimelineDurationMilliseconds - ProjectDocument.MinimumItemDurationMilliseconds);
-            item.DurationMilliseconds = TimelineMath.ClampItemDuration(item.DurationMilliseconds, item.StartMilliseconds);
+            item.DurationMilliseconds = TimelineMath.ClampItemDuration(duration, item.StartMilliseconds);
             item.Text ??= string.Empty;
             item.FontFamily = TextStyle.NormalizeFontFamily(item.FontFamily);
             item.FontSize = double.IsFinite(item.FontSize) && item.FontSize > 0
@@ -366,17 +631,47 @@ public sealed class ProjectService
 
     }
 
+    private static void QuarantineAssetSource(ProjectAsset asset)
+    {
+        asset.SourcePath = string.Empty;
+        asset.ThumbnailCachePath = string.Empty;
+        asset.IsMissing = true;
+    }
+
     internal static string NormalizeName(string name)
     {
         ArgumentNullException.ThrowIfNull(name);
-        var normalizedName = name.Trim();
+        var normalizedName = NormalizeNameCharacters(name);
         if (normalizedName.Length == 0)
         {
             throw new ArgumentException("A project name is required.", nameof(name));
         }
 
+        if (normalizedName.Length > ProjectDocument.MaximumNameLength)
+        {
+            throw new ArgumentException(
+                $"A project name cannot exceed {ProjectDocument.MaximumNameLength} characters.",
+                nameof(name));
+        }
+
         return normalizedName;
     }
+
+    private static string CreateDuplicateName(string originalName)
+    {
+        const string suffix = " copy";
+        var baseName = NormalizeNameCharacters(originalName);
+        var maximumBaseLength = ProjectDocument.MaximumNameLength - suffix.Length;
+        if (baseName.Length > maximumBaseLength)
+        {
+            baseName = baseName[..maximumBaseLength].TrimEnd();
+        }
+
+        return NormalizeName($"{baseName}{suffix}");
+    }
+
+    private static string NormalizeNameCharacters(string name) =>
+        new string(name.Select(static character => char.IsControl(character) ? ' ' : character).ToArray()).Trim();
 
     private static bool PathsEqual(string? first, string second) =>
         first is not null && string.Equals(

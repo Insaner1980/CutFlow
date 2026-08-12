@@ -1,4 +1,5 @@
 using CutFlow.Models;
+using Windows.ApplicationModel.DataTransfer;
 using Windows.System;
 
 namespace CutFlow.Utilities;
@@ -77,6 +78,28 @@ internal static class TimelineDropPolicy
             : new(false, TimelineDropFailure.IncompatibleAsset);
     }
 
+    public static bool CanAcceptDrag(
+        TimelineTrackKind track,
+        bool isLocked,
+        bool hasLibraryAsset,
+        bool hasStorageItems,
+        IEnumerable<string> advertisedFileTypes)
+    {
+        if (track is not TimelineTrackKind.Video and not TimelineTrackKind.Audio || isLocked)
+        {
+            return false;
+        }
+
+        var scope = track == TimelineTrackKind.Video ? MediaImportScope.Visual : MediaImportScope.Audio;
+        var fileTypes = advertisedFileTypes.Where(type => !string.IsNullOrWhiteSpace(type)).ToList();
+        if (fileTypes.Count > 0)
+        {
+            return fileTypes.Any(type => scope.AllowsExtension(type));
+        }
+
+        return hasStorageItems && !hasLibraryAsset;
+    }
+
     public static TimelineTrackKind TrackForSelection(EditorSelectionKind selectionKind) => selectionKind switch
     {
         EditorSelectionKind.VideoItem => TimelineTrackKind.Video,
@@ -128,6 +151,19 @@ internal static class MediaAssetDragPayload
     public const string FormatId = "application/x-cutflow-media-asset";
 
     public static string Create(Guid assetId) => assetId.ToString("D");
+
+    public static void Set(DataPackage data, ProjectAsset asset)
+    {
+        ArgumentNullException.ThrowIfNull(data);
+        ArgumentNullException.ThrowIfNull(asset);
+
+        data.SetData(FormatId, Create(asset.Id));
+        var extension = Path.GetExtension(asset.SourcePath);
+        if (!string.IsNullOrWhiteSpace(extension))
+        {
+            data.Properties.FileTypes.Add(extension);
+        }
+    }
 
     public static bool TryParseAssetId(object? payload, out Guid assetId)
     {

@@ -118,7 +118,7 @@
                                                     <FontIcon Foreground="{StaticResource TextTertiaryBrush}" FontSize="28" Glyph="&#xE714;" />
                                                     <TextBlock Style="{StaticResource CaptionTextBlockStyle}" Text="Thumbnail unavailable" />
                                                 </StackPanel>
-                                                <Image Source="{x:Bind ThumbnailSource}" Stretch="UniformToFill" />
+                                                <Image Source="{x:Bind ThumbnailSource, Mode=OneWay}" Stretch="UniformToFill" />
                                             </Grid>
                                             <Grid Grid.Row="1" Padding="12,10">
                                                 <Grid.ColumnDefinitions>
