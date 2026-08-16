@@ -29,4 +29,21 @@ public sealed class TimecodeFormatterTests
     {
         Assert.ThrowsExactly<ArgumentOutOfRangeException>(() => TimecodeFormatter.Format(0, 0));
     }
+
+    [TestMethod]
+    public void Format_DoesNotOverflowFrameComponentForLargeFiniteFrameRate()
+    {
+        Assert.AreEqual(
+            "00:00:00:9990000000000000000",
+            TimecodeFormatter.Format(999, 1e19));
+    }
+
+    [TestMethod]
+    public void Format_DoesNotOverflowIntermediateFrameCalculation()
+    {
+        var frameComponent = TimecodeFormatter.Format(999, double.MaxValue)[9..];
+
+        Assert.AreEqual(309, frameComponent.Length);
+        Assert.IsTrue(frameComponent.All(char.IsAsciiDigit));
+    }
 }

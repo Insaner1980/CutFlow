@@ -2,18 +2,21 @@ namespace CutFlow.Utilities;
 
 internal static class PreviewTransportMath
 {
-    public const double FrameRate = 30d;
+    private const long FramesPerSecond = 30;
+    private const long MillisecondsPerSecond = 1_000;
 
-    private const double FrameDurationMilliseconds = 1_000d / FrameRate;
+    public const double FrameRate = FramesPerSecond;
 
     public static long StepByFrame(long positionMilliseconds, long durationMilliseconds, bool forward)
     {
         var duration = Math.Max(0, durationMilliseconds);
         var position = Math.Clamp(positionMilliseconds, 0, duration);
-        var currentFrame = Math.Round(position / FrameDurationMilliseconds, MidpointRounding.AwayFromZero);
+        var currentFrame = (long)((decimal)position * FramesPerSecond / MillisecondsPerSecond);
         var targetFrame = currentFrame + (forward ? 1 : -1);
-        var target = (long)Math.Round(targetFrame * FrameDurationMilliseconds, MidpointRounding.AwayFromZero);
-        return Math.Clamp(target, 0, duration);
+        var target = decimal.Ceiling((decimal)targetFrame * MillisecondsPerSecond / FramesPerSecond);
+        if (target <= 0) return 0;
+        if (target >= duration) return duration;
+        return (long)target;
     }
 
     public static PreviewFitSize CalculateFitSize(

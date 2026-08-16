@@ -156,6 +156,46 @@ public sealed class Task11LifecycleTests
     }
 
     [TestMethod]
+    public void TimelineFileDrop_RechecksTrackLockBeforeAnyPreparedImportCommit()
+    {
+        var root = FindRepositoryRoot();
+        var editor = File.ReadAllText(Path.Combine(root, "src", "CutFlow", "Views", "EditorView.xaml.cs"));
+        var commitStart = editor.IndexOf("private void CommitTimelineDropResults", StringComparison.Ordinal);
+        var commitEnd = editor.IndexOf("private bool TryAddAssetToTrack", commitStart, StringComparison.Ordinal);
+        var commit = editor[commitStart..commitEnd];
+        var lockGate = commit.IndexOf("if (Timeline.IsTrackLocked(track))", StringComparison.Ordinal);
+        var revalidate = commit.IndexOf("MediaImportService.RevalidateDuplicateResults", StringComparison.Ordinal);
+        var seek = commit.IndexOf("SeekPreviewAndTimeline(positionMilliseconds);", StringComparison.Ordinal);
+        var modelCommit = commit.IndexOf("ViewModel.AddImportedAssetsToTimeline", StringComparison.Ordinal);
+
+        Assert.IsTrue(lockGate >= 0);
+        Assert.IsTrue(revalidate > lockGate);
+        Assert.IsTrue(seek > lockGate);
+        Assert.IsTrue(modelCommit > lockGate);
+    }
+
+    [TestMethod]
+    public void TimelineTrackState_RejectsLockedTrackBeforeModelCommitAndRestoresCanonicalUi()
+    {
+        var root = FindRepositoryRoot();
+        var editor = File.ReadAllText(Path.Combine(root, "src", "CutFlow", "Views", "EditorView.xaml.cs"));
+        var handlerStart = editor.IndexOf("private void Timeline_TrackStateChanged", StringComparison.Ordinal);
+        var handlerEnd = editor.IndexOf("private void Timeline_AssetDropped", handlerStart, StringComparison.Ordinal);
+        var handler = editor[handlerStart..handlerEnd];
+        var lockGate = handler.IndexOf("if (Timeline.IsTrackLocked(track))", StringComparison.Ordinal);
+        var restore = handler.IndexOf("UpdateProjectPresentation();", lockGate, StringComparison.Ordinal);
+
+        Assert.Contains("TimelineTrackState.VideoVisibility => TimelineTrackKind.Video", handler);
+        Assert.Contains("TimelineTrackState.TextVisibility => TimelineTrackKind.Text", handler);
+        Assert.Contains("TimelineTrackState.AudioMute => TimelineTrackKind.Audio", handler);
+        Assert.IsTrue(lockGate >= 0);
+        Assert.IsTrue(restore > lockGate);
+        Assert.IsTrue(handler.IndexOf("ViewModel.SetVideoTrackVisible", StringComparison.Ordinal) > restore);
+        Assert.IsTrue(handler.IndexOf("ViewModel.SetTextTrackVisible", StringComparison.Ordinal) > restore);
+        Assert.IsTrue(handler.IndexOf("ViewModel.SetAudioTrackMuted", StringComparison.Ordinal) > restore);
+    }
+
+    [TestMethod]
     public void TimelineZoom_RefreshesTheScrollExtentBeforeApplyingTheAnchoredOffset()
     {
         var root = FindRepositoryRoot();
@@ -170,6 +210,184 @@ public sealed class Task11LifecycleTests
         Assert.IsTrue(updateWidth >= 0);
         Assert.IsTrue(updateLayout > updateWidth);
         Assert.IsTrue(changeView > updateLayout);
+    }
+
+    [TestMethod]
+    public void ExplicitSeeks_EnsureThePlayheadIsVisibleEvenWhenPlaybackIsPaused()
+    {
+        var root = FindRepositoryRoot();
+        var editor = File.ReadAllText(Path.Combine(root, "src", "CutFlow", "Views", "EditorView.xaml.cs"));
+        var helperStart = editor.IndexOf("private void SeekPreviewAndTimeline", StringComparison.Ordinal);
+        Assert.IsTrue(helperStart >= 0);
+        var helperEnd = editor.IndexOf("private void Preview_PlaybackPositionChanged", helperStart, StringComparison.Ordinal);
+        Assert.IsTrue(helperEnd > helperStart);
+        var helper = editor[helperStart..helperEnd];
+        Assert.Contains("Preview.Seek(positionMilliseconds);", helper);
+        Assert.Contains("ViewModel.Seek(positionMilliseconds);", helper);
+        Assert.Contains("ensureVisible: true", helper);
+        Assert.Contains("SeekPreviewAndTimeline(e.PositionMilliseconds);", editor);
+    }
+
+    [TestMethod]
+    public void PreviewRebuild_UsesTheModelPlayheadWhenNoNativeSourceExistsYet()
+    {
+        var root = FindRepositoryRoot();
+        var editor = File.ReadAllText(Path.Combine(root, "src", "CutFlow", "Views", "EditorView.xaml.cs"));
+        var rebuildStart = editor.IndexOf("private async Task RebuildPreviewAsync", StringComparison.Ordinal);
+        var rebuildEnd = editor.IndexOf("private void EditorView_SizeChanged", rebuildStart, StringComparison.Ordinal);
+        var rebuild = editor[rebuildStart..rebuildEnd];
+
+        var modelPosition = rebuild.IndexOf("var requestedPosition = ViewModel.PlayheadMilliseconds;", StringComparison.Ordinal);
+        var replace = rebuild.IndexOf("Preview.ReplaceComposition", StringComparison.Ordinal);
+        var positionArgument = rebuild.IndexOf("requestedPosition,", replace, StringComparison.Ordinal);
+
+        Assert.IsTrue(modelPosition >= 0);
+        Assert.IsTrue(replace > modelPosition);
+        Assert.IsTrue(positionArgument > replace);
+    }
+
+    [TestMethod]
+    public void PreviewRebuild_UpdatesOnlyItsOwnCurrentInfoBarMessage()
+    {
+        var root = FindRepositoryRoot();
+        var editor = File.ReadAllText(Path.Combine(root, "src", "CutFlow", "Views", "EditorView.xaml.cs"));
+        var rebuildStart = editor.IndexOf("private async Task RebuildPreviewAsync", StringComparison.Ordinal);
+        var rebuildEnd = editor.IndexOf("private void EditorView_SizeChanged", rebuildStart, StringComparison.Ordinal);
+        var rebuild = editor[rebuildStart..rebuildEnd];
+        var showMessage = editor.IndexOf("private void ShowPreviewMessage", StringComparison.Ordinal);
+        var clearMessage = editor.IndexOf("private void ClearPreviewMessage", StringComparison.Ordinal);
+
+        Assert.Contains("CompositionBuildResult.SelectPreviewErrors(result.Errors)", rebuild);
+        Assert.Contains("ShowPreviewMessage(", rebuild);
+        Assert.Contains("InfoBarSeverity.Warning", rebuild);
+        Assert.Contains("ClearPreviewMessage();", rebuild);
+        Assert.Contains("ShowPreviewMessage(InfoBarSeverity.Error", rebuild);
+        Assert.IsTrue(showMessage >= 0);
+        Assert.IsTrue(clearMessage > showMessage);
+        StringAssert.Contains(editor[showMessage..clearMessage], "_previewInfoBarIsCurrent = true;");
+        StringAssert.Contains(editor[clearMessage..], "if (!_previewInfoBarIsCurrent)");
+    }
+
+    [TestMethod]
+    public void TimelineWheelZoom_IsScopedInsideTheScrollerBeforeBuiltInWheelHandling()
+    {
+        var root = FindRepositoryRoot();
+        var xaml = File.ReadAllText(Path.Combine(root, "src", "CutFlow", "Controls", "TimelineControl.xaml"));
+        var source = File.ReadAllText(Path.Combine(root, "src", "CutFlow", "Controls", "TimelineControl.xaml.cs"));
+
+        Assert.Contains("PointerWheelChanged=\"TimelineContent_PointerWheelChanged\"", xaml);
+        Assert.DoesNotContain("UIElement.PointerWheelChangedEvent", source);
+    }
+
+    [TestMethod]
+    public void TimelineSnappingToggle_UpdatesItsAccessibleActionName()
+    {
+        var root = FindRepositoryRoot();
+        var xaml = File.ReadAllText(Path.Combine(root, "src", "CutFlow", "Controls", "TimelineControl.xaml"));
+        var source = File.ReadAllText(Path.Combine(root, "src", "CutFlow", "Controls", "TimelineControl.xaml.cs"));
+        var changedStart = source.IndexOf("private void SnappingButton_Changed", StringComparison.Ordinal);
+        var changedEnd = source.IndexOf("private void SelectionToolButton_Click", changedStart, StringComparison.Ordinal);
+        var changed = source[changedStart..changedEnd];
+
+        Assert.Contains("AutomationProperties.Name=\"Disable timeline snapping\"", xaml);
+        Assert.Contains("\"Disable timeline snapping\"", changed);
+        Assert.Contains("\"Enable timeline snapping\"", changed);
+        Assert.Contains("AutomationProperties.SetName(SnappingButton, name);", changed);
+    }
+
+    [TestMethod]
+    public void PreviewMuteToggle_UpdatesItsAccessibleActionName()
+    {
+        var root = FindRepositoryRoot();
+        var source = File.ReadAllText(Path.Combine(root, "src", "CutFlow", "Controls", "PreviewPane.xaml.cs"));
+        var muteStart = source.IndexOf("public void Mute(bool isMuted)", StringComparison.Ordinal);
+        var muteEnd = source.IndexOf("public void Loop(bool loop)", muteStart, StringComparison.Ordinal);
+        var mute = source[muteStart..muteEnd];
+
+        Assert.Contains("\"Unmute preview\"", mute);
+        Assert.Contains("\"Mute preview\"", mute);
+        Assert.Contains("AutomationProperties.SetName(MuteButton, name);", mute);
+        Assert.Contains("ToolTipService.SetToolTip(MuteButton, name);", mute);
+    }
+
+    [TestMethod]
+    public void PreviewPane_OwnsOnePlayerAndOneQueueTimerForItsLifetime()
+    {
+        var root = FindRepositoryRoot();
+        var source = File.ReadAllText(Path.Combine(root, "src", "CutFlow", "Controls", "PreviewPane.xaml.cs"));
+        var constructorStart = source.IndexOf("public PreviewPane()", StringComparison.Ordinal);
+        var constructorEnd = source.IndexOf("public event EventHandler<PlaybackChangedEventArgs>", constructorStart, StringComparison.Ordinal);
+        var replaceStart = source.IndexOf("public void ReplaceComposition", StringComparison.Ordinal);
+        var replaceEnd = source.IndexOf("internal static void RunSuccessfulSourceSwap", replaceStart, StringComparison.Ordinal);
+        var playbackStateStart = source.IndexOf("private void ApplyActualPlaybackState", StringComparison.Ordinal);
+        var playbackStateEnd = source.IndexOf("private void PositionTimer_Tick", playbackStateStart, StringComparison.Ordinal);
+        var disposeStart = source.IndexOf("public void Dispose()", StringComparison.Ordinal);
+        var disposeEnd = source.IndexOf("private void AttachPlayerEvents", disposeStart, StringComparison.Ordinal);
+
+        Assert.IsTrue(constructorStart >= 0 && constructorEnd > constructorStart);
+        Assert.IsTrue(replaceStart >= 0 && replaceEnd > replaceStart);
+        Assert.IsTrue(playbackStateStart >= 0 && playbackStateEnd > playbackStateStart);
+        Assert.IsTrue(disposeStart >= 0 && disposeEnd > disposeStart);
+
+        var constructor = source[constructorStart..constructorEnd];
+        var replace = source[replaceStart..replaceEnd];
+        var playbackState = source[playbackStateStart..playbackStateEnd];
+        var dispose = source[disposeStart..disposeEnd];
+
+        Assert.AreEqual(1, source.Split("private readonly MediaPlayer _player = new();", StringSplitOptions.None).Length - 1);
+        Assert.Contains("private readonly DispatcherQueueTimer _positionTimer;", source);
+        Assert.AreEqual(1, source.Split("DispatcherQueue.CreateTimer();", StringSplitOptions.None).Length - 1);
+        Assert.DoesNotContain("DispatcherTimer", source);
+        Assert.IsTrue(constructor.IndexOf("InitializeComponent();", StringComparison.Ordinal) < constructor.IndexOf("DispatcherQueue.CreateTimer();", StringComparison.Ordinal));
+        Assert.Contains("Interval = TimeSpan.FromMilliseconds(33);", constructor);
+        Assert.Contains("_positionTimer.Tick += PositionTimer_Tick;", constructor);
+        Assert.DoesNotContain("new MediaPlayer", replace);
+        Assert.DoesNotContain("CreateTimer", replace);
+        var reportActual = playbackState.IndexOf("_playbackState.ReportActual(", StringComparison.Ordinal);
+        var updateTimer = playbackState.IndexOf("if (playing) _positionTimer.Start(); else _positionTimer.Stop();", StringComparison.Ordinal);
+        var updateIcon = playbackState.IndexOf("SetPlaying(playing);", StringComparison.Ordinal);
+        var reportViewModel = playbackState.IndexOf("PlayPauseRequested?.Invoke", StringComparison.Ordinal);
+        Assert.IsTrue(reportActual >= 0 && updateTimer > reportActual && updateIcon > updateTimer && reportViewModel > updateIcon);
+        Assert.Contains("_positionTimer.Stop();", dispose);
+        Assert.Contains("_positionTimer.Tick -= PositionTimer_Tick;", dispose);
+        Assert.Contains("DetachPlayerEvents();", dispose);
+        var markDisposed = dispose.IndexOf("_disposed = true;", StringComparison.Ordinal);
+        var invalidateGeneration = dispose.IndexOf("_playerEventGeneration.Advance();", StringComparison.Ordinal);
+        var detachEvents = dispose.IndexOf("DetachPlayerEvents();", StringComparison.Ordinal);
+        Assert.IsTrue(markDisposed >= 0 && invalidateGeneration > markDisposed && detachEvents > invalidateGeneration);
+        Assert.Contains("() => PlayerElement.SetMediaPlayer(null)", dispose);
+        Assert.Contains("() => _source?.Dispose()", dispose);
+        Assert.Contains("() => _player.Dispose()", dispose);
+    }
+
+    [TestMethod]
+    public void PreviewMediaEnded_ManualLoopHonorsCurrentIntentAndPublishesCoherentPosition()
+    {
+        var root = FindRepositoryRoot();
+        var source = File.ReadAllText(Path.Combine(root, "src", "CutFlow", "Controls", "PreviewPane.xaml.cs"));
+        var handlerStart = source.IndexOf("private void Player_MediaEnded", StringComparison.Ordinal);
+        var handlerEnd = source.IndexOf("private void ApplyActualPlaybackState", handlerStart, StringComparison.Ordinal);
+
+        Assert.IsTrue(handlerStart >= 0 && handlerEnd > handlerStart);
+        var handler = source[handlerStart..handlerEnd];
+        var generationCheck = handler.IndexOf("_playerEventGeneration.IsCurrent(generation)", StringComparison.Ordinal);
+        var generationRun = handler.IndexOf("_playerEventGeneration.TryRun(generation", StringComparison.Ordinal);
+        var restartCheck = handler.IndexOf("PreviewPlaybackPolicy.ShouldRestartAtEnd", StringComparison.Ordinal);
+        var seekToStart = handler.IndexOf("sender.PlaybackSession.Position = TimeSpan.Zero;", StringComparison.Ordinal);
+        var publishStart = handler.IndexOf("new PlayheadChangedEventArgs(0)", StringComparison.Ordinal);
+        var resume = handler.IndexOf("sender.Play();", StringComparison.Ordinal);
+        var stopTimer = handler.IndexOf("_positionTimer.Stop();", StringComparison.Ordinal);
+        var clearIntent = handler.IndexOf("_playbackState.SetIntent(false);", StringComparison.Ordinal);
+        var pause = handler.IndexOf("sender.Pause();", StringComparison.Ordinal);
+        var publishEnd = handler.IndexOf("new PlayheadChangedEventArgs(PositionMilliseconds)", StringComparison.Ordinal);
+
+        Assert.IsTrue(generationCheck >= 0 && generationRun > generationCheck && restartCheck > generationRun);
+        Assert.Contains("_playbackState.PlayIntent", handler[restartCheck..seekToStart]);
+        Assert.DoesNotContain("_playbackState.SetIntent(true);", handler);
+        Assert.IsTrue(seekToStart > restartCheck && publishStart > seekToStart && resume > publishStart);
+        Assert.IsTrue(stopTimer > resume && clearIntent > stopTimer && pause > clearIntent && publishEnd > pause);
+        Assert.IsTrue(source.Split("_player.IsLoopingEnabled = false;", StringSplitOptions.None).Length - 1 >= 2);
+        Assert.DoesNotContain("_player.IsLoopingEnabled = true;", source);
     }
 
     [TestMethod]

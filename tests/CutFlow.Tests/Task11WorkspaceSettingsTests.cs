@@ -33,8 +33,8 @@ public sealed class Task11WorkspaceSettingsTests
         StringAssert.Contains(xaml, "PointerCanceled=\"TimelineResizeHandle_PointerCanceled\"");
         StringAssert.Contains(moved, "notify: false");
         StringAssert.Contains(released, "SetTimelineHeight(TimelineHeight, notify: true);");
-        StringAssert.Contains(canceled, "CancelTimelineResize(e)");
-        StringAssert.Contains(captureLost, "CancelTimelineResize(e)");
+        StringAssert.Contains(canceled, "CancelTimelineResize(e.Pointer.PointerId)");
+        StringAssert.Contains(captureLost, "CancelTimelineResize(e.Pointer.PointerId, releaseCapture: false)");
         StringAssert.Contains(cancel, "SetTimelineHeight(_timelineResizeStartHeight, notify: false);");
     }
 

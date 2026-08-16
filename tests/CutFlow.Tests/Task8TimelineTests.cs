@@ -45,6 +45,7 @@ public sealed class Task8TimelineTests
                 bounds[index].ItemId,
                 bounds[index].StartMilliseconds + 75));
             Assert.AreEqual(TimelineCardHit.Start, TimelineCardHitTest.Resolve(0.5, cards[index].HitWidth, 8));
+            Assert.AreEqual(TimelineCardHit.Body, TimelineCardHitTest.Resolve(1, cards[index].HitWidth, 8));
             Assert.AreEqual(TimelineCardHit.End, TimelineCardHitTest.Resolve(1.5, cards[index].HitWidth, 8));
             if (index + 1 < cards.Length)
             {
@@ -62,6 +63,23 @@ public sealed class Task8TimelineTests
             scale.GetVisibleRulerTicks(0, 100, bounds[^1].EndMilliseconds)
                 .Select(tick => tick.Milliseconds)
                 .ToArray());
+    }
+
+    [TestMethod]
+    public void TrimHitTest_UsesInclusiveEightDipEdgesAndKeepsShortCardBodyReachable()
+    {
+        Assert.AreEqual(TimelineCardHit.Start, TimelineCardHitTest.Resolve(8, 40, 8));
+        Assert.AreEqual(TimelineCardHit.Body, TimelineCardHitTest.Resolve(8.001, 40, 8));
+        Assert.AreEqual(TimelineCardHit.Body, TimelineCardHitTest.Resolve(31.999, 40, 8));
+        Assert.AreEqual(TimelineCardHit.End, TimelineCardHitTest.Resolve(32, 40, 8));
+
+        Assert.AreEqual(TimelineCardHit.Start, TimelineCardHitTest.Resolve(7.5, 16, 8));
+        Assert.AreEqual(TimelineCardHit.Body, TimelineCardHitTest.Resolve(8, 16, 8));
+        Assert.AreEqual(TimelineCardHit.End, TimelineCardHitTest.Resolve(8.5, 16, 8));
+
+        Assert.AreEqual(TimelineCardHit.Start, TimelineCardHitTest.Resolve(8, 18, 8));
+        Assert.AreEqual(TimelineCardHit.Body, TimelineCardHitTest.Resolve(9, 18, 8));
+        Assert.AreEqual(TimelineCardHit.End, TimelineCardHitTest.Resolve(10, 18, 8));
     }
 
     [TestMethod]
@@ -181,6 +199,9 @@ public sealed class Task8TimelineTests
     {
         Assert.AreEqual(112d, TimelineScale.CalculateWheelZoomTarget(100, 120), 0.001);
         Assert.AreEqual(100d / 1.12d, TimelineScale.CalculateWheelZoomTarget(100, -120), 0.001);
+        Assert.AreEqual(100d * Math.Sqrt(1.12d), TimelineScale.CalculateWheelZoomTarget(100, 60), 0.001);
+        Assert.AreEqual(100d / Math.Sqrt(1.12d), TimelineScale.CalculateWheelZoomTarget(100, -60), 0.001);
+        Assert.AreEqual(100d * 1.12d * 1.12d, TimelineScale.CalculateWheelZoomTarget(100, 240), 0.001);
         Assert.AreEqual(TimelineScale.MaximumPixelsPerSecond, TimelineScale.CalculateWheelZoomTarget(399, 120), 0.001);
         Assert.AreEqual(TimelineScale.MinimumPixelsPerSecond, TimelineScale.CalculateWheelZoomTarget(21, -120), 0.001);
         Assert.AreEqual(100d, TimelineScale.CalculateWheelZoomTarget(100, 0), 0.001);
@@ -324,19 +345,38 @@ public sealed class Task8TimelineTests
     }
 
     [TestMethod]
-    [DataRow(EditorSelectionKind.VideoItem, true, true, true)]
-    [DataRow(EditorSelectionKind.VideoItem, false, true, false)]
-    [DataRow(EditorSelectionKind.VideoItem, true, false, false)]
-    [DataRow(EditorSelectionKind.Project, true, true, false)]
-    public void DuplicateShortcut_UsesTimelineDuplicateAvailability(
-        EditorSelectionKind kind,
-        bool controlDown,
-        bool isDuplicateKey,
-        bool expected)
+    public void ContextMenuState_ResolvesCurrentItemLockPlayheadAndSourceByGuid()
     {
-        Assert.AreEqual(
-            expected,
-            TimelineContextCommands.ShouldHandleDuplicateShortcut(kind, controlDown, isDuplicateKey));
+        var project = TestProjects.WithVideo(1_000);
+        var video = project.VideoItems.Single();
+        project.Assets.Single().SourcePath = @"C:\Media\clip.mp4";
+        var text = TestProjects.Text(0, 1_000);
+        project.TextItems.Add(text);
+        var locks = new TimelineTrackLocks();
+
+        var edge = TimelineContextCommands.Resolve(project, video.Id, locks, 50);
+        Assert.IsFalse(edge.CanSplit);
+        Assert.IsTrue(edge.CanDuplicate);
+        Assert.IsTrue(edge.CanDelete);
+        Assert.IsTrue(edge.CanShowSourceFile);
+
+        var interior = TimelineContextCommands.Resolve(project, video.Id, locks, 500);
+        Assert.IsTrue(interior.CanSplit);
+
+        locks.SetLocked(TimelineTrackKind.Video, true);
+        var locked = TimelineContextCommands.Resolve(project, video.Id, locks, 500);
+        Assert.IsFalse(locked.CanSplit);
+        Assert.IsFalse(locked.CanDuplicate);
+        Assert.IsFalse(locked.CanDelete);
+        Assert.IsTrue(locked.CanShowSourceFile);
+
+        var textState = TimelineContextCommands.Resolve(project, text.Id, locks, 500);
+        Assert.IsFalse(textState.CanSplit);
+        Assert.IsTrue(textState.CanDuplicate);
+        Assert.IsTrue(textState.CanDelete);
+        Assert.IsFalse(textState.CanShowSourceFile);
+
+        Assert.AreEqual(default, TimelineContextCommands.Resolve(project, Guid.NewGuid(), locks, 500));
     }
 
     [TestMethod]

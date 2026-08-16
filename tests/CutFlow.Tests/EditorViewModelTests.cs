@@ -205,6 +205,25 @@ public sealed class EditorViewModelTests
     }
 
     [TestMethod]
+    public void DeleteTimelineItem_UsesCurrentGuidWithoutFallingBackToSelection()
+    {
+        var project = TestProjects.WithVideo(1_000, 1_000);
+        var targetId = project.VideoItems[0].Id;
+        var selectedId = project.VideoItems[1].Id;
+        var viewModel = new EditorViewModel(project);
+        viewModel.Select(new EditorSelection(EditorSelectionKind.VideoItem, selectedId));
+
+        Assert.IsFalse(viewModel.DeleteTimelineItem(Guid.NewGuid()));
+        Assert.HasCount(2, viewModel.Project.VideoItems);
+        Assert.AreEqual(new EditorSelection(EditorSelectionKind.VideoItem, selectedId), viewModel.Selection);
+
+        Assert.IsTrue(viewModel.DeleteTimelineItem(targetId));
+        Assert.HasCount(1, viewModel.Project.VideoItems);
+        Assert.AreEqual(selectedId, viewModel.Project.VideoItems.Single().Id);
+        Assert.AreEqual(EditorSelection.None, viewModel.Selection);
+    }
+
+    [TestMethod]
     public void RemoveAsset_UndoAndRedoKeepLibraryConsistent()
     {
         var project = ProjectDocument.CreateNew("Remove", DateTimeOffset.UnixEpoch);

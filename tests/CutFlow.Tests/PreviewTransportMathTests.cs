@@ -8,7 +8,7 @@ public sealed class PreviewTransportMathTests
 {
     [TestMethod]
     [DataRow(1_000L, 5_000L, false, 967L)]
-    [DataRow(1_000L, 5_000L, true, 1_033L)]
+    [DataRow(1_000L, 5_000L, true, 1_034L)]
     [DataRow(0L, 5_000L, false, 0L)]
     [DataRow(4_990L, 5_000L, true, 5_000L)]
     public void StepByFrame_MovesOneThirtyFpsFrameAndClampsToTimeline(
@@ -35,6 +35,19 @@ public sealed class PreviewTransportMathTests
         }
 
         Assert.AreEqual(1_000, position);
+    }
+
+    [TestMethod]
+    [DataRow(0L, 34L)]
+    [DataRow(33L, 34L)]
+    public void StepByFrame_ForwardStepAdvancesDisplayedThirtyFpsFrame(
+        long positionMilliseconds,
+        long expectedMilliseconds)
+    {
+        var position = PreviewTransportMath.StepByFrame(positionMilliseconds, 5_000, forward: true);
+
+        Assert.AreEqual(expectedMilliseconds, position);
+        Assert.AreEqual("00:00:00:01", TimecodeFormatter.Format(position, 30));
     }
 
     [TestMethod]

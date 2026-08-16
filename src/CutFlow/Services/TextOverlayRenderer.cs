@@ -17,13 +17,15 @@ namespace CutFlow.Services;
 
 public sealed class TextOverlayRenderer
 {
-    private const int CacheFormatVersion = 2;
+    private const int CacheFormatVersion = 3;
     private const int MaximumCachedFiles = 256;
     private const int PngSignatureLength = 8;
     private const int PngChunkOverheadLength = 12;
     private const int IhdrDataLength = 13;
     private const int MinimumPngFileSize = PngSignatureLength + (3 * PngChunkOverheadLength) + IhdrDataLength + 1;
     private const int MaximumPngFileSize = 64 * 1024 * 1024;
+    private const long MaximumDecodedPixelBytes = 64L * 1024 * 1024;
+    private const int BgraBytesPerPixel = 4;
     private static readonly uint[] Crc32Table = CreateCrc32Table();
     private readonly string _cacheDirectory;
     private readonly SemaphoreSlim _renderGate = new(1, 1);
@@ -174,7 +176,9 @@ public sealed class TextOverlayRenderer
             using IRandomAccessStream randomAccess = fileStream.AsRandomAccessStream();
             var decoder = await BitmapDecoder.CreateAsync(BitmapDecoder.PngDecoderId, randomAccess);
             cancellationToken.ThrowIfCancellationRequested();
-            if (decoder.PixelWidth != expectedWidth || decoder.PixelHeight != expectedHeight)
+            if (decoder.PixelWidth != expectedWidth ||
+                decoder.PixelHeight != expectedHeight ||
+                !TryGetDecodedPixelByteCount(decoder.PixelWidth, decoder.PixelHeight, out var expectedPixelBytes))
             {
                 return false;
             }
@@ -186,15 +190,41 @@ public sealed class TextOverlayRenderer
                 ExifOrientationMode.IgnoreExifOrientation,
                 ColorManagementMode.DoNotColorManage);
             cancellationToken.ThrowIfCancellationRequested();
-            _ = pixels.DetachPixelData();
+            var pixelData = pixels.DetachPixelData();
             cancellationToken.ThrowIfCancellationRequested();
-            return true;
+            return pixelData.LongLength == expectedPixelBytes;
         }
         catch (OperationCanceledException)
         {
             throw;
         }
-        catch (Exception exception) when (exception is IOException or UnauthorizedAccessException or ArgumentException or InvalidDataException or COMException)
+        catch (Exception exception) when (exception is
+            IOException or
+            UnauthorizedAccessException or
+            ArgumentException or
+            InvalidDataException or
+            NotSupportedException or
+            OverflowException or
+            COMException)
+        {
+            return false;
+        }
+    }
+
+    internal static bool TryGetDecodedPixelByteCount(uint width, uint height, out long byteCount)
+    {
+        byteCount = 0;
+        if (width == 0 || height == 0)
+        {
+            return false;
+        }
+
+        try
+        {
+            byteCount = checked((long)width * height * BgraBytesPerPixel);
+            return byteCount <= MaximumDecodedPixelBytes;
+        }
+        catch (OverflowException)
         {
             return false;
         }
@@ -211,6 +241,9 @@ public sealed class TextOverlayRenderer
         var offset = PngSignatureLength;
         var isFirstChunk = true;
         var hasIhdr = false;
+        var hasPlte = false;
+        var hasIdat = false;
+        var idatSequenceEnded = false;
         var hasImageData = false;
         while (offset <= bytes.Length - PngChunkOverheadLength)
         {
@@ -231,27 +264,54 @@ public sealed class TextOverlayRenderer
                 return false;
             }
 
+            var isIhdr = chunkType.SequenceEqual("IHDR"u8);
+            var isPlte = chunkType.SequenceEqual("PLTE"u8);
+            var isIdat = chunkType.SequenceEqual("IDAT"u8);
+            var isIend = chunkType.SequenceEqual("IEND"u8);
             if (isFirstChunk)
             {
-                if (!chunkType.SequenceEqual("IHDR"u8) || chunkDataLength != IhdrDataLength)
+                if (!isIhdr || chunkDataLength != IhdrDataLength)
                 {
                     return false;
                 }
 
                 hasIhdr = true;
             }
-            else if (chunkType.SequenceEqual("IHDR"u8))
+            else if (isIhdr)
             {
                 return false;
             }
 
-            if (chunkType.SequenceEqual("IDAT"u8) && chunkDataLength > 0)
+            if (isPlte)
             {
-                hasImageData = true;
+                if (hasPlte || hasIdat)
+                {
+                    return false;
+                }
+
+                hasPlte = true;
+            }
+            else if (isIdat)
+            {
+                if (idatSequenceEnded)
+                {
+                    return false;
+                }
+
+                hasIdat = true;
+                hasImageData |= chunkDataLength > 0;
+            }
+            else
+            {
+                idatSequenceEnded |= hasIdat;
+                if (!isIhdr && !isIend && (chunkType[0] & 0x20) == 0)
+                {
+                    return false;
+                }
             }
 
             var chunkEnd = crcOffset + sizeof(uint);
-            if (chunkType.SequenceEqual("IEND"u8))
+            if (isIend)
             {
                 return chunkDataLength == 0 && hasIhdr && hasImageData && chunkEnd == bytes.Length;
             }
@@ -324,15 +384,16 @@ public sealed class TextOverlayRenderer
                 visual.XamlRoot?.RasterizationScale ?? 1);
             await bitmap.RenderAsync(visual, renderSize.Width, renderSize.Height);
             cancellationToken.ThrowIfCancellationRequested();
-            if (bitmap.PixelWidth != project.Settings.Width || bitmap.PixelHeight != project.Settings.Height)
-            {
-                throw new InvalidDataException(
-                    $"The rendered overlay was {bitmap.PixelWidth}x{bitmap.PixelHeight}; expected {project.Settings.Width}x{project.Settings.Height} pixels.");
-            }
-
             var buffer = await bitmap.GetPixelsAsync();
             cancellationToken.ThrowIfCancellationRequested();
-            await EncodePngAsync(path, buffer.ToArray(), bitmap.PixelWidth, bitmap.PixelHeight, cancellationToken);
+            await EncodePngAsync(
+                path,
+                buffer.ToArray(),
+                bitmap.PixelWidth,
+                bitmap.PixelHeight,
+                project.Settings.Width,
+                project.Settings.Height,
+                cancellationToken);
         }
         finally
         {
@@ -356,10 +417,15 @@ public sealed class TextOverlayRenderer
             item.BackgroundEnabled.ToString(CultureInfo.InvariantCulture),
             TextStyle.ClampOpacity(item.Opacity).ToString("R", CultureInfo.InvariantCulture),
             item.Alignment.ToString(),
-            item.NormalizedX.ToString("R", CultureInfo.InvariantCulture),
-            item.NormalizedY.ToString("R", CultureInfo.InvariantCulture),
+            TextStyle.ClampNormalized(item.NormalizedX).ToString("R", CultureInfo.InvariantCulture),
+            TextStyle.ClampNormalized(item.NormalizedY).ToString("R", CultureInfo.InvariantCulture),
             project.Settings.Width.ToString(CultureInfo.InvariantCulture),
-            project.Settings.Height.ToString(CultureInfo.InvariantCulture));
+            project.Settings.Height.ToString(CultureInfo.InvariantCulture),
+            TextStyle.MaximumTextWidthFraction.ToString("R", CultureInfo.InvariantCulture),
+            TextStyle.WrappingMode.ToString(),
+            TextStyle.BackgroundHorizontalPadding.ToString("R", CultureInfo.InvariantCulture),
+            TextStyle.BackgroundVerticalPadding.ToString("R", CultureInfo.InvariantCulture),
+            TextStyle.DisabledBackgroundPadding.ToString("R", CultureInfo.InvariantCulture));
         return Convert.ToHexStringLower(SHA256.HashData(Encoding.UTF8.GetBytes(value)))[..16];
     }
 
@@ -403,13 +469,13 @@ public sealed class TextOverlayRenderer
             IsHitTestVisible = false
         };
         var text = new TextBlock();
-        TextStyle.ApplyTextBlockStyle(text, item, width * 0.9);
+        TextStyle.ApplyTextBlockStyle(text, item, width * TextStyle.MaximumTextWidthFraction);
         var container = new Border
         {
             Child = text
         };
-        TextStyle.ApplyContainerStyle(container, item, new Thickness(0));
-        container.Measure(new Windows.Foundation.Size(width * 0.9, height));
+        TextStyle.ApplyContainerStyle(container, item);
+        container.Measure(new Windows.Foundation.Size(width * TextStyle.MaximumTextWidthFraction, height));
         Canvas.SetLeft(container, TextStyle.ClampNormalized(item.NormalizedX) * width - container.DesiredSize.Width / 2);
         Canvas.SetTop(container, TextStyle.ClampNormalized(item.NormalizedY) * height - container.DesiredSize.Height / 2);
         canvas.Children.Add(container);
@@ -421,12 +487,16 @@ public sealed class TextOverlayRenderer
         byte[] pixels,
         int width,
         int height,
+        int outputWidth,
+        int outputHeight,
         CancellationToken cancellationToken)
     {
         await using var fileStream = new FileStream(path, FileMode.CreateNew, FileAccess.ReadWrite, FileShare.None, 4096, FileOptions.Asynchronous);
         using IRandomAccessStream randomAccess = fileStream.AsRandomAccessStream();
         var encoder = await BitmapEncoder.CreateAsync(BitmapEncoder.PngEncoderId, randomAccess);
         cancellationToken.ThrowIfCancellationRequested();
+        encoder.BitmapTransform.ScaledWidth = (uint)outputWidth;
+        encoder.BitmapTransform.ScaledHeight = (uint)outputHeight;
         encoder.SetPixelData(BitmapPixelFormat.Bgra8, BitmapAlphaMode.Premultiplied, (uint)width, (uint)height, 96, 96, pixels);
         await encoder.FlushAsync();
         cancellationToken.ThrowIfCancellationRequested();
@@ -436,16 +506,35 @@ public sealed class TextOverlayRenderer
     private void TrimCache(string currentPath)
     {
         ProjectService.RejectReparsePoints(_cacheDirectory);
-        foreach (var file in new DirectoryInfo(_cacheDirectory)
-                     .EnumerateFiles("*.png")
-                     .Where(file => !string.Equals(file.FullName, currentPath, StringComparison.OrdinalIgnoreCase))
-                     .OrderByDescending(file => file.LastWriteTimeUtc)
-                     .Skip(MaximumCachedFiles - 1))
+        FileInfo[] otherFiles;
+        try
         {
+            otherFiles = new DirectoryInfo(_cacheDirectory)
+                .EnumerateFiles()
+                .Where(file => string.Equals(file.Extension, ".png", StringComparison.OrdinalIgnoreCase))
+                .Where(file => !string.Equals(file.FullName, currentPath, StringComparison.OrdinalIgnoreCase))
+                .OrderByDescending(file => file.LastWriteTimeUtc)
+                .ThenBy(file => file.Name, StringComparer.Ordinal)
+                .ToArray();
+        }
+        catch (IOException)
+        {
+            return;
+        }
+        catch (UnauthorizedAccessException)
+        {
+            return;
+        }
+
+        var remainingDeletes = Math.Max(0, otherFiles.Length - (MaximumCachedFiles - 1));
+        for (var index = otherFiles.Length - 1; index >= 0 && remainingDeletes > 0; index--)
+        {
+            var file = otherFiles[index];
             try
             {
                 ProjectService.RejectReparsePoints(file.FullName);
                 file.Delete();
+                remainingDeletes--;
             }
             catch (IOException) { }
             catch (UnauthorizedAccessException) { }

@@ -15,11 +15,76 @@ public sealed class Task12ExportTests
     [TestMethod]
     [DataRow("  My:Project?  ", "My Project.mp4")]
     [DataRow("CON", "CutFlow export.mp4")]
+    [DataRow("nul.backup", "CutFlow export.mp4")]
+    [DataRow("lPt1.MP4", "CutFlow export.mp4")]
+    [DataRow("COM¹", "CutFlow export.mp4")]
     [DataRow("...", "CutFlow export.mp4")]
     [DataRow("travel.mp4", "travel.mp4")]
+    [DataRow("夏の旅", "夏の旅.mp4")]
+    [DataRow("Project COM1", "Project COM1.mp4")]
+    [DataRow("Archive.NUL", "Archive.NUL.mp4")]
     public void NormalizeSuggestedFileName_ProducesSafeMp4Name(string projectName, string expected)
     {
         Assert.AreEqual(expected, ExportPresentation.NormalizeSuggestedFileName(projectName));
+    }
+
+    [TestMethod]
+    public void NormalizeSuggestedFileName_DoesNotSplitUnicodeSurrogatePairAtLengthLimit()
+    {
+        var projectName = $"{new string('a', 95)}🚀z";
+
+        Assert.AreEqual($"{new string('a', 95)}.mp4", ExportPresentation.NormalizeSuggestedFileName(projectName));
+    }
+
+    [TestMethod]
+    public void NormalizeSuggestedFileName_LimitsBaseTo96Characters()
+    {
+        var projectName = new string('a', 97);
+
+        Assert.AreEqual($"{new string('a', 96)}.mp4", ExportPresentation.NormalizeSuggestedFileName(projectName));
+    }
+
+    [TestMethod]
+    [DataRow("Travel.mp4", true, "Travel.mp4")]
+    [DataRow("travel", false, "travel.mp4")]
+    [DataRow("  My:Project?  ", false, "My Project.mp4")]
+    [DataRow("CON.mp4", false, "CutFlow export.mp4")]
+    [DataRow("...", false, "CutFlow export.mp4")]
+    public void TryValidateFileName_RequiresTheUserToConfirmTheSanitizedName(
+        string value,
+        bool expectedValid,
+        string expectedSanitized)
+    {
+        var valid = ExportPresentation.TryValidateFileName(value, out var sanitized);
+
+        Assert.AreEqual(expectedValid, valid);
+        Assert.AreEqual(expectedSanitized, sanitized);
+    }
+
+    [TestMethod]
+    public void TryCreateOptions_AcceptsOnlyTheFourDocumentedProfiles()
+    {
+        var expected = new[]
+        {
+            new ExportOptions(ExportResolutionTier.Hd720p, ExportQuality.Standard),
+            new ExportOptions(ExportResolutionTier.Hd720p, ExportQuality.High),
+            new ExportOptions(ExportResolutionTier.FullHd1080p, ExportQuality.Standard),
+            new ExportOptions(ExportResolutionTier.FullHd1080p, ExportQuality.High)
+        };
+        var actual = new List<ExportOptions>();
+
+        for (var resolution = -1; resolution <= 2; resolution++)
+        {
+            for (var quality = -1; quality <= 2; quality++)
+            {
+                if (ExportPresentation.TryCreateOptions(resolution, quality, out var options))
+                {
+                    actual.Add(options);
+                }
+            }
+        }
+
+        CollectionAssert.AreEqual(expected, actual);
     }
 
     [TestMethod]
@@ -194,6 +259,64 @@ public sealed class Task12ExportTests
     }
 
     [TestMethod]
+    public void ExportSetup_CapturesTheRenderSnapshotImmediatelyAfterTheSaveFlush()
+    {
+        var source = File.ReadAllText(Path.Combine(
+            FindRepositoryRoot(),
+            "src",
+            "CutFlow",
+            "Views",
+            "EditorView.Export.cs"));
+        var exportStart = source.IndexOf("public async Task ExportAsync", StringComparison.Ordinal);
+        var exportEnd = source.IndexOf("private bool CanContinueExport", exportStart, StringComparison.Ordinal);
+        var route = source[exportStart..exportEnd];
+        var save = route.IndexOf("await SaveAsync()", StringComparison.Ordinal);
+        var snapshot = route.IndexOf("ExportService.CreateProjectSnapshot(ViewModel.Project)", save, StringComparison.Ordinal);
+        var choices = route.IndexOf("ShowExportDialogAsync()", StringComparison.Ordinal);
+        var render = route.IndexOf("RunExportAsync(savedProjectSnapshot,", StringComparison.Ordinal);
+
+        Assert.IsTrue(
+            save >= 0 && snapshot > save && choices > snapshot && render > choices,
+            "Export must render the project snapshot captured immediately after the successful save flush, before showing export choices.");
+
+        var runStart = source.IndexOf("private async Task RunExportAsync", exportEnd, StringComparison.Ordinal);
+        var runEnd = source.IndexOf("private async Task<ExportDialogSelection?>", runStart, StringComparison.Ordinal);
+        var runRoute = source[runStart..runEnd];
+        var serviceCall = runRoute.IndexOf("service.ExportToPathAsync(", StringComparison.Ordinal);
+        var renderProject = runRoute.IndexOf("projectSnapshot", serviceCall, StringComparison.Ordinal);
+        var sourceGuardProject = runRoute.IndexOf("ViewModel.Project", renderProject, StringComparison.Ordinal);
+        var destination = runRoute.IndexOf("destinationPath", sourceGuardProject, StringComparison.Ordinal);
+
+        Assert.IsTrue(
+            serviceCall >= 0 && renderProject > serviceCall && sourceGuardProject > renderProject && destination > sourceGuardProject,
+            "Export must render the saved snapshot while guarding the destination against the current project's imported sources.");
+    }
+
+    [TestMethod]
+    public void ExportDialog_ValidatesCommitAndFocusesTheFilenameForKeyboardEditing()
+    {
+        var source = File.ReadAllText(Path.Combine(
+            FindRepositoryRoot(),
+            "src",
+            "CutFlow",
+            "Views",
+            "EditorView.Export.cs"));
+        var dialogStart = source.IndexOf("private async Task<ExportDialogSelection?> ShowExportDialogAsync()", StringComparison.Ordinal);
+        var dialogEnd = source.IndexOf("private void ShowExportProgress", dialogStart, StringComparison.Ordinal);
+        var route = source[dialogStart..dialogEnd];
+
+        StringAssert.Contains(route, "dialog.Opened +=");
+        StringAssert.Contains(route, "fileNameBox.Focus(FocusState.Programmatic);");
+        StringAssert.Contains(route, "fileNameBox.SelectAll();");
+        StringAssert.Contains(route, "dialog.PrimaryButtonClick +=");
+        StringAssert.Contains(route, "ExportPresentation.TryValidateFileName(fileNameBox.Text");
+        StringAssert.Contains(route, "ExportPresentation.TryCreateOptions(");
+        StringAssert.Contains(route, "args.Cancel = true;");
+        StringAssert.Contains(route, "DefaultButton = ContentDialogButton.Primary");
+        StringAssert.Contains(route, "CloseButtonText = \"Cancel\"");
+    }
+
+    [TestMethod]
     [DataRow(ExportResultStatus.Success, true, 0)]
     [DataRow(ExportResultStatus.Success, false, 0)]
     [DataRow(ExportResultStatus.Failed, true, 1)]
@@ -270,29 +393,174 @@ public sealed class Task12ExportTests
     }
 
     [TestMethod]
-    public void Validate_ReportsEachReferencedMissingV1OrA1AssetOnce()
+    public async Task Validate_DeduplicatesReferencesButDistinguishesSameNamedSourcesInStableOrder()
     {
         var project = ProjectDocument.CreateNew("References", DateTimeOffset.UnixEpoch);
-        var existing = Asset(ProjectAssetKind.Image, "valid-image.jpg", Path.Combine(FindMediaRoot(), "valid-image.jpg"));
-        var missingVideo = Asset(ProjectAssetKind.Video, "missing-video.mp4", MissingPath("missing-video.mp4"));
-        var duplicateName = Asset(ProjectAssetKind.Video, "MISSING-VIDEO.MP4", MissingPath("duplicate-name.mp4"));
-        var missingAudio = Asset(ProjectAssetKind.Audio, "missing-audio.wav", MissingPath("missing-audio.wav"));
-        var unreferenced = Asset(ProjectAssetKind.Video, "unused.mp4", MissingPath("unused.mp4"));
-        project.Assets.AddRange([existing, missingVideo, duplicateName, missingAudio, unreferenced]);
-        project.VideoItems.Add(new VideoTimelineItem { Id = Guid.NewGuid(), AssetId = existing.Id, DurationMilliseconds = 1_000 });
-        project.VideoItems.Add(new VideoTimelineItem { Id = Guid.NewGuid(), AssetId = missingVideo.Id, DurationMilliseconds = 1_000 });
-        project.VideoItems.Add(new VideoTimelineItem { Id = Guid.NewGuid(), AssetId = missingVideo.Id, DurationMilliseconds = 1_000 });
-        project.VideoItems.Add(new VideoTimelineItem { Id = Guid.NewGuid(), AssetId = duplicateName.Id, DurationMilliseconds = 1_000 });
-        project.AudioItems.Add(new AudioTimelineItem { Id = Guid.NewGuid(), AssetId = missingAudio.Id, SourceOutMilliseconds = 1_000 });
-        project.AudioItems.Add(new AudioTimelineItem { Id = Guid.NewGuid(), AssetId = missingAudio.Id, SourceOutMilliseconds = 1_000 });
+        var first = Asset(ProjectAssetKind.Video, "shared.mp4", @"C:\First\shared.mp4");
+        var second = Asset(ProjectAssetKind.Video, "SHARED.MP4", @"D:\Second\SHARED.MP4");
+        var duplicateSource = Asset(ProjectAssetKind.Video, "SHARED.mp4", @"c:\first\SHARED.mp4");
+        var audio = Asset(ProjectAssetKind.Audio, "missing.wav", @"C:\Audio\missing.wav");
+        project.Assets.AddRange([first, second, duplicateSource, audio]);
+        project.VideoItems.Add(new VideoTimelineItem { Id = Guid.NewGuid(), AssetId = first.Id, DurationMilliseconds = 1_000 });
+        project.VideoItems.Add(new VideoTimelineItem { Id = Guid.NewGuid(), AssetId = first.Id, DurationMilliseconds = 1_000 });
+        project.VideoItems.Add(new VideoTimelineItem { Id = Guid.NewGuid(), AssetId = second.Id, DurationMilliseconds = 1_000 });
+        project.VideoItems.Add(new VideoTimelineItem { Id = Guid.NewGuid(), AssetId = duplicateSource.Id, DurationMilliseconds = 1_000 });
+        project.AudioItems.Add(new AudioTimelineItem { Id = Guid.NewGuid(), AssetId = audio.Id, SourceOutMilliseconds = 1_000 });
+        project.AudioItems.Add(new AudioTimelineItem { Id = Guid.NewGuid(), AssetId = audio.Id, SourceOutMilliseconds = 1_000 });
 
-        var result = ExportPreflight.Validate(project);
+        var result = await ExportPreflight.ValidateAsync(
+            project,
+            refreshMissingFlags: false,
+            _ => false,
+            CancellationToken.None);
 
         Assert.IsFalse(result.CanExport);
         CollectionAssert.AreEqual(
-            new[] { "missing-video.mp4", "missing-audio.wav" },
+            new[]
+            {
+                @"shared.mp4 (C:\First\shared.mp4)",
+                @"SHARED.MP4 (D:\Second\SHARED.MP4)",
+                "missing.wav"
+            },
             result.MissingAssetNames.ToArray());
-        Assert.IsFalse(result.ErrorMessage.Contains("unused.mp4", StringComparison.Ordinal));
+    }
+
+    [TestMethod]
+    public async Task Validate_BoundsAndSanitizesTheMissingMediaMessage()
+    {
+        var project = ProjectDocument.CreateNew("Bounded", DateTimeOffset.UnixEpoch);
+        var names = new[]
+        {
+            "one.mp4\r\nsecond line",
+            "two.mp4",
+            "three.mp4",
+            "four.mp4",
+            "five.mp4"
+        };
+        foreach (var name in names)
+        {
+            var asset = Asset(ProjectAssetKind.Video, name, $@"C:\Missing\{name.ReplaceLineEndings("-")}");
+            project.Assets.Add(asset);
+            project.VideoItems.Add(new VideoTimelineItem
+            {
+                Id = Guid.NewGuid(),
+                AssetId = asset.Id,
+                DurationMilliseconds = 1_000
+            });
+        }
+
+        var result = await ExportPreflight.ValidateAsync(
+            project,
+            refreshMissingFlags: false,
+            _ => false,
+            CancellationToken.None);
+
+        Assert.HasCount(5, result.MissingAssetNames);
+        Assert.IsFalse(result.ErrorMessage.Contains('\r'));
+        Assert.IsFalse(result.ErrorMessage.Contains('\n'));
+        StringAssert.Contains(result.ErrorMessage, "one.mp4 second line");
+        StringAssert.Contains(result.ErrorMessage, "three.mp4");
+        StringAssert.Contains(result.ErrorMessage, "and 2 more");
+        Assert.IsFalse(result.ErrorMessage.Contains("four.mp4", StringComparison.Ordinal));
+        Assert.IsFalse(result.ErrorMessage.Contains("five.mp4", StringComparison.Ordinal));
+    }
+
+    [TestMethod]
+    public async Task Validate_BoundsAnIndividualMissingMediaLabel()
+    {
+        var project = ProjectDocument.CreateNew("Long name", DateTimeOffset.UnixEpoch);
+        var asset = Asset(ProjectAssetKind.Video, $"{new string('a', 300)}.mp4", @"C:\Missing\long.mp4");
+        project.Assets.Add(asset);
+        project.VideoItems.Add(new VideoTimelineItem
+        {
+            Id = Guid.NewGuid(),
+            AssetId = asset.Id,
+            DurationMilliseconds = 1_000
+        });
+
+        var result = await ExportPreflight.ValidateAsync(
+            project,
+            refreshMissingFlags: false,
+            _ => false,
+            CancellationToken.None);
+
+        Assert.IsLessThanOrEqualTo(96, result.MissingAssetNames.Single().Length);
+        Assert.IsLessThan(200, result.ErrorMessage.Length);
+    }
+
+    [TestMethod]
+    public async Task Validate_EnumeratesDistinctMutedV1AndA1AssetsAndReportsOrphans()
+    {
+        var project = ProjectDocument.CreateNew("References", DateTimeOffset.UnixEpoch);
+        project.Settings.AudioTrackMuted = true;
+        var existing = Asset(ProjectAssetKind.Image, "existing.jpg", @"C:\Media\existing.jpg");
+        var missingVideo = Asset(ProjectAssetKind.Video, "missing.mp4", @"C:\Media\missing.mp4");
+        var missingAudio = Asset(ProjectAssetKind.Audio, "missing.wav", @"C:\Media\missing.wav");
+        var unreferenced = Asset(ProjectAssetKind.Video, "unused.mp4", @"C:\Media\unused.mp4");
+        var orphanId = Guid.NewGuid();
+        project.Assets.AddRange([existing, missingVideo, missingAudio, unreferenced]);
+        project.VideoItems.Add(new VideoTimelineItem { Id = Guid.NewGuid(), AssetId = existing.Id, DurationMilliseconds = 1_000 });
+        project.VideoItems.Add(new VideoTimelineItem { Id = Guid.NewGuid(), AssetId = missingVideo.Id, DurationMilliseconds = 1_000, IsMuted = true });
+        project.VideoItems.Add(new VideoTimelineItem { Id = Guid.NewGuid(), AssetId = missingVideo.Id, DurationMilliseconds = 1_000 });
+        project.VideoItems.Add(new VideoTimelineItem { Id = Guid.NewGuid(), AssetId = orphanId, DurationMilliseconds = 1_000 });
+        project.AudioItems.Add(new AudioTimelineItem { Id = Guid.NewGuid(), AssetId = missingAudio.Id, SourceOutMilliseconds = 1_000, IsMuted = true });
+        project.TextItems.Add(new TextTimelineItem { Id = Guid.NewGuid(), Text = "No source asset", DurationMilliseconds = 1_000 });
+        var probes = new List<string>();
+
+        var result = await ExportPreflight.ValidateAsync(
+            project,
+            refreshMissingFlags: false,
+            path =>
+            {
+                probes.Add(path);
+                return string.Equals(path, existing.SourcePath, StringComparison.Ordinal);
+            },
+            CancellationToken.None);
+
+        Assert.IsFalse(result.CanExport);
+        CollectionAssert.AreEqual(
+            new[] { missingVideo.FileName, $"Unknown asset {orphanId:D}", missingAudio.FileName },
+            result.MissingAssetNames.ToArray());
+        CollectionAssert.AreEqual(
+            new[] { existing.SourcePath, missingVideo.SourcePath, missingAudio.SourcePath },
+            probes);
+    }
+
+    [TestMethod]
+    public async Task Validate_HiddenV1DoesNotRequireSourceFiles()
+    {
+        var project = ProjectDocument.CreateNew("Hidden V1", DateTimeOffset.UnixEpoch);
+        project.Settings.VideoTrackVisible = false;
+        var hidden = Asset(ProjectAssetKind.Video, "hidden.mp4", @"C:\Media\hidden.mp4");
+        project.Assets.Add(hidden);
+        project.VideoItems.Add(new VideoTimelineItem
+        {
+            Id = Guid.NewGuid(),
+            AssetId = hidden.Id,
+            DurationMilliseconds = 1_000,
+            IsMuted = true
+        });
+        project.TextItems.Add(new TextTimelineItem
+        {
+            Id = Guid.NewGuid(),
+            Text = "No source asset",
+            DurationMilliseconds = 1_000
+        });
+        var probes = new List<string>();
+
+        var result = await ExportPreflight.ValidateAsync(
+            project,
+            refreshMissingFlags: false,
+            path =>
+            {
+                probes.Add(path);
+                return false;
+            },
+            CancellationToken.None);
+
+        Assert.IsTrue(result.CanExport, result.ErrorMessage);
+        Assert.HasCount(0, result.MissingAssetNames);
+        Assert.HasCount(0, probes);
     }
 
     [TestMethod]
@@ -433,6 +701,58 @@ public sealed class Task12ExportTests
     }
 
     [TestMethod]
+    public void CreateStagingFileName_IsBoundedAndCannotContainDestinationDirectories()
+    {
+        var operationId = Guid.Parse("00112233-4455-6677-8899-aabbccddeeff");
+        var longBaseName = $"{new string('a', ExportService.MaximumStagingBaseNameLength - 1)}🚀outside";
+        var destinationPath = Path.Combine(@"C:\exports", "nested", longBaseName + ".mp4");
+
+        var stagingFileName = ExportService.CreateStagingFileName(destinationPath, operationId);
+        var otherStagingFileName = ExportService.CreateStagingFileName(destinationPath, Guid.NewGuid());
+
+        Assert.AreEqual(Path.GetFileName(stagingFileName), stagingFileName);
+        Assert.IsTrue(stagingFileName.Length <= ExportService.MaximumStagingFileNameLength);
+        Assert.IsTrue(stagingFileName.EndsWith(".cutflow-00112233445566778899aabbccddeeff.mp4", StringComparison.Ordinal));
+        Assert.IsFalse(stagingFileName.Contains("nested", StringComparison.Ordinal));
+        Assert.IsFalse(stagingFileName.Any(Path.GetInvalidFileNameChars().Contains));
+        Assert.AreNotEqual(Path.GetFileName(destinationPath), stagingFileName);
+        Assert.AreNotEqual(stagingFileName, otherStagingFileName);
+    }
+
+    [TestMethod]
+    public async Task ExportAsync_PreservesPreExistingSiblingStagingFile()
+    {
+        await using var directory = new TestDirectory();
+        var destinationPath = Path.Combine(directory.Path, "output.mp4");
+        await File.WriteAllTextAsync(destinationPath, "existing destination");
+        var coincidentalStagingPath = Path.Combine(
+            directory.Path,
+            "output.cutflow-00112233445566778899aabbccddeeff.mp4");
+        await File.WriteAllTextAsync(coincidentalStagingPath, "unrelated staging file");
+        var destination = await StorageFile.GetFileFromPathAsync(destinationPath);
+        string? operationStagingPath = null;
+        ExportRenderAsync render = async (_, staging, _, _, _) =>
+        {
+            operationStagingPath = staging.Path;
+            await File.WriteAllTextAsync(staging.Path, "rendered output");
+            return TranscodeFailureReason.None;
+        };
+
+        var result = await new ExportService(new CompositionService(), null, render).ExportAsync(
+            CreateExportableProject(),
+            destination,
+            new ExportOptions(ExportResolutionTier.Hd720p, ExportQuality.Standard),
+            new InlineProgress<double>(_ => { }),
+            CancellationToken.None);
+
+        Assert.AreEqual(ExportResultStatus.Success, result.Status, result.ErrorMessage);
+        Assert.IsNotNull(operationStagingPath);
+        Assert.AreNotEqual(coincidentalStagingPath, operationStagingPath);
+        Assert.AreEqual("unrelated staging file", await File.ReadAllTextAsync(coincidentalStagingPath));
+        Assert.AreEqual("rendered output", await File.ReadAllTextAsync(destinationPath));
+    }
+
+    [TestMethod]
     public async Task ExportAsync_TranscodeFailureDeletesOnlyOperationStaging()
     {
         await using var directory = new TestDirectory();
@@ -466,7 +786,8 @@ public sealed class Task12ExportTests
     {
         await using var directory = new TestDirectory();
         var destinationPath = Path.Combine(directory.Path, "output.mp4");
-        if (destinationExists) await File.WriteAllTextAsync(destinationPath, "keep destination");
+        byte[] destinationBytes = [0x00, 0x43, 0x75, 0x74, 0x46, 0x6C, 0x6F, 0x77, 0x80, 0xFF];
+        if (destinationExists) await File.WriteAllBytesAsync(destinationPath, destinationBytes);
         ExportRenderAsync render = async (_, staging, _, _, _) =>
         {
             await File.WriteAllTextAsync(staging.Path, "partial output");
@@ -483,7 +804,7 @@ public sealed class Task12ExportTests
 
         Assert.AreEqual(ExportResultStatus.Failed, result.Status);
         Assert.AreEqual(destinationExists, File.Exists(destinationPath));
-        if (destinationExists) Assert.AreEqual("keep destination", await File.ReadAllTextAsync(destinationPath));
+        if (destinationExists) CollectionAssert.AreEqual(destinationBytes, await File.ReadAllBytesAsync(destinationPath));
         Assert.HasCount(0, Directory.GetFiles(directory.Path, "*.cutflow-*.mp4"));
     }
 
@@ -522,7 +843,8 @@ public sealed class Task12ExportTests
     {
         await using var directory = new TestDirectory();
         var destinationPath = Path.Combine(directory.Path, "output.mp4");
-        if (destinationExists) await File.WriteAllTextAsync(destinationPath, "keep destination");
+        byte[] destinationBytes = [0x00, 0x43, 0x75, 0x74, 0x46, 0x6C, 0x6F, 0x77, 0x80, 0xFF];
+        if (destinationExists) await File.WriteAllBytesAsync(destinationPath, destinationBytes);
         using var cancellation = new CancellationTokenSource();
         ExportRenderAsync render = async (_, staging, _, _, token) =>
         {
@@ -541,7 +863,7 @@ public sealed class Task12ExportTests
             cancellation.Token));
 
         Assert.AreEqual(destinationExists, File.Exists(destinationPath));
-        if (destinationExists) Assert.AreEqual("keep destination", await File.ReadAllTextAsync(destinationPath));
+        if (destinationExists) CollectionAssert.AreEqual(destinationBytes, await File.ReadAllBytesAsync(destinationPath));
         Assert.HasCount(0, Directory.GetFiles(directory.Path, "*.cutflow-*.mp4"));
     }
 
@@ -636,6 +958,43 @@ public sealed class Task12ExportTests
     }
 
     [TestMethod]
+    public async Task ExportToPathAsync_HiddenTextDoesNotRequireRenderer()
+    {
+        await using var directory = new TestDirectory();
+        var destinationPath = Path.Combine(directory.Path, "output.mp4");
+        var project = CreateExportableProject();
+        project.Settings.TextTrackVisible = false;
+        project.TextItems.Add(new TextTimelineItem
+        {
+            Id = Guid.NewGuid(),
+            Text = "Hidden",
+            StartMilliseconds = 1_500,
+            DurationMilliseconds = 500
+        });
+        MediaComposition? renderedComposition = null;
+        ExportRenderAsync render = async (composition, staging, _, _, _) =>
+        {
+            renderedComposition = composition;
+            await File.WriteAllTextAsync(staging.Path, "rendered output");
+            return TranscodeFailureReason.None;
+        };
+        var service = new ExportService(new CompositionService(), null, render);
+
+        var result = await service.ExportToPathAsync(
+            project,
+            destinationPath,
+            new ExportOptions(ExportResolutionTier.Hd720p, ExportQuality.Standard),
+            new InlineProgress<double>(_ => { }),
+            CancellationToken.None);
+
+        Assert.AreEqual(ExportResultStatus.Success, result.Status, result.ErrorMessage);
+        Assert.IsNotNull(renderedComposition);
+        Assert.HasCount(0, renderedComposition.OverlayLayers);
+        Assert.AreEqual(2_000d, renderedComposition.Duration.TotalMilliseconds, 2);
+        Assert.AreEqual("rendered output", await File.ReadAllTextAsync(destinationPath));
+    }
+
+    [TestMethod]
     public async Task ExportToPathAsync_MissingRequiredSourceFailsBeforeNativeRender()
     {
         await using var directory = new TestDirectory();
@@ -670,6 +1029,53 @@ public sealed class Task12ExportTests
     }
 
     [TestMethod]
+    public async Task ExportToPathAsync_SourceChangedDuringBuildFailsBeforeNativeRender()
+    {
+        await using var directory = new TestDirectory();
+        var sourcePath = Path.Combine(directory.Path, "source.jpg");
+        File.Copy(Path.Combine(FindMediaRoot(), "valid-image.jpg"), sourcePath);
+        var asset = Asset(ProjectAssetKind.Image, "source.jpg", sourcePath);
+        asset.FileSize = checked((ulong)new FileInfo(sourcePath).Length);
+        asset.LastWriteUtc = File.GetLastWriteTimeUtc(sourcePath);
+        var project = ProjectDocument.CreateNew("Changed source", DateTimeOffset.UnixEpoch);
+        project.Assets.Add(asset);
+        project.VideoItems.Add(new VideoTimelineItem
+        {
+            Id = Guid.NewGuid(),
+            AssetId = asset.Id,
+            DurationMilliseconds = 1_000
+        });
+        var nativeRenderStarted = false;
+        ExportRenderAsync render = (_, _, _, _, _) =>
+        {
+            nativeRenderStarted = true;
+            return Task.FromResult(TranscodeFailureReason.None);
+        };
+        var sourceChanged = false;
+        var progress = new InlineProgress<double>(value =>
+        {
+            if (value == 0 && !sourceChanged)
+            {
+                File.SetLastWriteTimeUtc(sourcePath, asset.LastWriteUtc.UtcDateTime.AddMinutes(1));
+                sourceChanged = true;
+            }
+        });
+
+        var result = await new ExportService(new CompositionService(), null, render).ExportToPathAsync(
+            project,
+            Path.Combine(directory.Path, "output.mp4"),
+            new ExportOptions(ExportResolutionTier.Hd720p, ExportQuality.Standard),
+            progress,
+            CancellationToken.None);
+
+        Assert.IsTrue(sourceChanged);
+        Assert.AreEqual(ExportResultStatus.ValidationFailed, result.Status);
+        CollectionAssert.AreEqual(new[] { "source.jpg" }, ExportPreflight.Validate(project).MissingAssetNames.ToArray());
+        Assert.IsFalse(nativeRenderStarted);
+        Assert.HasCount(0, Directory.GetFiles(directory.Path, "*.cutflow-*.mp4"));
+    }
+
+    [TestMethod]
     public async Task ExportToPathAsync_RefusesToOverwriteReferencedSource()
     {
         await using var directory = new TestDirectory();
@@ -696,7 +1102,7 @@ public sealed class Task12ExportTests
 
         var result = await new ExportService(new CompositionService(), null, render).ExportToPathAsync(
             project,
-            Path.Combine(directory.Path, ".", "source.mp4"),
+            Path.Combine(directory.Path, ".", "unused", "..", "SOURCE.mp4").Replace('\\', '/'),
             new ExportOptions(ExportResolutionTier.Hd720p, ExportQuality.Standard),
             new InlineProgress<double>(_ => { }),
             CancellationToken.None);
@@ -705,6 +1111,104 @@ public sealed class Task12ExportTests
         StringAssert.Contains(result.ErrorMessage, "source media", StringComparison.OrdinalIgnoreCase);
         Assert.IsFalse(renderStarted);
         CollectionAssert.AreEqual(original, await File.ReadAllBytesAsync(sourcePath));
+        Assert.HasCount(0, Directory.GetFiles(directory.Path, "*.cutflow-*.mp4"));
+    }
+
+    [TestMethod]
+    public async Task ExportToPathAsync_RefusesToOverwriteUnreferencedImportedSource()
+    {
+        await using var directory = new TestDirectory();
+        var sourcePath = Path.Combine(directory.Path, "unused-source.mp4");
+        File.Copy(Path.Combine(FindMediaRoot(), "valid-video.mp4"), sourcePath);
+        var original = await File.ReadAllBytesAsync(sourcePath);
+        var project = CreateExportableProject();
+        project.Assets.Add(Asset(ProjectAssetKind.Video, "unused-source.mp4", sourcePath));
+        var renderStarted = false;
+        ExportRenderAsync render = (_, _, _, _, _) =>
+        {
+            renderStarted = true;
+            return Task.FromResult(TranscodeFailureReason.None);
+        };
+
+        var result = await new ExportService(new CompositionService(), null, render).ExportToPathAsync(
+            project,
+            sourcePath,
+            new ExportOptions(ExportResolutionTier.Hd720p, ExportQuality.Standard),
+            new InlineProgress<double>(_ => { }),
+            CancellationToken.None);
+
+        Assert.AreEqual(ExportResultStatus.ValidationFailed, result.Status);
+        Assert.IsFalse(renderStarted);
+        CollectionAssert.AreEqual(original, await File.ReadAllBytesAsync(sourcePath));
+        Assert.HasCount(0, Directory.GetFiles(directory.Path, "*.cutflow-*.mp4"));
+    }
+
+    [TestMethod]
+    public async Task ExportToPathAsync_SourceImportedDuringBuildBlocksBeforeStaging()
+    {
+        await using var directory = new TestDirectory();
+        var destinationPath = Path.Combine(directory.Path, "output.mp4");
+        File.Copy(Path.Combine(FindMediaRoot(), "valid-video.mp4"), destinationPath);
+        var original = await File.ReadAllBytesAsync(destinationPath);
+        var renderProject = CreateExportableProject();
+        var liveProject = ExportService.CreateProjectSnapshot(renderProject);
+        var renderStarted = false;
+        ExportRenderAsync render = (_, _, _, _, _) =>
+        {
+            renderStarted = true;
+            return Task.FromResult(TranscodeFailureReason.None);
+        };
+        var sourceImported = false;
+        var progress = new InlineProgress<double>(value =>
+        {
+            if (value == 0 && !sourceImported)
+            {
+                liveProject.Assets.Add(Asset(ProjectAssetKind.Video, "output.mp4", destinationPath));
+                sourceImported = true;
+            }
+        });
+
+        var result = await new ExportService(new CompositionService(), null, render).ExportToPathAsync(
+            renderProject,
+            liveProject,
+            destinationPath,
+            new ExportOptions(ExportResolutionTier.Hd720p, ExportQuality.Standard),
+            progress,
+            CancellationToken.None);
+
+        Assert.IsTrue(sourceImported);
+        Assert.AreEqual(ExportResultStatus.ValidationFailed, result.Status);
+        Assert.IsFalse(renderStarted);
+        CollectionAssert.AreEqual(original, await File.ReadAllBytesAsync(destinationPath));
+        Assert.HasCount(0, Directory.GetFiles(directory.Path, "*.cutflow-*.mp4"));
+    }
+
+    [TestMethod]
+    public async Task ExportToPathAsync_SourceImportedDuringRenderBlocksOverwriteAndCleansStaging()
+    {
+        await using var directory = new TestDirectory();
+        var destinationPath = Path.Combine(directory.Path, "output.mp4");
+        File.Copy(Path.Combine(FindMediaRoot(), "valid-video.mp4"), destinationPath);
+        var original = await File.ReadAllBytesAsync(destinationPath);
+        var renderProject = CreateExportableProject();
+        var liveProject = ExportService.CreateProjectSnapshot(renderProject);
+        ExportRenderAsync render = async (_, staging, _, _, _) =>
+        {
+            await File.WriteAllTextAsync(staging.Path, "rendered output");
+            liveProject.Assets.Add(Asset(ProjectAssetKind.Video, "output.mp4", destinationPath));
+            return TranscodeFailureReason.None;
+        };
+
+        var result = await new ExportService(new CompositionService(), null, render).ExportToPathAsync(
+            renderProject,
+            liveProject,
+            destinationPath,
+            new ExportOptions(ExportResolutionTier.Hd720p, ExportQuality.Standard),
+            new InlineProgress<double>(_ => { }),
+            CancellationToken.None);
+
+        Assert.AreEqual(ExportResultStatus.ValidationFailed, result.Status);
+        CollectionAssert.AreEqual(original, await File.ReadAllBytesAsync(destinationPath));
         Assert.HasCount(0, Directory.GetFiles(directory.Path, "*.cutflow-*.mp4"));
     }
 

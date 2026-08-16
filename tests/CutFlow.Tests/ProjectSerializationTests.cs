@@ -1,6 +1,7 @@
 using System.Text.Json;
 using CutFlow.Models;
 using CutFlow.Services;
+using CutFlow.Utilities;
 using CutFlow.ViewModels;
 using Microsoft.VisualStudio.TestTools.UnitTesting;
 
@@ -151,6 +152,8 @@ public sealed class ProjectSerializationTests
     [DataRow("{ \"width\": 1280 }")]
     [DataRow("{ \"height\": 720 }")]
     [DataRow("{ \"width\": 1280, \"height\": 720 }")]
+    [DataRow("{ \"width\": 0, \"height\": 0 }")]
+    [DataRow("{ \"width\": 2147483647, \"height\": 2147483647 }")]
     public async Task LoadAsync_WhenLandscapeDimensionsArePartialOrUnsupported_UsesCanonicalPair(string settingsJson)
     {
         using var directory = new TemporaryDirectory();
@@ -165,6 +168,9 @@ public sealed class ProjectSerializationTests
         Assert.AreEqual(AspectRatioPreset.Landscape16By9, loaded.Settings.AspectRatio);
         Assert.AreEqual(1920, loaded.Settings.Width);
         Assert.AreEqual(1080, loaded.Settings.Height);
+        Assert.AreEqual(
+            new PreviewStreamDimensions(1280, 720),
+            PreviewStreamSize.Fit(loaded.Settings.Width, loaded.Settings.Height, 1280, 720));
     }
 
     [TestMethod]

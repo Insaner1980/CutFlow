@@ -400,9 +400,12 @@ public sealed class EditorViewModel : ViewModelBase
     public bool TrimTextEnd(Guid itemId, long endMilliseconds) =>
         TryCommitEdit(project => TimelineEditingService.TrimTextEnd(project, itemId, endMilliseconds));
 
-    public bool DeleteSelection()
+    public bool DeleteSelection() => DeleteSelection(Selection);
+
+    public bool DeleteTimelineItem(Guid itemId) => DeleteSelection(SelectionForTimelineItem(itemId));
+
+    private bool DeleteSelection(EditorSelection selection)
     {
-        var selection = Selection;
         var changed = TryCommitEdit(project => TimelineEditingService.DeleteSelection(project, selection));
         if (changed)
         {
@@ -414,17 +417,16 @@ public sealed class EditorViewModel : ViewModelBase
 
     public bool DuplicateSelection() => DuplicateSelection(Selection);
 
-    public bool DuplicateTimelineItem(Guid itemId)
-    {
-        var selection = Project.VideoItems.Any(item => item.Id == itemId)
+    public bool DuplicateTimelineItem(Guid itemId) => DuplicateSelection(SelectionForTimelineItem(itemId));
+
+    private EditorSelection SelectionForTimelineItem(Guid itemId) =>
+        Project.VideoItems.Any(item => item.Id == itemId)
             ? new EditorSelection(EditorSelectionKind.VideoItem, itemId)
             : Project.AudioItems.Any(item => item.Id == itemId)
                 ? new EditorSelection(EditorSelectionKind.AudioItem, itemId)
                 : Project.TextItems.Any(item => item.Id == itemId)
                     ? new EditorSelection(EditorSelectionKind.TextItem, itemId)
                     : EditorSelection.None;
-        return DuplicateSelection(selection);
-    }
 
     private bool DuplicateSelection(EditorSelection selection)
     {

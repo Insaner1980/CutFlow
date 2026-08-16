@@ -11,7 +11,9 @@ public static class ExportPresentation
     {
         "CON", "PRN", "AUX", "NUL",
         "COM1", "COM2", "COM3", "COM4", "COM5", "COM6", "COM7", "COM8", "COM9",
-        "LPT1", "LPT2", "LPT3", "LPT4", "LPT5", "LPT6", "LPT7", "LPT8", "LPT9"
+        "COM¹", "COM²", "COM³",
+        "LPT1", "LPT2", "LPT3", "LPT4", "LPT5", "LPT6", "LPT7", "LPT8", "LPT9",
+        "LPT¹", "LPT²", "LPT³"
     };
 
     public static string NormalizeSuggestedFileName(string? projectName)
@@ -33,15 +35,45 @@ public static class ExportPresentation
             .Trim(' ', '.');
         if (value.Length > MaximumBaseNameLength)
         {
-            value = value[..MaximumBaseNameLength].TrimEnd(' ', '.');
+            var length = MaximumBaseNameLength;
+            if (char.IsHighSurrogate(value[length - 1]) && char.IsLowSurrogate(value[length]))
+            {
+                length--;
+            }
+
+            value = value[..length].TrimEnd(' ', '.');
         }
 
-        if (value.Length == 0 || ReservedFileNames.Contains(value))
+        var extensionSeparator = value.IndexOf('.');
+        var deviceName = extensionSeparator >= 0 ? value[..extensionSeparator] : value;
+        if (value.Length == 0 || ReservedFileNames.Contains(deviceName))
         {
             value = FallbackFileName;
         }
 
         return $"{value}.mp4";
+    }
+
+    internal static bool TryValidateFileName(string? value, out string sanitizedFileName)
+    {
+        sanitizedFileName = NormalizeSuggestedFileName(value);
+        return string.Equals(value, sanitizedFileName, StringComparison.Ordinal);
+    }
+
+    internal static bool TryCreateOptions(
+        int resolutionIndex,
+        int qualityIndex,
+        out ExportOptions options)
+    {
+        options = (resolutionIndex, qualityIndex) switch
+        {
+            (0, 0) => new ExportOptions(ExportResolutionTier.Hd720p, ExportQuality.Standard),
+            (0, 1) => new ExportOptions(ExportResolutionTier.Hd720p, ExportQuality.High),
+            (1, 0) => new ExportOptions(ExportResolutionTier.FullHd1080p, ExportQuality.Standard),
+            (1, 1) => new ExportOptions(ExportResolutionTier.FullHd1080p, ExportQuality.High),
+            _ => null!
+        };
+        return options is not null;
     }
 
     public static bool CanStartExport(ProjectDocument project, bool isExporting)

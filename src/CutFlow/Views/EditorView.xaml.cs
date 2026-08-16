@@ -37,10 +37,13 @@ public sealed partial class EditorView : UserControl, IDisposable
     private readonly CancellationToken _lifetimeToken;
     private bool _isNarrow;
     private bool _wideInspectorVisible = true;
+    private UIElement? _timelineResizeCaptureElement;
+    private Pointer? _timelineResizePointer;
     private uint _timelineResizePointerId;
     private double _timelineResizeStartY;
     private double _timelineResizeStartHeight;
     private bool _projectSaveFailureInfoBarIsCurrent;
+    private bool _previewInfoBarIsCurrent;
     private bool _disposed;
 
     public EditorView(
@@ -210,6 +213,15 @@ public sealed partial class EditorView : UserControl, IDisposable
         IReadOnlyList<string> rejected)
     {
         EnsureActive();
+        if (Timeline.IsTrackLocked(track))
+        {
+            ShowMessage(
+                InfoBarSeverity.Warning,
+                $"{TimelineDropPolicy.DisplayName(track)} is locked",
+                "Unlock the track before adding media.");
+            return;
+        }
+
         results = MediaImportService.RevalidateDuplicateResults(ViewModel.Project, results);
         var imported = results
             .Where(result => result.Asset is not null)
@@ -253,8 +265,7 @@ public sealed partial class EditorView : UserControl, IDisposable
 
         if (track == TimelineTrackKind.Audio)
         {
-            Preview.Seek(positionMilliseconds);
-            ViewModel.Seek(positionMilliseconds);
+            SeekPreviewAndTimeline(positionMilliseconds);
         }
 
         var additions = ViewModel.AddImportedAssetsToTimeline(
@@ -308,8 +319,7 @@ public sealed partial class EditorView : UserControl, IDisposable
 
         if (track == TimelineTrackKind.Audio)
         {
-            Preview.Seek(positionMilliseconds);
-            ViewModel.Seek(positionMilliseconds);
+            SeekPreviewAndTimeline(positionMilliseconds);
         }
 
         if (!ViewModel.AddAssetToTimeline(asset.Id))
@@ -420,6 +430,7 @@ public sealed partial class EditorView : UserControl, IDisposable
         }
 
         _disposed = true;
+        CancelTimelineResize();
         _exportState.BeginClosing();
         _autosave.StateChanged -= Autosave_StateChanged;
         ViewModel.PropertyChanged -= ViewModel_PropertyChanged;
@@ -439,6 +450,7 @@ public sealed partial class EditorView : UserControl, IDisposable
         CleanupEditorResource(_lifetimeCts.Cancel, "editor lifetime cancellation");
         CleanupEditorResource(_previewRebuildGate.Dispose, "preview rebuild cancellation");
         CleanupEditorResource(ToolPanel.Dispose, "thumbnail work");
+        CleanupEditorResource(Timeline.CancelPointerInteraction, "timeline pointer capture");
         CleanupEditorResource(Timeline.StopThumbnailWork, "timeline thumbnail work");
         _textOverlayRenderer.RenderHost = null;
         CleanupEditorResource(Preview.Dispose, "native preview resources");
@@ -576,17 +588,25 @@ public sealed partial class EditorView : UserControl, IDisposable
             if (_disposed || lease.Token.IsCancellationRequested) return;
             if (!lease.TryCommit(() =>
                 {
-                    var currentPosition = Preview.PositionMilliseconds;
+                    var requestedPosition = ViewModel.PlayheadMilliseconds;
                     var currentPlayIntent = Preview.PlayIntent;
                     Preview.ReplaceComposition(
                         result.HasContent ? result.Composition : null,
-                        currentPosition,
+                        requestedPosition,
                         currentPlayIntent,
                         result.HasVisualContent);
                 })) return;
-            if (result.Errors.Count > 0)
+            var previewErrors = CompositionBuildResult.SelectPreviewErrors(result.Errors);
+            if (previewErrors.Count > 0)
             {
-                ShowMessage(InfoBarSeverity.Warning, "Preview contains unavailable items", string.Join(" ", result.Errors.Take(3)));
+                ShowPreviewMessage(
+                    InfoBarSeverity.Warning,
+                    "Preview contains unavailable items",
+                    string.Join(" ", previewErrors));
+            }
+            else
+            {
+                ClearPreviewMessage();
             }
         }
         catch (OperationCanceledException)
@@ -596,7 +616,7 @@ public sealed partial class EditorView : UserControl, IDisposable
         {
             if (!_disposed && lease?.IsCurrent == true)
             {
-                ShowMessage(InfoBarSeverity.Error, "Could not rebuild preview", exception.Message);
+                ShowPreviewMessage(InfoBarSeverity.Error, "Could not rebuild preview", exception.Message);
             }
         }
         finally
@@ -741,14 +761,30 @@ public sealed partial class EditorView : UserControl, IDisposable
 
     private void Timeline_PlayheadChanged(object sender, PlayheadChangedEventArgs e)
     {
-        Preview.Seek(e.PositionMilliseconds);
-        ViewModel.Seek(e.PositionMilliseconds);
+        SeekPreviewAndTimeline(e.PositionMilliseconds);
     }
 
     private void Timeline_SelectionChanged(object sender, EditorSelectionChangedEventArgs e) => ViewModel.Select(e.Selection);
 
     private void Timeline_TrackStateChanged(object sender, TimelineTrackStateChangedEventArgs e)
     {
+        var track = e.State switch
+        {
+            TimelineTrackState.VideoVisibility => TimelineTrackKind.Video,
+            TimelineTrackState.TextVisibility => TimelineTrackKind.Text,
+            TimelineTrackState.AudioMute => TimelineTrackKind.Audio,
+            _ => TimelineTrackKind.None
+        };
+        if (Timeline.IsTrackLocked(track))
+        {
+            ShowMessage(
+                InfoBarSeverity.Warning,
+                $"{TimelineDropPolicy.DisplayName(track)} is locked",
+                "Unlock the track before changing its state.");
+            UpdateProjectPresentation();
+            return;
+        }
+
         _ = e.State switch
         {
             TimelineTrackState.VideoVisibility => ViewModel.SetVideoTrackVisible(e.Value),
@@ -789,24 +825,32 @@ public sealed partial class EditorView : UserControl, IDisposable
 
     private void Timeline_EditRequested(object sender, TimelineEditRequestedEventArgs e)
     {
-        if (e is { Kind: TimelineEditKind.Duplicate, ItemId: Guid duplicateItemId })
+        if (e.ItemId is Guid commandItemId)
         {
-            ViewModel.DuplicateTimelineItem(duplicateItemId);
-            return;
-        }
-
-        if (e.ItemId is Guid itemId)
-        {
-            SelectTimelineItem(itemId);
+            switch (e.Kind)
+            {
+                case TimelineEditKind.SplitVideo:
+                    SplitTimelineItemWithGuidance(commandItemId, e.LongValue);
+                    return;
+                case TimelineEditKind.Duplicate:
+                    DuplicateTimelineItemWithGuidance(commandItemId);
+                    return;
+                case TimelineEditKind.Delete:
+                    DeleteTimelineItemWithGuidance(commandItemId);
+                    return;
+                case TimelineEditKind.ShowSourceFile:
+                    ShowTimelineSourceInExplorer(commandItemId);
+                    return;
+                default:
+                    SelectTimelineItem(commandItemId);
+                    break;
+            }
         }
 
         switch (e.Kind)
         {
             case TimelineEditKind.ReorderVideo when e.ItemId is Guid id:
                 ViewModel.ReorderVideoItem(id, e.IntValue);
-                break;
-            case TimelineEditKind.SplitVideo when e.ItemId is Guid id:
-                ViewModel.SplitVideoItem(id, e.LongValue);
                 break;
             case TimelineEditKind.TrimVideoStart when e.ItemId is Guid id:
                 ViewModel.TrimVideoStart(id, e.LongValue);
@@ -836,27 +880,33 @@ public sealed partial class EditorView : UserControl, IDisposable
                 ViewModel.TrimTextEnd(id, e.LongValue);
                 break;
             case TimelineEditKind.Delete:
-                ViewModel.DeleteSelection();
+                DeleteSelectionWithGuidance();
                 break;
             case TimelineEditKind.Duplicate:
-                ViewModel.DuplicateSelection();
+                DuplicateSelectionWithGuidance();
                 break;
             case TimelineEditKind.Undo:
-                ViewModel.Undo();
+                UndoWithGuidance();
                 break;
             case TimelineEditKind.Redo:
-                ViewModel.Redo();
-                break;
-            case TimelineEditKind.ShowSourceFile:
-                ShowTimelineSourceInExplorer();
+                RedoWithGuidance();
                 break;
         }
     }
 
     private void Preview_SeekRequested(object? sender, PlayheadChangedEventArgs e)
     {
-        Preview.Seek(e.PositionMilliseconds);
-        ViewModel.Seek(e.PositionMilliseconds);
+        SeekPreviewAndTimeline(e.PositionMilliseconds);
+    }
+
+    private void SeekPreviewAndTimeline(long positionMilliseconds)
+    {
+        Preview.Seek(positionMilliseconds);
+        ViewModel.Seek(positionMilliseconds);
+        Timeline.UpdatePlaybackPosition(
+            ViewModel.PlayheadMilliseconds,
+            ViewModel.PlayheadText,
+            ensureVisible: true);
     }
 
     private void Preview_PlaybackPositionChanged(object? sender, PlayheadChangedEventArgs e) =>
@@ -925,11 +975,16 @@ public sealed partial class EditorView : UserControl, IDisposable
 
     private void TimelineResizeHandle_PointerPressed(object sender, PointerRoutedEventArgs e)
     {
-        if (sender is not UIElement handle || !handle.CapturePointer(e.Pointer))
+        if (sender is not UIElement handle ||
+            _timelineResizePointer is not null ||
+            !e.GetCurrentPoint(handle).Properties.IsLeftButtonPressed ||
+            !handle.CapturePointer(e.Pointer))
         {
             return;
         }
 
+        _timelineResizeCaptureElement = handle;
+        _timelineResizePointer = e.Pointer;
         _timelineResizePointerId = e.Pointer.PointerId;
         _timelineResizeStartY = e.GetCurrentPoint(EditorRoot).Position.Y;
         _timelineResizeStartHeight = TimelineHeight;
@@ -956,11 +1011,7 @@ public sealed partial class EditorView : UserControl, IDisposable
             return;
         }
 
-        _timelineResizePointerId = 0;
-        if (sender is UIElement handle)
-        {
-            handle.ReleasePointerCapture(e.Pointer);
-        }
+        ReleaseTimelineResizeCapture();
 
         SetTimelineHeight(TimelineHeight, notify: true);
         e.Handled = true;
@@ -968,14 +1019,9 @@ public sealed partial class EditorView : UserControl, IDisposable
 
     private void TimelineResizeHandle_PointerCanceled(object sender, PointerRoutedEventArgs e)
     {
-        if (!CancelTimelineResize(e))
+        if (!CancelTimelineResize(e.Pointer.PointerId))
         {
             return;
-        }
-
-        if (sender is UIElement handle)
-        {
-            handle.ReleasePointerCapture(e.Pointer);
         }
 
         e.Handled = true;
@@ -983,22 +1029,50 @@ public sealed partial class EditorView : UserControl, IDisposable
 
     private void TimelineResizeHandle_PointerCaptureLost(object sender, PointerRoutedEventArgs e)
     {
-        if (CancelTimelineResize(e))
+        if (CancelTimelineResize(e.Pointer.PointerId, releaseCapture: false))
         {
             e.Handled = true;
         }
     }
 
-    private bool CancelTimelineResize(PointerRoutedEventArgs e)
+    private void CancelTimelineResize() => CancelTimelineResize(_timelineResizePointerId);
+
+    private bool CancelTimelineResize(uint pointerId, bool releaseCapture = true)
     {
-        if (_timelineResizePointerId != e.Pointer.PointerId)
+        if (_timelineResizePointer is null || _timelineResizePointerId != pointerId)
         {
             return false;
         }
 
-        _timelineResizePointerId = 0;
         SetTimelineHeight(_timelineResizeStartHeight, notify: false);
+        if (releaseCapture)
+        {
+            ReleaseTimelineResizeCapture();
+        }
+        else
+        {
+            ClearTimelineResizeCapture();
+        }
+
         return true;
+    }
+
+    private void ReleaseTimelineResizeCapture()
+    {
+        var element = _timelineResizeCaptureElement;
+        var pointer = _timelineResizePointer;
+        ClearTimelineResizeCapture();
+        if (element is not null && pointer is not null)
+        {
+            element.ReleasePointerCapture(pointer);
+        }
+    }
+
+    private void ClearTimelineResizeCapture()
+    {
+        _timelineResizeCaptureElement = null;
+        _timelineResizePointer = null;
+        _timelineResizePointerId = 0;
     }
 
     private void ToolPanel_ImportRequested(object? sender, MediaImportRequestedEventArgs e)
@@ -1038,17 +1112,19 @@ public sealed partial class EditorView : UserControl, IDisposable
     private void ToolPanel_ShowAssetInExplorerRequested(object? sender, AssetActionEventArgs e)
     {
         var asset = FindAsset(e.AssetId);
-        if (asset is null || string.IsNullOrWhiteSpace(asset.SourcePath))
+        if (asset is null || !SourceFileReveal.TryCreateStartInfo(asset.SourcePath, out var startInfo))
         {
-            ShowMessage(InfoBarSeverity.Error, "Could not open Explorer", "The source path is unavailable.");
+            ShowMessage(InfoBarSeverity.Error, "Could not open Explorer", "The source file is missing or inaccessible.");
             return;
         }
 
         try
         {
-            var startInfo = new ProcessStartInfo("explorer.exe") { UseShellExecute = false };
-            startInfo.ArgumentList.Add($"/select,{asset.SourcePath}");
-            Process.Start(startInfo);
+            using var process = Process.Start(startInfo);
+            if (process is null)
+            {
+                ShowMessage(InfoBarSeverity.Error, $"Could not show '{asset.FileName}'", "File Explorer could not be opened for this source path.");
+            }
         }
         catch (Exception exception) when (exception is InvalidOperationException or System.ComponentModel.Win32Exception)
         {
@@ -1071,18 +1147,17 @@ public sealed partial class EditorView : UserControl, IDisposable
         }
     }
 
-    private void ShowTimelineSourceInExplorer()
+    private void ShowTimelineSourceInExplorer(Guid itemId)
     {
-        var assetId = ViewModel.Selection switch
-        {
-            { Kind: EditorSelectionKind.VideoItem, ItemId: Guid videoId } => ViewModel.Project.VideoItems.FirstOrDefault(item => item.Id == videoId)?.AssetId,
-            { Kind: EditorSelectionKind.AudioItem, ItemId: Guid audioId } => ViewModel.Project.AudioItems.FirstOrDefault(item => item.Id == audioId)?.AssetId,
-            _ => null
-        };
+        var assetId = ViewModel.Project.VideoItems.FirstOrDefault(item => item.Id == itemId)?.AssetId ??
+            ViewModel.Project.AudioItems.FirstOrDefault(item => item.Id == itemId)?.AssetId;
         if (assetId is Guid foundAssetId)
         {
             ToolPanel_ShowAssetInExplorerRequested(this, new AssetActionEventArgs(foundAssetId));
+            return;
         }
+
+        ShowMessage(InfoBarSeverity.Error, "Could not open Explorer", "The timeline item is no longer available.");
     }
 
     private void ToolPanel_RemoveAssetRequested(object? sender, AssetActionEventArgs e)
@@ -1240,74 +1315,74 @@ public sealed partial class EditorView : UserControl, IDisposable
             return;
         }
 
-        if (controlDown)
+        if (controlDown && e.Key == VirtualKey.N)
         {
+            e.Handled = true;
+            if (!shouldCreateNewProject)
+            {
+                return;
+            }
+
+            if (_isExporting)
+            {
+                ShowMessage(InfoBarSeverity.Warning, "Export in progress", "Cancel the export or wait for it to finish before creating another project.");
+                return;
+            }
+            if (await SaveAsync())
+            {
+                if (_isExporting)
+                {
+                    ShowMessage(InfoBarSeverity.Warning, "Export in progress", "Cancel the export or wait for it to finish before creating another project.");
+                    return;
+                }
+
+                NewProjectRequested?.Invoke(this, EventArgs.Empty);
+            }
+            return;
+        }
+
+        var isSingleActionShortcut =
+            controlDown && e.Key is VirtualKey.S or VirtualKey.Z or VirtualKey.Y or VirtualKey.B or VirtualKey.D ||
+            e.Key == VirtualKey.Delete;
+        if (isSingleActionShortcut)
+        {
+            e.Handled = true;
+            if (e.KeyStatus.WasKeyDown)
+            {
+                return;
+            }
+
             switch (e.Key)
             {
-                case VirtualKey.S:
+                case VirtualKey.S when controlDown:
                     await SaveAsync();
-                    e.Handled = true;
                     return;
-                case VirtualKey.N:
-                    e.Handled = true;
-                    if (!shouldCreateNewProject)
-                    {
-                        return;
-                    }
-
-                    if (_isExporting)
-                    {
-                        ShowMessage(InfoBarSeverity.Warning, "Export in progress", "Cancel the export or wait for it to finish before creating another project.");
-                        return;
-                    }
-                    if (await SaveAsync())
-                    {
-                        if (_isExporting)
-                        {
-                            ShowMessage(InfoBarSeverity.Warning, "Export in progress", "Cancel the export or wait for it to finish before creating another project.");
-                            return;
-                        }
-
-                        NewProjectRequested?.Invoke(this, EventArgs.Empty);
-                    }
+                case VirtualKey.Z when controlDown:
+                    UndoWithGuidance();
                     return;
-                case VirtualKey.Z:
-                    ViewModel.Undo();
-                    e.Handled = true;
+                case VirtualKey.Y when controlDown:
+                    RedoWithGuidance();
                     return;
-                case VirtualKey.Y:
-                    ViewModel.Redo();
-                    e.Handled = true;
+                case VirtualKey.B when controlDown:
+                    SplitSelectionWithGuidance();
                     return;
-                case VirtualKey.B:
-                    if (!TryRejectLockedSelectionEdit())
-                    {
-                        ViewModel.SplitSelection();
-                    }
-                    e.Handled = true;
+                case VirtualKey.D when controlDown:
+                    DuplicateSelectionWithGuidance();
                     return;
-                case VirtualKey.D:
-                    if (!TryRejectLockedSelectionEdit())
-                    {
-                        ViewModel.DuplicateSelection();
-                    }
-                    e.Handled = true;
+                case VirtualKey.Delete:
+                    DeleteSelectionWithGuidance();
                     return;
             }
         }
 
         switch (e.Key)
         {
-            case VirtualKey.Delete:
-                if (!TryRejectLockedSelectionEdit())
-                {
-                    ViewModel.DeleteSelection();
-                }
-                e.Handled = true;
-                break;
             case VirtualKey.Space:
-                Preview.PlayPause();
                 e.Handled = true;
+                if (!e.KeyStatus.WasKeyDown)
+                {
+                    Preview.PlayPause();
+                }
                 break;
             case VirtualKey.Escape:
                 if (InspectorOverlay.Visibility == Visibility.Visible)
@@ -1341,9 +1416,137 @@ public sealed partial class EditorView : UserControl, IDisposable
         return true;
     }
 
-    private void Undo_Click(object sender, RoutedEventArgs e) => ViewModel.Undo();
+    private void UndoWithGuidance()
+    {
+        if (!ViewModel.CanUndo)
+        {
+            ShowMessage(InfoBarSeverity.Informational, "Nothing to undo", "Make an edit first.");
+            return;
+        }
 
-    private void Redo_Click(object sender, RoutedEventArgs e) => ViewModel.Redo();
+        ViewModel.Undo();
+    }
+
+    private void RedoWithGuidance()
+    {
+        if (!ViewModel.CanRedo)
+        {
+            ShowMessage(InfoBarSeverity.Informational, "Nothing to redo", "Undo an edit first.");
+            return;
+        }
+
+        ViewModel.Redo();
+    }
+
+    private void SplitSelectionWithGuidance()
+    {
+        if (ViewModel.Selection is not { Kind: EditorSelectionKind.VideoItem, ItemId: Guid })
+        {
+            ShowMessage(InfoBarSeverity.Informational, "Select a V1 item", "Select a V1 item to split.");
+            return;
+        }
+
+        if (TryRejectLockedSelectionEdit())
+        {
+            return;
+        }
+
+        if (!ViewModel.SplitSelection())
+        {
+            ShowMessage(InfoBarSeverity.Warning, "Could not split item", "Move the playhead at least 0.1 seconds from either edge.");
+        }
+    }
+
+    private void SplitTimelineItemWithGuidance(Guid itemId, long positionMilliseconds)
+    {
+        if (Timeline.IsItemLocked(itemId))
+        {
+            ShowLockedTrackMessage(itemId);
+            return;
+        }
+
+        if (!ViewModel.SplitVideoItem(itemId, positionMilliseconds))
+        {
+            ShowMessage(InfoBarSeverity.Warning, "Could not split item", "Move the playhead at least 0.1 seconds from either edge.");
+        }
+    }
+
+    private void DuplicateSelectionWithGuidance()
+    {
+        if (ViewModel.Selection is not
+            {
+                Kind: EditorSelectionKind.VideoItem or EditorSelectionKind.TextItem or EditorSelectionKind.AudioItem,
+                ItemId: Guid
+            })
+        {
+            ShowMessage(InfoBarSeverity.Informational, "Select a timeline item", "Select a V1, T1, or A1 item to duplicate.");
+            return;
+        }
+
+        if (TryRejectLockedSelectionEdit())
+        {
+            return;
+        }
+
+        if (!ViewModel.DuplicateSelection())
+        {
+            ShowMessage(InfoBarSeverity.Warning, "Could not duplicate item", "The copy must fit within the 24-hour timeline.");
+        }
+    }
+
+    private void DuplicateTimelineItemWithGuidance(Guid itemId)
+    {
+        if (Timeline.IsItemLocked(itemId))
+        {
+            ShowLockedTrackMessage(itemId);
+            return;
+        }
+
+        if (!ViewModel.DuplicateTimelineItem(itemId))
+        {
+            ShowMessage(InfoBarSeverity.Warning, "Could not duplicate item", "The copy must fit within the 24-hour timeline.");
+        }
+    }
+
+    private void DeleteTimelineItemWithGuidance(Guid itemId)
+    {
+        if (Timeline.IsItemLocked(itemId))
+        {
+            ShowLockedTrackMessage(itemId);
+            return;
+        }
+
+        if (!ViewModel.DeleteTimelineItem(itemId))
+        {
+            ShowMessage(InfoBarSeverity.Warning, "Could not delete item", "The timeline item is no longer available.");
+        }
+    }
+
+    private void DeleteSelectionWithGuidance()
+    {
+        if (ViewModel.Selection is not
+            {
+                Kind: EditorSelectionKind.VideoItem or EditorSelectionKind.TextItem or EditorSelectionKind.AudioItem,
+                ItemId: Guid
+            })
+        {
+            return;
+        }
+
+        if (TryRejectLockedSelectionEdit())
+        {
+            return;
+        }
+
+        if (!ViewModel.DeleteSelection())
+        {
+            ShowMessage(InfoBarSeverity.Warning, "Could not delete item", "The selected timeline item is no longer available.");
+        }
+    }
+
+    private void Undo_Click(object sender, RoutedEventArgs e) => UndoWithGuidance();
+
+    private void Redo_Click(object sender, RoutedEventArgs e) => RedoWithGuidance();
 
     private void EditorView_Unloaded(object sender, RoutedEventArgs e)
     {
@@ -1391,10 +1594,28 @@ public sealed partial class EditorView : UserControl, IDisposable
     private void ShowMessage(InfoBarSeverity severity, string title, string message)
     {
         _projectSaveFailureInfoBarIsCurrent = false;
+        _previewInfoBarIsCurrent = false;
         EditorInfoBar.Severity = severity;
         EditorInfoBar.Title = title;
         EditorInfoBar.Message = message;
         EditorInfoBar.IsOpen = true;
+    }
+
+    private void ShowPreviewMessage(InfoBarSeverity severity, string title, string message)
+    {
+        ShowMessage(severity, title, message);
+        _previewInfoBarIsCurrent = true;
+    }
+
+    private void ClearPreviewMessage()
+    {
+        if (!_previewInfoBarIsCurrent)
+        {
+            return;
+        }
+
+        _previewInfoBarIsCurrent = false;
+        EditorInfoBar.IsOpen = false;
     }
 
     private void ShowProjectSaveFailure(string message)

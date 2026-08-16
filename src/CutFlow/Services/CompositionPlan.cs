@@ -5,6 +5,8 @@ namespace CutFlow.Services;
 
 public sealed class CompositionPlan
 {
+    private const int MaximumAssetNameLength = 120;
+
     private CompositionPlan(
         IReadOnlyList<CompositionVisualPlan> visuals,
         IReadOnlyList<CompositionAudioPlan> audioTracks,
@@ -143,8 +145,20 @@ public sealed class CompositionPlan
             targetDuration);
     }
 
-    private static string AssetName(ProjectAsset asset) =>
-        string.IsNullOrWhiteSpace(asset.FileName) ? Path.GetFileName(asset.SourcePath) : asset.FileName;
+    private static string AssetName(ProjectAsset asset)
+    {
+        var name = string.IsNullOrWhiteSpace(asset.FileName) ? Path.GetFileName(asset.SourcePath) : asset.FileName;
+        name = name.ReplaceLineEndings(" ").Trim();
+        if (name.Length <= MaximumAssetNameLength)
+        {
+            return name;
+        }
+
+        var length = char.IsSurrogatePair(name, MaximumAssetNameLength - 1)
+            ? MaximumAssetNameLength - 1
+            : MaximumAssetNameLength;
+        return name[..length].TrimEnd();
+    }
 
     private static double ClampVolume(double volume) => double.IsFinite(volume) ? Math.Clamp(volume, 0, 1) : 1;
 

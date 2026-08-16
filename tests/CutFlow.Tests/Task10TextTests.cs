@@ -1,7 +1,9 @@
 using CutFlow.Models;
+using CutFlow.Utilities;
 using CutFlow.ViewModels;
 using Microsoft.VisualStudio.TestTools.UnitTesting;
 using System.Buffers.Binary;
+using System.Text;
 using System.Runtime.InteropServices.WindowsRuntime;
 using Windows.Graphics.Imaging;
 using Windows.Storage.Streams;
@@ -202,17 +204,55 @@ public sealed class Task10TextTests
     public void StyleHashChangesForPixelsAndDimensionsButNotTiming()
     {
         var project = ProjectDocument.CreateNew("Hash", DateTimeOffset.UnixEpoch);
-        var item = new TextTimelineItem { Id = Guid.NewGuid(), Text = "Hello" };
+        var item = new TextTimelineItem
+        {
+            Id = Guid.NewGuid(),
+            Text = "Hello",
+            BackgroundEnabled = true
+        };
         var original = Services.TextOverlayRenderer.CalculateStyleHash(project, item);
+        Assert.AreEqual(
+            "4ff414ed4469676c",
+            original,
+            "Update the expected hash only when the raster contract or cache format intentionally changes.");
         item.StartMilliseconds = 8_000;
         item.DurationMilliseconds = 500;
         Assert.AreEqual(original, Services.TextOverlayRenderer.CalculateStyleHash(project, item));
 
-        item.NormalizedX = 0.6;
-        Assert.AreNotEqual(original, Services.TextOverlayRenderer.CalculateStyleHash(project, item));
-        item.NormalizedX = 0.5;
-        project.Settings.Width = 1280;
-        Assert.AreNotEqual(original, Services.TextOverlayRenderer.CalculateStyleHash(project, item));
+        var pixelChanges = new Action<ProjectDocument, TextTimelineItem>[]
+        {
+            (_, value) => value.Text = "Changed",
+            (_, value) => value.FontFamily = "Arial",
+            (_, value) => value.FontSize = 72,
+            (_, value) => value.FontWeight = 700,
+            (_, value) => value.IsItalic = true,
+            (_, value) => value.TextColor = "#FFFF0000",
+            (_, value) => value.BackgroundColor = "#FF0000FF",
+            (_, value) => value.BackgroundEnabled = false,
+            (_, value) => value.Opacity = 0.5,
+            (_, value) => value.Alignment = TextHorizontalAlignment.Left,
+            (_, value) => value.NormalizedX = 0.6,
+            (_, value) => value.NormalizedY = 0.6,
+            (value, _) => value.Settings.Width = 1280,
+            (value, _) => value.Settings.Height = 720
+        };
+        foreach (var change in pixelChanges)
+        {
+            var changedProject = ProjectDocumentCloner.Clone(project);
+            var changedItem = changedProject.TextItems.SingleOrDefault(candidate => candidate.Id == item.Id) ?? new TextTimelineItem
+            {
+                Id = item.Id,
+                Text = item.Text,
+                BackgroundEnabled = item.BackgroundEnabled
+            };
+            change(changedProject, changedItem);
+            Assert.AreNotEqual(original, Services.TextOverlayRenderer.CalculateStyleHash(changedProject, changedItem));
+        }
+
+        item.NormalizedX = 2;
+        var clampedPositionHash = Services.TextOverlayRenderer.CalculateStyleHash(project, item);
+        item.NormalizedX = 1;
+        Assert.AreEqual(clampedPositionHash, Services.TextOverlayRenderer.CalculateStyleHash(project, item));
         StringAssert.Matches(
             Services.TextOverlayRenderer.GetCacheFileName(project, item),
             new System.Text.RegularExpressions.Regex($"^{item.Id:D}-[0-9a-f]{{16}}\\.png$"));
@@ -278,6 +318,36 @@ public sealed class Task10TextTests
     }
 
     [TestMethod]
+    [DataRow(1920, 1080)]
+    [DataRow(1080, 1920)]
+    [DataRow(1080, 1080)]
+    public async Task EncodePngAsync_ResizesRasterizationRoundingToExactProjectDimensions(
+        int outputWidth,
+        int outputHeight)
+    {
+        using var directory = new TemporaryDirectory();
+        var path = Path.Combine(directory.Path, "scaled.png");
+        var renderSize = Services.TextOverlayRenderer.CalculateRenderSize(outputWidth, outputHeight, 3.5);
+        var rasterWidth = (int)Math.Ceiling(renderSize.Width * 3.5);
+        var rasterHeight = (int)Math.Ceiling(renderSize.Height * 3.5);
+
+        Assert.IsTrue(rasterWidth != outputWidth || rasterHeight != outputHeight);
+
+        await Services.TextOverlayRenderer.EncodePngAsync(
+            path,
+            new byte[checked(rasterWidth * rasterHeight * 4)],
+            rasterWidth,
+            rasterHeight,
+            outputWidth,
+            outputHeight,
+            CancellationToken.None);
+
+        var dimensions = await ReadPngDimensionsAsync(path);
+        Assert.AreEqual((uint)outputWidth, dimensions.Width);
+        Assert.AreEqual((uint)outputHeight, dimensions.Height);
+    }
+
+    [TestMethod]
     public async Task CacheInvalidDimensions_RegeneratesExactProjectSize()
     {
         using var directory = new TemporaryDirectory();
@@ -339,6 +409,8 @@ public sealed class Task10TextTests
     [DataRow(PngCorruption.TruncatedIdat)]
     [DataRow(PngCorruption.IhdrCrc)]
     [DataRow(PngCorruption.IdatCrc)]
+    [DataRow(PngCorruption.IendCrc)]
+    [DataRow(PngCorruption.OversizedIhdrLength)]
     public async Task CacheMalformedPng_RegeneratesInsteadOfReusing(PngCorruption corruption)
     {
         using var directory = new TemporaryDirectory();
@@ -351,7 +423,7 @@ public sealed class Task10TextTests
         Directory.CreateDirectory(Path.GetDirectoryName(cachePath)!);
         await WriteTransparentPngAsync(cachePath, 2, 2);
         CorruptPng(cachePath, corruption);
-        if (corruption is PngCorruption.IhdrCrc or PngCorruption.IdatCrc)
+        if (corruption is PngCorruption.IhdrCrc or PngCorruption.IdatCrc or PngCorruption.IendCrc)
         {
             Assert.AreEqual(16, (await ReadPngPixelsAsync(cachePath)).Length, "WIC should still decode the CRC-corrupt fixture.");
         }
@@ -372,6 +444,111 @@ public sealed class Task10TextTests
         Assert.AreEqual(1, renderCount);
         Assert.AreEqual(2u, dimensions.Width);
         Assert.AreEqual(2u, dimensions.Height);
+    }
+
+    [TestMethod]
+    [DataRow(PngStructureViolation.UnknownCriticalChunk)]
+    [DataRow(PngStructureViolation.PlteAfterIdat)]
+    [DataRow(PngStructureViolation.NonConsecutiveIdat)]
+    [DataRow(PngStructureViolation.DuplicatePlte)]
+    public async Task CacheCriticalStructureViolation_RegeneratesInsteadOfReusing(
+        PngStructureViolation violation)
+    {
+        using var directory = new TemporaryDirectory();
+        var project = ProjectDocument.CreateNew("Invalid PNG structure", DateTimeOffset.UnixEpoch);
+        project.Settings.Width = 2;
+        project.Settings.Height = 2;
+        var item = new TextTimelineItem { Id = Guid.NewGuid(), Text = "Pixels" };
+        var renderer = new Services.TextOverlayRenderer(directory.Path);
+        var cachePath = renderer.GetCachePath(project, item);
+        Directory.CreateDirectory(Path.GetDirectoryName(cachePath)!);
+        await WriteTransparentPngAsync(cachePath, 2, 2);
+        ApplyPngStructureViolation(cachePath, violation);
+        var renderCount = 0;
+
+        var result = await renderer.GetOrRenderAsync(
+            project,
+            item,
+            async (temporaryPath, cancellationToken) =>
+            {
+                renderCount++;
+                await WriteTransparentPngAsync(temporaryPath, 2, 2, cancellationToken);
+            },
+            CancellationToken.None);
+
+        Assert.AreEqual(1, renderCount);
+        Assert.AreEqual((2u, 2u), await ReadPngDimensionsAsync(result));
+    }
+
+    [TestMethod]
+    public async Task CacheUnknownAncillaryChunk_RemainsReusable()
+    {
+        using var directory = new TemporaryDirectory();
+        var project = ProjectDocument.CreateNew("Ancillary PNG chunk", DateTimeOffset.UnixEpoch);
+        project.Settings.Width = 2;
+        project.Settings.Height = 2;
+        var item = new TextTimelineItem { Id = Guid.NewGuid(), Text = "Pixels" };
+        var renderer = new Services.TextOverlayRenderer(directory.Path);
+        var cachePath = renderer.GetCachePath(project, item);
+        Directory.CreateDirectory(Path.GetDirectoryName(cachePath)!);
+        await WriteTransparentPngAsync(cachePath, 2, 2);
+        InsertPngChunk(cachePath, "vpAg"u8, [], "IDAT"u8);
+        var renderCount = 0;
+
+        var result = await renderer.GetOrRenderAsync(
+            project,
+            item,
+            (_, _) =>
+            {
+                renderCount++;
+                return Task.CompletedTask;
+            },
+            CancellationToken.None);
+
+        Assert.AreEqual(0, renderCount);
+        Assert.AreEqual(cachePath, result);
+    }
+
+    [TestMethod]
+    [DataRow(9, 1)]
+    [DataRow(12, 2)]
+    public async Task CacheUnsupportedColorOrInterlace_RegeneratesInsteadOfFailing(
+        int ihdrDataOffset,
+        int unsupportedValue)
+    {
+        using var directory = new TemporaryDirectory();
+        var project = ProjectDocument.CreateNew("Unsupported PNG encoding", DateTimeOffset.UnixEpoch);
+        project.Settings.Width = 2;
+        project.Settings.Height = 2;
+        var item = new TextTimelineItem { Id = Guid.NewGuid(), Text = "Pixels" };
+        var renderer = new Services.TextOverlayRenderer(directory.Path);
+        var cachePath = renderer.GetCachePath(project, item);
+        Directory.CreateDirectory(Path.GetDirectoryName(cachePath)!);
+        await WriteTransparentPngAsync(cachePath, 2, 2);
+        SetIhdrByte(cachePath, ihdrDataOffset, checked((byte)unsupportedValue));
+        var renderCount = 0;
+
+        var result = await renderer.GetOrRenderAsync(
+            project,
+            item,
+            async (temporaryPath, cancellationToken) =>
+            {
+                renderCount++;
+                await WriteTransparentPngAsync(temporaryPath, 2, 2, cancellationToken);
+            },
+            CancellationToken.None);
+
+        Assert.AreEqual(1, renderCount);
+        Assert.AreEqual((2u, 2u), await ReadPngDimensionsAsync(result));
+    }
+
+    [TestMethod]
+    public void DecodedPixelBufferSize_IsCheckedAndBounded()
+    {
+        Assert.IsTrue(Services.TextOverlayRenderer.TryGetDecodedPixelByteCount(1920, 1920, out var byteCount));
+        Assert.AreEqual(14_745_600, byteCount);
+        Assert.IsFalse(Services.TextOverlayRenderer.TryGetDecodedPixelByteCount(4097, 4096, out _));
+        Assert.IsFalse(Services.TextOverlayRenderer.TryGetDecodedPixelByteCount(uint.MaxValue, uint.MaxValue, out _));
     }
 
     [TestMethod]
@@ -499,7 +676,7 @@ public sealed class Task10TextTests
     }
 
     [TestMethod]
-    public async Task CacheAfterRender_RemainsBoundedToTwoHundredFiftySixPngFiles()
+    public async Task CacheAfterRender_RetainsCurrentAndNewestPngFilesDeterministically()
     {
         using var directory = new TemporaryDirectory();
         var project = ProjectDocument.CreateNew("Bounded cache", DateTimeOffset.UnixEpoch);
@@ -509,20 +686,67 @@ public sealed class Task10TextTests
         var renderer = new Services.TextOverlayRenderer(directory.Path);
         var cacheDirectory = Path.GetDirectoryName(renderer.GetCachePath(project, item))!;
         Directory.CreateDirectory(cacheDirectory);
+        var sharedTimestamp = new DateTime(2040, 1, 1, 0, 0, 0, DateTimeKind.Utc);
         for (var index = 0; index < 256; index++)
         {
             var path = Path.Combine(cacheDirectory, $"old-{index:D3}.png");
             await File.WriteAllBytesAsync(path, [0]);
-            File.SetLastWriteTimeUtc(path, DateTime.UtcNow.AddDays(1));
+            File.SetLastWriteTimeUtc(path, sharedTimestamp);
         }
+        var temporaryPath = Path.Combine(cacheDirectory, "render-in-progress.png.tmp");
+        var nonPngPath = Path.Combine(cacheDirectory, "notes.txt");
+        await File.WriteAllTextAsync(temporaryPath, "temporary");
+        await File.WriteAllTextAsync(nonPngPath, "unrelated");
 
-        await renderer.GetOrRenderAsync(
+        var currentPath = await renderer.GetOrRenderAsync(
             project,
             item,
             (path, cancellationToken) => WriteTransparentPngAsync(path, 1, 1, cancellationToken),
             CancellationToken.None);
 
         Assert.AreEqual(256, Directory.GetFiles(cacheDirectory, "*.png").Length);
+        Assert.IsTrue(File.Exists(currentPath));
+        Assert.IsTrue(File.Exists(Path.Combine(cacheDirectory, "old-000.png")));
+        Assert.IsFalse(File.Exists(Path.Combine(cacheDirectory, "old-255.png")));
+        Assert.IsTrue(File.Exists(temporaryPath));
+        Assert.IsTrue(File.Exists(nonPngPath));
+    }
+
+    [TestMethod]
+    public async Task CacheAfterRender_WhenOldestPngIsLocked_DeletesNextOldest()
+    {
+        using var directory = new TemporaryDirectory();
+        var project = ProjectDocument.CreateNew("Locked cache entry", DateTimeOffset.UnixEpoch);
+        project.Settings.Width = 1;
+        project.Settings.Height = 1;
+        var item = new TextTimelineItem { Id = Guid.NewGuid(), Text = "Current" };
+        var renderer = new Services.TextOverlayRenderer(directory.Path);
+        var cacheDirectory = Path.GetDirectoryName(renderer.GetCachePath(project, item))!;
+        Directory.CreateDirectory(cacheDirectory);
+        var oldestPath = Path.Combine(cacheDirectory, "old-000.png");
+        var nextOldestPath = Path.Combine(cacheDirectory, "old-001.png");
+        var firstTimestamp = new DateTime(2020, 1, 1, 0, 0, 0, DateTimeKind.Utc);
+        for (var index = 0; index < 256; index++)
+        {
+            var path = Path.Combine(cacheDirectory, $"old-{index:D3}.png");
+            await File.WriteAllBytesAsync(path, [0]);
+            File.SetLastWriteTimeUtc(path, firstTimestamp.AddMinutes(index));
+        }
+
+        string currentPath;
+        using (new FileStream(oldestPath, FileMode.Open, FileAccess.Read, FileShare.Read))
+        {
+            currentPath = await renderer.GetOrRenderAsync(
+                project,
+                item,
+                (path, cancellationToken) => WriteTransparentPngAsync(path, 1, 1, cancellationToken),
+                CancellationToken.None);
+
+            Assert.AreEqual(256, Directory.GetFiles(cacheDirectory, "*.png").Length);
+            Assert.IsTrue(File.Exists(oldestPath));
+            Assert.IsFalse(File.Exists(nextOldestPath));
+            Assert.IsTrue(File.Exists(currentPath));
+        }
     }
 
     [TestMethod]
@@ -554,6 +778,8 @@ public sealed class Task10TextTests
             pixels,
             width: 2,
             height: 1,
+            outputWidth: 2,
+            outputHeight: 1,
             CancellationToken.None);
 
         var decoded = await ReadPngPixelsAsync(path);
@@ -684,7 +910,20 @@ public sealed class Task10TextTests
         }
 
         var bytes = File.ReadAllBytes(path);
-        ReadOnlySpan<byte> expectedType = corruption == PngCorruption.IhdrCrc ? "IHDR"u8 : "IDAT"u8;
+        if (corruption == PngCorruption.OversizedIhdrLength)
+        {
+            BinaryPrimitives.WriteUInt32BigEndian(bytes.AsSpan(8, sizeof(uint)), uint.MaxValue);
+            File.WriteAllBytes(path, bytes);
+            return;
+        }
+
+        ReadOnlySpan<byte> expectedType = corruption switch
+        {
+            PngCorruption.IhdrCrc => "IHDR"u8,
+            PngCorruption.IdatCrc => "IDAT"u8,
+            PngCorruption.IendCrc => "IEND"u8,
+            _ => throw new ArgumentOutOfRangeException(nameof(corruption))
+        };
         var offset = 8;
         while (offset <= bytes.Length - 12)
         {
@@ -704,10 +943,153 @@ public sealed class Task10TextTests
         Assert.Fail($"The generated PNG did not contain the expected {corruption} chunk.");
     }
 
+    private static void ApplyPngStructureViolation(string path, PngStructureViolation violation)
+    {
+        switch (violation)
+        {
+            case PngStructureViolation.UnknownCriticalChunk:
+                InsertPngChunk(path, "ABCD"u8, [], "IDAT"u8);
+                return;
+            case PngStructureViolation.PlteAfterIdat:
+                InsertPngChunk(path, "PLTE"u8, [0, 0, 0], "IEND"u8);
+                return;
+            case PngStructureViolation.DuplicatePlte:
+                InsertPngChunk(path, "PLTE"u8, [0, 0, 0], "IDAT"u8);
+                InsertPngChunk(path, "PLTE"u8, [0, 0, 0], "IDAT"u8);
+                return;
+            case PngStructureViolation.NonConsecutiveIdat:
+                SplitIdatWithAncillaryChunk(path);
+                return;
+            default:
+                Assert.Fail($"Unsupported PNG structure violation: {violation}.");
+                return;
+        }
+    }
+
+    private static void SetIhdrByte(string path, int dataOffset, byte value)
+    {
+        var bytes = File.ReadAllBytes(path);
+        var ihdrOffset = FindPngChunkOffset(bytes, "IHDR"u8);
+        var dataLength = checked((int)BinaryPrimitives.ReadUInt32BigEndian(bytes.AsSpan(ihdrOffset, 4)));
+        Assert.AreEqual(13, dataLength);
+        bytes[ihdrOffset + 8 + dataOffset] = value;
+        BinaryPrimitives.WriteUInt32BigEndian(
+            bytes.AsSpan(ihdrOffset + 8 + dataLength, 4),
+            CalculatePngCrc("IHDR"u8, bytes.AsSpan(ihdrOffset + 8, dataLength)));
+        File.WriteAllBytes(path, bytes);
+    }
+
+    private static void InsertPngChunk(
+        string path,
+        ReadOnlySpan<byte> chunkType,
+        ReadOnlySpan<byte> chunkData,
+        ReadOnlySpan<byte> beforeChunkType)
+    {
+        var bytes = File.ReadAllBytes(path);
+        var offset = FindPngChunkOffset(bytes, beforeChunkType);
+        var chunk = CreatePngChunk(chunkType, chunkData);
+        File.WriteAllBytes(path, ReplaceBytes(bytes, offset, 0, chunk));
+    }
+
+    private static void SplitIdatWithAncillaryChunk(string path)
+    {
+        var bytes = File.ReadAllBytes(path);
+        var offset = FindPngChunkOffset(bytes, "IDAT"u8);
+        var dataLength = checked((int)BinaryPrimitives.ReadUInt32BigEndian(bytes.AsSpan(offset, 4)));
+        Assert.IsTrue(dataLength > 1, "The generated PNG IDAT chunk could not be split.");
+        var split = dataLength / 2;
+        var data = bytes.AsSpan(offset + 8, dataLength);
+        var firstIdat = CreatePngChunk("IDAT"u8, data[..split]);
+        var ancillary = CreatePngChunk("vpAg"u8, []);
+        var secondIdat = CreatePngChunk("IDAT"u8, data[split..]);
+        var replacement = new byte[firstIdat.Length + ancillary.Length + secondIdat.Length];
+        firstIdat.CopyTo(replacement, 0);
+        ancillary.CopyTo(replacement, firstIdat.Length);
+        secondIdat.CopyTo(replacement, firstIdat.Length + ancillary.Length);
+        File.WriteAllBytes(path, ReplaceBytes(bytes, offset, dataLength + 12, replacement));
+    }
+
+    private static int FindPngChunkOffset(ReadOnlySpan<byte> bytes, ReadOnlySpan<byte> expectedType)
+    {
+        var offset = 8;
+        while (offset <= bytes.Length - 12)
+        {
+            var dataLength = BinaryPrimitives.ReadUInt32BigEndian(bytes.Slice(offset, 4));
+            var chunkEnd = (long)offset + 12 + dataLength;
+            Assert.IsTrue(chunkEnd <= bytes.Length, "The generated PNG contained an invalid chunk boundary.");
+            if (bytes.Slice(offset + 4, 4).SequenceEqual(expectedType))
+            {
+                return offset;
+            }
+
+            offset = (int)chunkEnd;
+        }
+
+        Assert.Fail($"The generated PNG did not contain chunk {Encoding.ASCII.GetString(expectedType)}.");
+        return -1;
+    }
+
+    private static byte[] CreatePngChunk(ReadOnlySpan<byte> chunkType, ReadOnlySpan<byte> chunkData)
+    {
+        Assert.AreEqual(4, chunkType.Length);
+        var chunk = new byte[checked(chunkData.Length + 12)];
+        BinaryPrimitives.WriteUInt32BigEndian(chunk, (uint)chunkData.Length);
+        chunkType.CopyTo(chunk.AsSpan(4));
+        chunkData.CopyTo(chunk.AsSpan(8));
+        BinaryPrimitives.WriteUInt32BigEndian(chunk.AsSpan(8 + chunkData.Length), CalculatePngCrc(chunkType, chunkData));
+        return chunk;
+    }
+
+    private static uint CalculatePngCrc(ReadOnlySpan<byte> chunkType, ReadOnlySpan<byte> chunkData)
+    {
+        var crc = uint.MaxValue;
+        foreach (var value in chunkType)
+        {
+            crc = UpdatePngCrc(crc, value);
+        }
+
+        foreach (var value in chunkData)
+        {
+            crc = UpdatePngCrc(crc, value);
+        }
+
+        return ~crc;
+    }
+
+    private static uint UpdatePngCrc(uint crc, byte value)
+    {
+        crc ^= value;
+        for (var bit = 0; bit < 8; bit++)
+        {
+            crc = (crc & 1) == 0 ? crc >> 1 : 0xEDB88320u ^ (crc >> 1);
+        }
+
+        return crc;
+    }
+
+    private static byte[] ReplaceBytes(byte[] source, int offset, int count, byte[] replacement)
+    {
+        var result = new byte[checked(source.Length - count + replacement.Length)];
+        source.AsSpan(0, offset).CopyTo(result);
+        replacement.CopyTo(result, offset);
+        source.AsSpan(offset + count).CopyTo(result.AsSpan(offset + replacement.Length));
+        return result;
+    }
+
     public enum PngCorruption
     {
         TruncatedIdat,
         IhdrCrc,
-        IdatCrc
+        IdatCrc,
+        IendCrc,
+        OversizedIhdrLength
+    }
+
+    public enum PngStructureViolation
+    {
+        UnknownCriticalChunk,
+        PlteAfterIdat,
+        NonConsecutiveIdat,
+        DuplicatePlte
     }
 }

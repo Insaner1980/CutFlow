@@ -16,6 +16,9 @@ internal delegate Task<TranscodeFailureReason> ExportRenderAsync(
 
 public sealed class ExportService
 {
+    internal const int MaximumStagingBaseNameLength = 96;
+    internal const int MaximumStagingFileNameLength = MaximumStagingBaseNameLength + 45;
+
     private readonly CompositionService _compositionService;
     private readonly TextOverlayRenderer? _textOverlayRenderer;
     private readonly ExportRenderAsync _renderAsync;
@@ -64,9 +67,25 @@ public sealed class ExportService
         string destinationPath,
         ExportOptions options,
         IProgress<double> progress,
+        CancellationToken cancellationToken) =>
+        await ExportToPathAsync(
+            project,
+            project,
+            destinationPath,
+            options,
+            progress,
+            cancellationToken);
+
+    internal async Task<ExportResult> ExportToPathAsync(
+        ProjectDocument project,
+        ProjectDocument sourceGuardProject,
+        string destinationPath,
+        ExportOptions options,
+        IProgress<double> progress,
         CancellationToken cancellationToken)
     {
         ArgumentNullException.ThrowIfNull(project);
+        ArgumentNullException.ThrowIfNull(sourceGuardProject);
         ArgumentException.ThrowIfNullOrWhiteSpace(destinationPath);
         ArgumentNullException.ThrowIfNull(options);
         ArgumentNullException.ThrowIfNull(progress);
@@ -74,12 +93,9 @@ public sealed class ExportService
         project = CreateProjectSnapshot(project);
         destinationPath = Path.GetFullPath(destinationPath);
 
-        if (IsSourceMediaPath(project, destinationPath))
+        if (IsSourceMediaPath(project, sourceGuardProject, destinationPath))
         {
-            return new ExportResult(
-                ExportResultStatus.ValidationFailed,
-                destinationPath,
-                "Choose a different output file. Export cannot overwrite source media used by this project.");
+            return SourceMediaConflict(destinationPath);
         }
 
         var validation = await ExportPreflight.ValidateAsync(
@@ -91,7 +107,9 @@ public sealed class ExportService
             return new ExportResult(ExportResultStatus.ValidationFailed, destinationPath, validation.ErrorMessage);
         }
 
-        if (project.TextItems.Count > 0 && _textOverlayRenderer?.RenderHost is null)
+        if (project.Settings.TextTrackVisible &&
+            project.TextItems.Any(item => item.DurationMilliseconds > 0) &&
+            _textOverlayRenderer?.RenderHost is null)
         {
             return new ExportResult(
                 ExportResultStatus.Failed,
@@ -116,18 +134,42 @@ public sealed class ExportService
             return new ExportResult(ExportResultStatus.Failed, destinationPath, message);
         }
 
+        if (IsSourceMediaPath(project, sourceGuardProject, destinationPath))
+        {
+            return SourceMediaConflict(destinationPath);
+        }
+
         var directoryPath = Path.GetDirectoryName(destinationPath)
             ?? throw new InvalidOperationException("The export destination folder is unavailable.");
         var folder = await StorageFolder.GetFolderFromPathAsync(directoryPath);
         cancellationToken.ThrowIfCancellationRequested();
-        var baseName = Path.GetFileNameWithoutExtension(destinationPath);
         StorageFile? staging = null;
         try
         {
-            staging = await folder.CreateFileAsync(
-                $"{baseName}.cutflow-{Guid.NewGuid():N}.mp4",
-                CreationCollisionOption.FailIfExists);
+            string stagingFileName;
+            do
+            {
+                stagingFileName = CreateStagingFileName(destinationPath, Guid.NewGuid());
+            }
+            while (IsSourceMediaPath(
+                project,
+                sourceGuardProject,
+                Path.Combine(directoryPath, stagingFileName)));
+
+            staging = await folder.CreateFileAsync(stagingFileName, CreationCollisionOption.FailIfExists);
             cancellationToken.ThrowIfCancellationRequested();
+            var finalValidation = await ExportPreflight.ValidateAsync(
+                project,
+                refreshMissingFlags: true,
+                cancellationToken);
+            if (!finalValidation.CanExport)
+            {
+                return new ExportResult(
+                    ExportResultStatus.ValidationFailed,
+                    destinationPath,
+                    finalValidation.ErrorMessage);
+            }
+
             var failure = await _renderAsync(build.Composition, staging, profile, progress, cancellationToken);
             cancellationToken.ThrowIfCancellationRequested();
             if (failure != TranscodeFailureReason.None)
@@ -136,6 +178,11 @@ public sealed class ExportService
                     ExportResultStatus.Failed,
                     destinationPath,
                     ExportFailureMapper.GetMessage(failure) ?? "Export failed.");
+            }
+
+            if (IsSourceMediaPath(project, sourceGuardProject, destinationPath))
+            {
+                return SourceMediaConflict(destinationPath);
             }
 
             await CommitAsync(staging.Path, destinationPath);
@@ -167,6 +214,24 @@ public sealed class ExportService
     private static async Task DeleteStagingAsync(StorageFile staging) =>
         await staging.DeleteAsync(StorageDeleteOption.PermanentDelete);
 
+    internal static string CreateStagingFileName(string destinationPath, Guid operationId)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(destinationPath);
+        var baseName = Path.GetFileNameWithoutExtension(destinationPath);
+        if (baseName.Length > MaximumStagingBaseNameLength)
+        {
+            var length = MaximumStagingBaseNameLength;
+            if (char.IsHighSurrogate(baseName[length - 1]) && char.IsLowSurrogate(baseName[length]))
+            {
+                length--;
+            }
+
+            baseName = baseName[..length];
+        }
+
+        return $"{baseName}.cutflow-{operationId:N}.mp4";
+    }
+
     internal static Task CommitAsync(
         string stagingPath,
         string destinationPath,
@@ -178,6 +243,19 @@ public sealed class ExportService
 
     internal static ProjectDocument CreateProjectSnapshot(ProjectDocument project) =>
         ProjectDocumentCloner.Clone(project);
+
+    private static ExportResult SourceMediaConflict(string destinationPath) =>
+        new(
+            ExportResultStatus.ValidationFailed,
+            destinationPath,
+            "Choose a different output file. Export cannot overwrite source media used by this project.");
+
+    private static bool IsSourceMediaPath(
+        ProjectDocument project,
+        ProjectDocument sourceGuardProject,
+        string destinationPath) =>
+        IsSourceMediaPath(project, destinationPath) ||
+        (!ReferenceEquals(project, sourceGuardProject) && IsSourceMediaPath(sourceGuardProject, destinationPath));
 
     private static bool IsSourceMediaPath(ProjectDocument project, string destinationPath)
     {
@@ -236,6 +314,10 @@ public sealed record ExportResult(
 
 public static class ExportPreflight
 {
+    private const int MaximumReportedMissingAssets = 3;
+    private const int MaximumMissingAssetNameLength = 96;
+    private const int MaximumMissingAssetPathLength = 120;
+
     public static ExportPreflightResult Validate(ProjectDocument project)
     {
         ArgumentNullException.ThrowIfNull(project);
@@ -292,18 +374,22 @@ public static class ExportPreflight
         }
 
         var assets = project.Assets.ToDictionary(asset => asset.Id);
-        var missing = new List<string>();
-        var missingNames = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-        var referencedAssetIds = project.VideoItems
-            .Where(item => item.DurationMilliseconds > 0)
-            .Select(item => item.AssetId)
+        var missingAssets = new List<(Guid Id, ProjectAsset? Asset, string Name)>();
+        var referencedVideoAssetIds = project.Settings.VideoTrackVisible
+            ? project.VideoItems
+                .Where(item => item.DurationMilliseconds > 0)
+                .Select(item => item.AssetId)
+            : Enumerable.Empty<Guid>();
+        var referencedAssetIds = referencedVideoAssetIds
             .Concat(project.AudioItems
                 .Where(item => item.DurationMilliseconds > 0)
-                .Select(item => item.AssetId))
-            .Distinct();
+                .Select(item => item.AssetId));
+        var seenAssetIds = new HashSet<Guid>();
         foreach (var assetId in referencedAssetIds)
         {
             cancellationToken.ThrowIfCancellationRequested();
+            if (!seenAssetIds.Add(assetId)) continue;
+
             assets.TryGetValue(assetId, out var asset);
             var exists = asset is not null && sourceIsCurrent(asset);
             if (asset is not null && refreshMissingFlags)
@@ -312,13 +398,95 @@ public static class ExportPreflight
             }
 
             if (exists) continue;
-            var name = string.IsNullOrWhiteSpace(asset?.FileName) ? $"Unknown asset {assetId:D}" : asset.FileName;
+            missingAssets.Add((assetId, asset, MissingAssetName(asset, assetId)));
+        }
+
+        var sharedNames = missingAssets
+            .GroupBy(item => item.Name, StringComparer.OrdinalIgnoreCase)
+            .Where(group => group.Count() > 1)
+            .Select(group => group.Key)
+            .ToHashSet(StringComparer.OrdinalIgnoreCase);
+        var missing = new List<string>();
+        var missingNames = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        foreach (var item in missingAssets)
+        {
+            var name = sharedNames.Contains(item.Name) && item.Asset is not null
+                ? $"{item.Name} ({MissingAssetPath(item.Asset, item.Id)})"
+                : item.Name;
             if (missingNames.Add(name)) missing.Add(name);
         }
 
         return missing.Count == 0
             ? new ExportPreflightResult(true, string.Empty, [])
-            : new ExportPreflightResult(false, $"Missing or changed export media: {string.Join(", ", missing)}", missing);
+            : new ExportPreflightResult(false, MissingMediaMessage(missing), missing);
+    }
+
+    private static string MissingAssetName(ProjectAsset? asset, Guid assetId)
+    {
+        var name = asset?.FileName;
+        if (string.IsNullOrWhiteSpace(name))
+        {
+            return $"Unknown asset {assetId:D}";
+        }
+
+        return TruncateEnd(NormalizeDisplayText(name), MaximumMissingAssetNameLength);
+    }
+
+    private static string MissingAssetPath(ProjectAsset asset, Guid assetId)
+    {
+        if (string.IsNullOrWhiteSpace(asset.SourcePath))
+        {
+            return $"asset {assetId:D}";
+        }
+
+        return TruncateMiddle(NormalizeDisplayText(asset.SourcePath), MaximumMissingAssetPathLength);
+    }
+
+    private static string MissingMediaMessage(IReadOnlyList<string> missing)
+    {
+        var visible = string.Join(", ", missing.Take(MaximumReportedMissingAssets));
+        if (missing.Count > MaximumReportedMissingAssets)
+        {
+            visible += $", and {missing.Count - MaximumReportedMissingAssets} more";
+        }
+
+        return $"Missing or changed export media: {visible}. Relink the listed files before exporting.";
+    }
+
+    private static string NormalizeDisplayText(string value) =>
+        string.Join(' ', value.Split((char[]?)null, StringSplitOptions.RemoveEmptyEntries));
+
+    private static string TruncateEnd(string value, int maximumLength)
+    {
+        if (value.Length <= maximumLength) return value;
+
+        var length = maximumLength;
+        if (char.IsHighSurrogate(value[length - 1]) && char.IsLowSurrogate(value[length]))
+        {
+            length--;
+        }
+
+        return value[..length].TrimEnd();
+    }
+
+    private static string TruncateMiddle(string value, int maximumLength)
+    {
+        if (value.Length <= maximumLength) return value;
+
+        var prefixLength = (maximumLength - 1) / 2;
+        if (char.IsHighSurrogate(value[prefixLength - 1]) && char.IsLowSurrogate(value[prefixLength]))
+        {
+            prefixLength--;
+        }
+
+        var suffixLength = maximumLength - prefixLength - 1;
+        var suffixStart = value.Length - suffixLength;
+        if (char.IsLowSurrogate(value[suffixStart]) && char.IsHighSurrogate(value[suffixStart - 1]))
+        {
+            suffixStart++;
+        }
+
+        return $"{value[..prefixLength]}…{value[suffixStart..]}";
     }
 }
 

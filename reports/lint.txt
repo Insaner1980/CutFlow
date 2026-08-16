@@ -1,34 +1,34 @@
 dotnet format
 Root: C:\Dev\CutFlow
 Command: dotnet format CutFlow.slnx --verify-no-changes --verbosity diagnostic
-Started: 2026-08-13 01.42.36
+Started: 2026-08-16 12.59.33
 
-The dotnet runtime version is '10.0.10'.
+The dotnet runtime version is '10.0.11'.
 Formatting code files in workspace 'C:\Dev\CutFlow\CutFlow.slnx'.
 Loading workspace.
   Determining projects to restore...
   All projects are up-to-date for restore.
 Project CutFlow is using configuration from 'C:\Dev\CutFlow\src\CutFlow\obj\x64\Debug\net10.0-windows10.0.26100.0\CutFlow.GeneratedMSBuildEditorConfig.editorconfig'.
 Project CutFlow is using configuration from 'C:\Program Files\dotnet\sdk\10.0.302\Sdks\Microsoft.NET.Sdk\analyzers\build\config\analysislevel_10_default.globalconfig'.
-Project CutFlow.Tests is using configuration from 'C:\Users\EmmaH\.nuget\packages\mstest.analyzers\3.8.3\globalconfigs\mstest-default.globalconfig'.
+Project CutFlow.Tests is using configuration from 'C:\Users\EmmaH\.nuget\packages\mstest.analyzers\4.3.3\globalconfigs\mstest-default.globalconfig'.
 Project CutFlow.Tests is using configuration from 'C:\Dev\CutFlow\tests\CutFlow.Tests\obj\x64\Debug\net10.0-windows10.0.26100.0\CutFlow.Tests.GeneratedMSBuildEditorConfig.editorconfig'.
 Project CutFlow.Tests is using configuration from 'C:\Program Files\dotnet\sdk\10.0.302\Sdks\Microsoft.NET.Sdk\analyzers\build\config\analysislevel_10_default.globalconfig'.
-Complete in 8877ms.
+Complete in 4547ms.
 Determining formattable files.
-Complete in 723ms.
+Complete in 395ms.
 Running formatters.
 Running Code Style analysis.
 Determining diagnostics...
 Running 5 analyzers on CutFlow.
 Running 5 analyzers on CutFlow.Tests.
-Complete in 11507ms.
-Analysis complete in 11507ms.
+Complete in 5835ms.
+Analysis complete in 5835ms.
 Running Analyzer Reference analysis.
 Determining diagnostics...
 Running 155 analyzers on CutFlow.
-Running 173 analyzers on CutFlow.Tests.
-Complete in 2491ms.
-Analysis complete in 2491ms.
-Complete in 15239ms.
-Formatted 0 of 118 files.
-Format complete in 24840ms.
+Running 197 analyzers on CutFlow.Tests.
+Complete in 1688ms.
+Analysis complete in 1688ms.
+Complete in 8103ms.
+Formatted 0 of 120 files.
+Format complete in 13045ms.

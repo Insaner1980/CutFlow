@@ -2,6 +2,8 @@ namespace CutFlow.Utilities;
 
 public sealed class TimelineScale
 {
+    private const double WheelDeltaPerStep = 120d;
+    private const double WheelZoomFactor = 1.12d;
     public const double MinimumPixelsPerSecond = 20;
     public const double MaximumPixelsPerSecond = 400;
     private const double MinimumRulerIntervalPixels = 80;
@@ -142,7 +144,7 @@ public sealed class TimelineScale
             return current;
         }
 
-        var target = current * (wheelDelta > 0 ? 1.12d : 1d / 1.12d);
+        var target = current * Math.Pow(WheelZoomFactor, wheelDelta / WheelDeltaPerStep);
         return Math.Clamp(target, MinimumPixelsPerSecond, MaximumPixelsPerSecond);
     }
 
@@ -177,15 +179,20 @@ public enum TimelineCardHit
 
 public static class TimelineCardHitTest
 {
+    private const double MinimumBodyHitWidth = 1;
+
     public static TimelineCardHit Resolve(double localX, double hitWidth, double trimHitWidth)
     {
-        var edgeWidth = Math.Min(Math.Max(0, trimHitWidth), Math.Max(0, hitWidth) / 2);
+        var width = Math.Max(0, hitWidth);
+        var edgeWidth = Math.Min(
+            Math.Max(0, trimHitWidth),
+            Math.Max(0, (width - MinimumBodyHitWidth) / 2));
         if (localX <= edgeWidth)
         {
             return TimelineCardHit.Start;
         }
 
-        return localX >= hitWidth - edgeWidth
+        return localX >= width - edgeWidth
             ? TimelineCardHit.End
             : TimelineCardHit.Body;
     }

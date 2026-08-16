@@ -11,6 +11,7 @@ using Microsoft.UI.Xaml.Input;
 using Microsoft.UI.Xaml.Media.Imaging;
 using Windows.ApplicationModel.DataTransfer;
 using Windows.Storage;
+using Windows.System;
 
 namespace CutFlow.Controls;
 
@@ -315,13 +316,21 @@ public sealed partial class MediaPanel : UserControl, IDisposable
     {
         var card = FindCard(e.OriginalSource as DependencyObject) ??
             FindCard(FocusManager.GetFocusedElement(XamlRoot) as DependencyObject);
-        if (card is null || !CanUseAsset(card.AssetId) || !MediaAssetActivationPolicy.ShouldActivate(e.Key, card.CanAdd))
+        if (card is null || !CanUseAsset(card.AssetId) || e.Key is not VirtualKey.Enter and not VirtualKey.Space)
         {
             return;
         }
 
-        AddAssetRequested?.Invoke(this, new AssetActionEventArgs(card.AssetId));
         e.Handled = true;
+        if (e.KeyStatus.WasKeyDown)
+        {
+            return;
+        }
+
+        if (MediaAssetActivationPolicy.ShouldActivate(e.Key, card.CanAdd))
+        {
+            AddAssetRequested?.Invoke(this, new AssetActionEventArgs(card.AssetId));
+        }
     }
 
     private void AssetCard_DragStarting(UIElement sender, DragStartingEventArgs e)

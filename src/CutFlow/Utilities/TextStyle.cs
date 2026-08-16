@@ -8,6 +8,12 @@ namespace CutFlow.Utilities;
 
 public static class TextStyle
 {
+    internal const double MaximumTextWidthFraction = 0.9;
+    internal const double BackgroundHorizontalPadding = 18;
+    internal const double BackgroundVerticalPadding = 8;
+    internal const double DisabledBackgroundPadding = 0;
+    internal const TextWrapping WrappingMode = TextWrapping.Wrap;
+
     private static readonly IReadOnlyList<string> FontFamilies = Array.AsReadOnly(
         new[] { "Segoe UI", "Arial", "Georgia", "Consolas", "Impact" });
 
@@ -87,11 +93,19 @@ public static class TextStyle
         textBlock.Foreground = ParseBrush(item.TextColor, TextTimelineItem.DefaultTextColor);
         textBlock.Opacity = ClampOpacity(item.Opacity);
         textBlock.TextAlignment = ResolveAlignment(item);
-        textBlock.TextWrapping = TextWrapping.Wrap;
+        textBlock.TextWrapping = WrappingMode;
         textBlock.MaxWidth = Math.Max(1, maxWidth);
     }
 
-    internal static void ApplyContainerStyle(Border container, TextTimelineItem item, Thickness disabledPadding)
+    internal static Thickness ResolveContainerPadding(TextTimelineItem item)
+    {
+        ArgumentNullException.ThrowIfNull(item);
+        return item.BackgroundEnabled
+            ? new Thickness(BackgroundHorizontalPadding, BackgroundVerticalPadding, BackgroundHorizontalPadding, BackgroundVerticalPadding)
+            : new Thickness(DisabledBackgroundPadding);
+    }
+
+    internal static void ApplyContainerStyle(Border container, TextTimelineItem item)
     {
         ArgumentNullException.ThrowIfNull(container);
         ArgumentNullException.ThrowIfNull(item);
@@ -100,7 +114,7 @@ public static class TextStyle
             ResolveBackgroundColor(item),
             TextTimelineItem.DefaultBackgroundColor,
             item.BackgroundEnabled ? ClampOpacity(item.Opacity) : 1);
-        container.Padding = item.BackgroundEnabled ? new Thickness(18, 8, 18, 8) : disabledPadding;
+        container.Padding = ResolveContainerPadding(item);
     }
 
     internal static SolidColorBrush ParseBrush(string? value, string fallback, double opacity = 1)

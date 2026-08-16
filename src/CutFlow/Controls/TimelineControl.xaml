@@ -47,9 +47,9 @@
                 <FontIcon FontSize="13" Glyph="&#xE7A6;" />
                 <ToolTipService.ToolTip><ToolTip Content="Redo (Ctrl+Y)" /></ToolTipService.ToolTip>
             </Button>
-            <ToggleButton x:Name="SnappingButton" Grid.Column="5" Width="34" Height="30" IsChecked="True" Checked="SnappingButton_Changed" Unchecked="SnappingButton_Changed" AutomationProperties.Name="Timeline snapping">
+            <ToggleButton x:Name="SnappingButton" Grid.Column="5" Width="34" Height="30" IsChecked="True" Checked="SnappingButton_Changed" Unchecked="SnappingButton_Changed" AutomationProperties.Name="Disable timeline snapping">
                 <FontIcon FontSize="13" Glyph="&#xE8D5;" />
-                <ToolTipService.ToolTip><ToolTip Content="Toggle 100 ms and edge snapping" /></ToolTipService.ToolTip>
+                <ToolTipService.ToolTip><ToolTip Content="Disable 100 ms and edge snapping" /></ToolTipService.ToolTip>
             </ToggleButton>
             <TextBlock Grid.Column="7" Margin="10,0,0,0" VerticalAlignment="Center" Style="{StaticResource CaptionTextBlockStyle}" x:Name="TimelineTimecode" Text="00:00:00:00 / 00:00:00:00" />
             <Button Grid.Column="8" Click="ZoomOutButton_Click" Style="{StaticResource IconButtonStyle}" AutomationProperties.Name="Zoom out timeline">
@@ -143,7 +143,8 @@
                     AllowDrop="True"
                     Background="{StaticResource ChromeBackgroundBrush}"
                     DragOver="TimelineContent_DragOver"
-                    Drop="TimelineContent_Drop">
+                    Drop="TimelineContent_Drop"
+                    PointerWheelChanged="TimelineContent_PointerWheelChanged">
                     <Grid.RowDefinitions>
                         <RowDefinition Height="30" />
                         <RowDefinition Height="64" />

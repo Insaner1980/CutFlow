@@ -1,8 +1,10 @@
 using System.Runtime.InteropServices;
+using CutFlow.Models;
 using CutFlow.Services;
 using CutFlow.Utilities;
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Automation;
+using Microsoft.UI.Xaml.Automation.Peers;
 using Microsoft.UI.Xaml.Controls;
 using Windows.System;
 
@@ -47,6 +49,7 @@ public sealed partial class EditorView
                 return;
             }
 
+            var savedProjectSnapshot = ExportService.CreateProjectSnapshot(ViewModel.Project);
             var selection = await ShowExportDialogAsync();
             if (selection is null || !CanContinueExport(operationId))
             {
@@ -88,7 +91,7 @@ public sealed partial class EditorView
                 return;
             }
 
-            var operation = RunExportAsync(destinationPath, selection.Options);
+            var operation = RunExportAsync(savedProjectSnapshot, destinationPath, selection.Options);
             _activeExportTask = operation;
             try
             {
@@ -147,7 +150,10 @@ public sealed partial class EditorView
         }
     }
 
-    private async Task RunExportAsync(string destinationPath, ExportOptions options)
+    private async Task RunExportAsync(
+        ProjectDocument projectSnapshot,
+        string destinationPath,
+        ExportOptions options)
     {
         using var cancellation = CancellationTokenSource.CreateLinkedTokenSource(_lifetimeToken);
         _exportCts = cancellation;
@@ -157,6 +163,7 @@ public sealed partial class EditorView
             var progress = new Progress<double>(value => UpdateExportProgress(value, cancellation));
             var service = new ExportService(_compositionService, _textOverlayRenderer, _logService);
             var result = await service.ExportToPathAsync(
+                projectSnapshot,
                 ViewModel.Project,
                 destinationPath,
                 options,
@@ -219,6 +226,14 @@ public sealed partial class EditorView
         };
         AutomationProperties.SetName(fileNameBox, "Output filename");
 
+        var validationText = new TextBlock
+        {
+            Foreground = (Microsoft.UI.Xaml.Media.Brush)Application.Current.Resources["ErrorBrush"],
+            TextWrapping = TextWrapping.Wrap,
+            Visibility = Visibility.Collapsed
+        };
+        AutomationProperties.SetLiveSetting(validationText, AutomationLiveSetting.Polite);
+
         var resolutionBox = new ComboBox
         {
             Header = "Resolution",
@@ -255,6 +270,7 @@ public sealed partial class EditorView
             Children =
             {
                 fileNameBox,
+                validationText,
                 new StackPanel
                 {
                     Spacing = 4,
@@ -295,16 +311,46 @@ public sealed partial class EditorView
             CloseButtonText = "Cancel",
             DefaultButton = ContentDialogButton.Primary
         };
+        ExportDialogSelection? selection = null;
+        dialog.Opened += (_, _) =>
+        {
+            fileNameBox.Focus(FocusState.Programmatic);
+            fileNameBox.SelectAll();
+        };
+        dialog.PrimaryButtonClick += (_, args) =>
+        {
+            validationText.Visibility = Visibility.Collapsed;
+            if (!ExportPresentation.TryValidateFileName(fileNameBox.Text, out var fileName))
+            {
+                fileNameBox.Text = fileName;
+                validationText.Text = "The filename was adjusted to a valid MP4 name. Review it, then choose the location again.";
+                validationText.Visibility = Visibility.Visible;
+                fileNameBox.Focus(FocusState.Programmatic);
+                fileNameBox.SelectAll();
+                args.Cancel = true;
+                return;
+            }
+
+            if (!ExportPresentation.TryCreateOptions(
+                    resolutionBox.SelectedIndex,
+                    qualityBox.SelectedIndex,
+                    out var options))
+            {
+                validationText.Text = "Choose a supported resolution and quality.";
+                validationText.Visibility = Visibility.Visible;
+                (resolutionBox.SelectedIndex is 0 or 1 ? qualityBox : resolutionBox).Focus(FocusState.Programmatic);
+                args.Cancel = true;
+                return;
+            }
+
+            selection = new ExportDialogSelection(fileName, options);
+        };
         if (await dialog.ShowAsync() != ContentDialogResult.Primary)
         {
             return null;
         }
 
-        return new ExportDialogSelection(
-            ExportPresentation.NormalizeSuggestedFileName(fileNameBox.Text),
-            new ExportOptions(
-                resolutionBox.SelectedIndex == 1 ? ExportResolutionTier.FullHd1080p : ExportResolutionTier.Hd720p,
-                qualityBox.SelectedIndex == 1 ? ExportQuality.High : ExportQuality.Standard));
+        return selection;
     }
 
     private void ShowExportProgress(string fileName)

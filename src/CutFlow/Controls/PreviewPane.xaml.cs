@@ -1,11 +1,13 @@
 using CutFlow.Models;
 using CutFlow.Utilities;
 using CutFlow.ViewModels;
+using Microsoft.UI.Dispatching;
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Automation;
 using Microsoft.UI.Xaml.Controls;
 using Microsoft.UI.Xaml.Input;
 using Microsoft.UI.Xaml.Media;
+using Microsoft.UI.Xaml.Shapes;
 using Windows.Foundation;
 using Windows.Media.Core;
 using Windows.Media.Editing;
@@ -18,7 +20,7 @@ public sealed partial class PreviewPane : UserControl, IDisposable
     private const string ZeroTimecode = "00:00:00:00";
 
     private readonly MediaPlayer _player = new();
-    private readonly DispatcherTimer _positionTimer = new() { Interval = TimeSpan.FromMilliseconds(33) };
+    private readonly DispatcherQueueTimer _positionTimer;
     private readonly EventGenerationGate _playerEventGeneration = new();
     private readonly LiveTextRenderGate _liveTextRenderGate = new();
     private readonly PreviewPlaybackStateCoordinator _playbackState = new();
@@ -27,8 +29,9 @@ public sealed partial class PreviewPane : UserControl, IDisposable
     private ProjectDocument? _textProject;
     private EditorSelection _textSelection = EditorSelection.None;
     private long _textPositionMilliseconds;
-    private Border? _dragTextElement;
+    private FrameworkElement? _dragTextElement;
     private Guid _dragTextId;
+    private Pointer? _dragPointer;
     private uint _dragPointerId;
     private string _currentTimecode = ZeroTimecode;
     private string _totalTimecode = ZeroTimecode;
@@ -40,6 +43,9 @@ public sealed partial class PreviewPane : UserControl, IDisposable
     public PreviewPane()
     {
         InitializeComponent();
+        _positionTimer = DispatcherQueue.CreateTimer();
+        _positionTimer.Interval = TimeSpan.FromMilliseconds(33);
+        _positionTimer.IsRepeating = true;
         PlayerElement.SetMediaPlayer(_player);
         _positionTimer.Tick += PositionTimer_Tick;
         AttachPlayerEvents();
@@ -101,35 +107,54 @@ public sealed partial class PreviewPane : UserControl, IDisposable
             var swapPositionMilliseconds = oldSource is not null
                 ? PositionMilliseconds
                 : preservedPositionMilliseconds;
-            _playerEventGeneration.Advance();
-            DetachPlayerEvents();
-            _player.Pause();
-            _player.Source = null;
-            _source = null;
-            oldSource?.Dispose();
-            _composition = composition;
-            SetDuration(hasContent && composition is not null
-                ? (long)composition.Duration.TotalMilliseconds
-                : 0);
-            _playbackState.SetIntent(hasContent && resumePlayback);
-            ApplyActualPlaybackState(isPlaying: false);
-            AttachPlayerEvents();
+            RunSuccessfulSourceSwap(
+                () => _playerEventGeneration.Advance(),
+                DetachPlayerEvents,
+                () => _player.Pause(),
+                () =>
+                {
+                    _player.Source = null;
+                    _source = null;
+                },
+                () => oldSource?.Dispose(),
+                () =>
+                {
+                    _composition = composition;
+                    SetDuration(hasContent && composition is not null
+                        ? (long)composition.Duration.TotalMilliseconds
+                        : 0);
+                    if (!hasContent || composition is null || preparedSource is null)
+                    {
+                        SetCanPlay(false);
+                        EmptyState.Visibility = Visibility.Visible;
+                        return;
+                    }
 
-            if (!hasContent || composition is null || preparedSource is null)
-            {
-                SetCanPlay(false);
-                EmptyState.Visibility = Visibility.Visible;
-                return;
-            }
+                    _player.Source = preparedSource;
+                    _source = preparedSource;
+                    SetCanPlay(true);
+                    EmptyState.Visibility = hasVisualContent ? Visibility.Collapsed : Visibility.Visible;
+                },
+                () =>
+                {
+                    if (hasContent && composition is not null)
+                    {
+                        _player.PlaybackSession.Position = TimeSpan.FromMilliseconds(
+                            PreviewPlaybackPolicy.GetRebuildStartPosition(
+                                swapPositionMilliseconds,
+                                (long)composition.Duration.TotalMilliseconds,
+                                resumePlayback));
+                    }
 
-            _player.Source = preparedSource;
-            _player.PlaybackSession.Position = TimeSpan.FromMilliseconds(
-                TimelinePlaybackMath.ClampPosition(swapPositionMilliseconds, (long)composition.Duration.TotalMilliseconds));
-            _source = preparedSource;
-            SetCanPlay(true);
-            EmptyState.Visibility = hasVisualContent ? Visibility.Collapsed : Visibility.Visible;
-            if (_playbackState.PlayIntent) _player.Play();
-            sourceTransferred = true;
+                    _playbackState.SetIntent(hasContent && resumePlayback);
+                    ApplyActualPlaybackState(isPlaying: false);
+                },
+                AttachPlayerEvents,
+                () =>
+                {
+                    if (_playbackState.PlayIntent) _player.Play();
+                });
+            sourceTransferred = preparedSource is not null && ReferenceEquals(_source, preparedSource);
         }
         catch
         {
@@ -160,6 +185,28 @@ public sealed partial class PreviewPane : UserControl, IDisposable
         {
             if (!sourceTransferred) preparedSource?.Dispose();
         }
+    }
+
+    internal static void RunSuccessfulSourceSwap(
+        Action invalidateGeneration,
+        Action detachEvents,
+        Action pause,
+        Action clearSourceAndState,
+        Action disposeOldSource,
+        Action installNewSourceAndState,
+        Action restorePositionAndIntent,
+        Action attachEvents,
+        Action resumePlayback)
+    {
+        invalidateGeneration();
+        detachEvents();
+        pause();
+        clearSourceAndState();
+        disposeOldSource();
+        installNewSourceAndState();
+        restorePositionAndIntent();
+        attachEvents();
+        resumePlayback();
     }
 
     internal static void RunFailedSourceSwapCleanup(
@@ -212,7 +259,14 @@ public sealed partial class PreviewPane : UserControl, IDisposable
         }
         else
         {
-            if (_composition is not null && PositionMilliseconds >= (long)_composition.Duration.TotalMilliseconds - 1) Seek(0);
+            if (_composition is not null &&
+                PreviewPlaybackPolicy.ShouldRestartForPlay(
+                    _player.PlaybackSession.Position,
+                    _composition.Duration))
+            {
+                _player.PlaybackSession.Position = TimeSpan.Zero;
+            }
+
             _player.Play();
         }
     }
@@ -221,6 +275,9 @@ public sealed partial class PreviewPane : UserControl, IDisposable
     {
         _player.IsMuted = isMuted;
         MuteButton.IsChecked = isMuted;
+        var name = isMuted ? "Unmute preview" : "Mute preview";
+        AutomationProperties.SetName(MuteButton, name);
+        ToolTipService.SetToolTip(MuteButton, name);
     }
 
     public void Loop(bool loop)
@@ -233,6 +290,7 @@ public sealed partial class PreviewPane : UserControl, IDisposable
 
     public void SetCanPlay(bool canPlay)
     {
+        var wasCanPlay = _canPlay;
         _canPlay = canPlay;
         if (!canPlay) _playbackState.SetIntent(false);
         PlayButton.IsEnabled = canPlay;
@@ -240,12 +298,7 @@ public sealed partial class PreviewPane : UserControl, IDisposable
         NextFrameButton.IsEnabled = canPlay;
         MuteButton.IsEnabled = canPlay;
         LoopButton.IsEnabled = canPlay;
-        if (!canPlay) SetPlaying(false);
-        else
-        {
-            PlayToolTip.Content = "Play";
-            AutomationProperties.SetName(PlayButton, "Play preview");
-        }
+        if (!canPlay || !wasCanPlay) SetPlaying(false);
     }
 
     public void SetPlaying(bool isPlaying)
@@ -261,6 +314,12 @@ public sealed partial class PreviewPane : UserControl, IDisposable
 
     public void SetTextItems(ProjectDocument project, EditorSelection selection, long positionMilliseconds)
     {
+        if (_dragTextElement is not null &&
+            (!ReferenceEquals(_textProject, project) || _textSelection != selection))
+        {
+            CancelTextDrag(render: false);
+        }
+
         _textProject = project ?? throw new ArgumentNullException(nameof(project));
         _textSelection = selection;
         _textPositionMilliseconds = Math.Max(0, positionMilliseconds);
@@ -271,6 +330,7 @@ public sealed partial class PreviewPane : UserControl, IDisposable
     {
         if (_disposed) return;
         _disposed = true;
+        CancelTextDrag(render: false);
         _positionTimer.Stop();
         _positionTimer.Tick -= PositionTimer_Tick;
         _playerEventGeneration.Advance();
@@ -290,6 +350,8 @@ public sealed partial class PreviewPane : UserControl, IDisposable
             _composition = null;
             _textProject = null;
             _dragTextElement = null;
+            _dragPointer = null;
+            _dragPointerId = 0;
             TextOverlayCanvas.Children.Clear();
         }
     }
@@ -340,10 +402,11 @@ public sealed partial class PreviewPane : UserControl, IDisposable
             if (_disposed) return;
             _playerEventGeneration.TryRun(generation, () =>
             {
-                if (PreviewPlaybackPolicy.ShouldRestartAtEnd(LoopButton.IsChecked == true))
+                if (PreviewPlaybackPolicy.ShouldRestartAtEnd(LoopButton.IsChecked == true) &&
+                    _playbackState.PlayIntent)
                 {
-                    _playbackState.SetIntent(true);
                     sender.PlaybackSession.Position = TimeSpan.Zero;
+                    PlaybackPositionChanged?.Invoke(this, new PlayheadChangedEventArgs(0));
                     sender.Play();
                     return;
                 }
@@ -351,6 +414,7 @@ public sealed partial class PreviewPane : UserControl, IDisposable
                 _positionTimer.Stop();
                 _playbackState.SetIntent(false);
                 sender.Pause();
+                PlaybackPositionChanged?.Invoke(this, new PlayheadChangedEventArgs(PositionMilliseconds));
                 ApplyActualPlaybackState(isPlaying: false);
             });
         });
@@ -358,11 +422,14 @@ public sealed partial class PreviewPane : UserControl, IDisposable
 
     private void ApplyActualPlaybackState(bool isPlaying)
     {
-        if (isPlaying) _positionTimer.Start(); else _positionTimer.Stop();
-        SetPlaying(isPlaying);
         _playbackState.ReportActual(
             isPlaying,
-            playing => PlayPauseRequested?.Invoke(this, new PlaybackChangedEventArgs(playing)));
+            playing =>
+            {
+                if (playing) _positionTimer.Start(); else _positionTimer.Stop();
+                SetPlaying(playing);
+                PlayPauseRequested?.Invoke(this, new PlaybackChangedEventArgs(playing));
+            });
     }
 
     private void PositionTimer_Tick(object? sender, object e)
@@ -440,25 +507,34 @@ public sealed partial class PreviewPane : UserControl, IDisposable
             var selected = _textSelection is { Kind: EditorSelectionKind.TextItem, ItemId: Guid id } && id == item.Id;
             var text = new TextBlock();
             TextStyle.ApplyTextBlockStyle(text, item, PreviewSurface.Width * 0.9);
-            var border = new Border
+            var content = new Border
             {
-                Tag = item.Id,
-                BorderBrush = selected ? (Brush)Application.Current.Resources["AccentBrush"] : new SolidColorBrush(Microsoft.UI.Colors.Transparent),
-                BorderThickness = new Thickness(selected ? 2 : 0),
                 Child = text
             };
-            TextStyle.ApplyContainerStyle(border, item, new Thickness(2, 8, 2, 8));
-            border.Measure(new Windows.Foundation.Size(PreviewSurface.Width * 0.9, PreviewSurface.Height));
-            PositionText(border, item.NormalizedX, item.NormalizedY);
+            TextStyle.ApplyContainerStyle(content, item);
+            var visual = new Grid
+            {
+                Tag = item.Id,
+                Background = new SolidColorBrush(Microsoft.UI.Colors.Transparent)
+            };
+            visual.Children.Add(content);
             if (selected)
             {
-                border.PointerPressed += Text_PointerPressed;
-                border.PointerMoved += Text_PointerMoved;
-                border.PointerReleased += Text_PointerReleased;
-                border.PointerCanceled += Text_PointerCanceled;
-                border.PointerCaptureLost += Text_PointerCaptureLost;
+                visual.Children.Add(new Rectangle
+                {
+                    Stroke = (Brush)Application.Current.Resources["AccentBrush"],
+                    StrokeThickness = 2,
+                    IsHitTestVisible = false
+                });
+                visual.PointerPressed += Text_PointerPressed;
+                visual.PointerMoved += Text_PointerMoved;
+                visual.PointerReleased += Text_PointerReleased;
+                visual.PointerCanceled += Text_PointerCanceled;
+                visual.PointerCaptureLost += Text_PointerCaptureLost;
             }
-            TextOverlayCanvas.Children.Add(border);
+            visual.Measure(new Windows.Foundation.Size(PreviewSurface.Width * 0.9, PreviewSurface.Height));
+            PositionText(visual, item.NormalizedX, item.NormalizedY);
+            TextOverlayCanvas.Children.Add(visual);
         }
     }
 
@@ -472,10 +548,12 @@ public sealed partial class PreviewPane : UserControl, IDisposable
     {
         if (_disposed ||
             _dragTextElement is not null ||
-            sender is not Border { Tag: Guid itemId } border ||
-            !border.CapturePointer(e.Pointer)) return;
-        _dragTextElement = border;
+            sender is not Grid { Tag: Guid itemId } visual ||
+            !e.GetCurrentPoint(visual).Properties.IsLeftButtonPressed ||
+            !visual.CapturePointer(e.Pointer)) return;
+        _dragTextElement = visual;
         _dragTextId = itemId;
+        _dragPointer = e.Pointer;
         _dragPointerId = e.Pointer.PointerId;
         e.Handled = true;
     }
@@ -517,18 +595,40 @@ public sealed partial class PreviewPane : UserControl, IDisposable
         if (_dragTextElement is null || e.Pointer.PointerId != _dragPointerId) return;
         _dragTextElement = null;
         _dragTextId = Guid.Empty;
+        _dragPointer = null;
         _dragPointerId = 0;
         _liveTextRenderGate.MarkVisualDirty();
         RenderLiveText();
         e.Handled = true;
     }
 
-    private void ClearTextDrag(Border element, Pointer pointer)
+    private void ClearTextDrag(FrameworkElement element, Pointer pointer)
     {
         _dragTextElement = null;
         _dragTextId = Guid.Empty;
+        _dragPointer = null;
         _dragPointerId = 0;
         element.ReleasePointerCapture(pointer);
+    }
+
+    private void CancelTextDrag(bool render)
+    {
+        var element = _dragTextElement;
+        var pointer = _dragPointer;
+        _dragTextElement = null;
+        _dragTextId = Guid.Empty;
+        _dragPointer = null;
+        _dragPointerId = 0;
+        if (element is not null && pointer is not null)
+        {
+            element.ReleasePointerCapture(pointer);
+        }
+
+        _liveTextRenderGate.MarkVisualDirty();
+        if (render)
+        {
+            RenderLiveText();
+        }
     }
 
     private void ImportButton_Click(object sender, RoutedEventArgs e)

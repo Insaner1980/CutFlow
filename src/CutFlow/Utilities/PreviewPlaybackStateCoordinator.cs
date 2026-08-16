@@ -18,7 +18,7 @@ internal sealed class PreviewPlaybackStateCoordinator
     public bool ReportActual(bool isPlaying, Action<bool> report)
     {
         ArgumentNullException.ThrowIfNull(report);
-        if (_lastReportedActualState == isPlaying)
+        if (_playIntent != isPlaying || _lastReportedActualState == isPlaying)
         {
             return false;
         }

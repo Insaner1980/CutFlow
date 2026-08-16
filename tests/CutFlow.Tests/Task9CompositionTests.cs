@@ -61,6 +61,32 @@ public sealed class Task9CompositionTests
     }
 
     [TestMethod]
+    public void CreatePlan_CompatibilityFadesRemainOutsidePreviewAndExportContract()
+    {
+        var project = ProjectDocument.CreateNew("Compatibility fades", DateTimeOffset.UnixEpoch);
+        var audio = Asset(ProjectAssetKind.Audio, "audio.wav", 2_000);
+        project.Assets.Add(audio);
+        project.AudioItems.Add(new AudioTimelineItem
+        {
+            Id = Guid.NewGuid(),
+            AssetId = audio.Id,
+            StartMilliseconds = 250,
+            SourceInMilliseconds = 100,
+            SourceOutMilliseconds = 1_100,
+            Volume = 0.4,
+            FadeInMilliseconds = 600,
+            FadeOutMilliseconds = 650
+        });
+
+        var withCompatibilityFades = CompositionPlan.Create(project).AudioTracks.Single();
+        project.AudioItems[0].FadeInMilliseconds = 0;
+        project.AudioItems[0].FadeOutMilliseconds = 0;
+        var withoutCompatibilityFades = CompositionPlan.Create(project).AudioTracks.Single();
+
+        Assert.AreEqual(withoutCompatibilityFades, withCompatibilityFades);
+    }
+
+    [TestMethod]
     public void CreatePlan_MissingVisualUsesSameDurationFillerAndNamesError()
     {
         var project = ProjectDocument.CreateNew("Missing", DateTimeOffset.UnixEpoch);
@@ -88,6 +114,69 @@ public sealed class Task9CompositionTests
         CollectionAssert.AreEqual(new long[] { 4_000, 2_000 }, plan.Visuals.Select(visual => visual.DurationMilliseconds).ToArray());
         Assert.IsTrue(plan.Errors.Any(error => error.Contains("gone.mp4", StringComparison.Ordinal)));
         Assert.IsTrue(plan.Errors.Any(error => error.Contains("Unknown visual", StringComparison.Ordinal)));
+    }
+
+    [TestMethod]
+    public void CreatePlan_VisualFallbackErrorUsesBoundedSingleLineAssetName()
+    {
+        var project = ProjectDocument.CreateNew("Readable error", DateTimeOffset.UnixEpoch);
+        var missing = Asset(ProjectAssetKind.Image, $"{new string('x', 400)}\r\nraw detail.jpg", 500);
+        missing.IsMissing = true;
+        project.Assets.Add(missing);
+        project.VideoItems.Add(new VideoTimelineItem
+        {
+            Id = Guid.NewGuid(),
+            AssetId = missing.Id,
+            DurationMilliseconds = 500
+        });
+
+        var error = CompositionPlan.Create(project).Errors.Single();
+
+        Assert.IsFalse(error.Contains('\r'));
+        Assert.IsFalse(error.Contains('\n'));
+        Assert.IsLessThanOrEqualTo(200, error.Length);
+        StringAssert.Contains(error, "replaced with black video");
+    }
+
+    [TestMethod]
+    public void PreviewErrors_SurfaceFirstThreeDistinctMeaningfulFailures()
+    {
+        var errors = CompositionBuildResult.SelectPreviewErrors(
+        [
+            "  First failure.  ",
+            "First failure.",
+            "\r\n",
+            "Second\r\nfailure.",
+            "Third failure.",
+            "Fourth failure."
+        ]);
+
+        CollectionAssert.AreEqual(
+            new[] { "First failure.", "Second failure.", "Third failure." },
+            errors.ToArray());
+    }
+
+    [TestMethod]
+    public void CreatePlan_HiddenMissingVisualKeepsDurationWithoutReportingAnUnavailableItem()
+    {
+        var project = ProjectDocument.CreateNew("Hidden missing visual", DateTimeOffset.UnixEpoch);
+        project.Settings.VideoTrackVisible = false;
+        var missing = Asset(ProjectAssetKind.Video, "hidden.mp4", 1_000);
+        missing.IsMissing = true;
+        project.Assets.Add(missing);
+        project.VideoItems.Add(new VideoTimelineItem
+        {
+            Id = Guid.NewGuid(),
+            AssetId = missing.Id,
+            SourceOutMilliseconds = 1_000,
+            DurationMilliseconds = 1_000
+        });
+
+        var plan = CompositionPlan.Create(project);
+
+        Assert.HasCount(1, plan.Visuals);
+        Assert.AreEqual(CompositionVisualKind.Filler, plan.Visuals.Single().Kind);
+        Assert.HasCount(0, plan.Errors);
     }
 
     [TestMethod]
@@ -279,8 +368,12 @@ public sealed class Task9CompositionTests
         Assert.AreEqual(5_000L, TimelinePlaybackMath.ClampPosition(7_000, 5_000));
         Assert.AreEqual(2_500L, TimelinePlaybackMath.ClampPosition(2_500, 5_000));
         Assert.AreEqual(200d, TimelinePlaybackMath.EnsureVisibleOffset(450, 200, 500, 1_200));
+        Assert.AreEqual(200d, TimelinePlaybackMath.EnsureVisibleOffset(200, 200, 500, 1_200));
+        Assert.AreEqual(200d, TimelinePlaybackMath.EnsureVisibleOffset(700, 200, 500, 1_200));
         Assert.AreEqual(520d, TimelinePlaybackMath.EnsureVisibleOffset(1_020, 200, 500, 1_200));
         Assert.AreEqual(100d, TimelinePlaybackMath.EnsureVisibleOffset(100, 200, 500, 1_200));
+        Assert.AreEqual(700d, TimelinePlaybackMath.EnsureVisibleOffset(5_000, 200, 500, 1_200));
+        Assert.AreEqual(0d, TimelinePlaybackMath.EnsureVisibleOffset(5_000, 200, 1_500, 1_200));
     }
 
     [TestMethod]
@@ -306,22 +399,24 @@ public sealed class Task9CompositionTests
     }
 
     [TestMethod]
-    public async Task BuildPreviewAsync_InaccessibleAndNativeFailedVisualsUseSanitizedSameDurationFillers()
+    public async Task BuildPreviewAsync_UnreadableImageAndVideoCodecFailureUseSameDurationFillers()
     {
         var fixtureDirectory = Path.Combine(Path.GetTempPath(), "CutFlow.Tests", Guid.NewGuid().ToString("N"));
         Directory.CreateDirectory(fixtureDirectory);
-        var brokenPath = Path.Combine(fixtureDirectory, "broken.mp4");
-        await File.WriteAllBytesAsync(brokenPath, [0x00, 0x01, 0x02, 0x03]);
+        var brokenImagePath = Path.Combine(fixtureDirectory, "broken.jpg");
+        var brokenVideoPath = Path.Combine(fixtureDirectory, "broken.mp4");
+        await File.WriteAllBytesAsync(brokenImagePath, [0x00, 0x01, 0x02, 0x03]);
+        await File.WriteAllBytesAsync(brokenVideoPath, [0x00, 0x01, 0x02, 0x03]);
 
         var mediaRoot = FindMediaRoot();
         var project = ProjectDocument.CreateNew("Failed visuals", DateTimeOffset.UnixEpoch);
         var image = Asset(ProjectAssetKind.Image, "valid-image.jpg", 5_000);
         image.SourcePath = Path.Combine(mediaRoot, image.FileName);
-        var inaccessible = Asset(ProjectAssetKind.Video, "inaccessible.mp4", 600);
-        inaccessible.SourcePath = Path.Combine(fixtureDirectory, inaccessible.FileName);
-        var broken = Asset(ProjectAssetKind.Video, "broken.mp4", 800);
-        broken.SourcePath = brokenPath;
-        project.Assets.AddRange([image, inaccessible, broken]);
+        var brokenImage = Asset(ProjectAssetKind.Image, "broken.jpg", 600);
+        brokenImage.SourcePath = brokenImagePath;
+        var brokenVideo = Asset(ProjectAssetKind.Video, "broken.mp4", 800);
+        brokenVideo.SourcePath = brokenVideoPath;
+        project.Assets.AddRange([image, brokenImage, brokenVideo]);
         project.VideoItems.Add(new VideoTimelineItem
         {
             Id = Guid.NewGuid(),
@@ -331,14 +426,13 @@ public sealed class Task9CompositionTests
         project.VideoItems.Add(new VideoTimelineItem
         {
             Id = Guid.NewGuid(),
-            AssetId = inaccessible.Id,
-            SourceOutMilliseconds = 600,
+            AssetId = brokenImage.Id,
             DurationMilliseconds = 600
         });
         project.VideoItems.Add(new VideoTimelineItem
         {
             Id = Guid.NewGuid(),
-            AssetId = broken.Id,
+            AssetId = brokenVideo.Id,
             SourceOutMilliseconds = 800,
             DurationMilliseconds = 800
         });
@@ -369,7 +463,7 @@ public sealed class Task9CompositionTests
             CollectionAssert.AreEquivalent(
                 new[]
                 {
-                    "'inaccessible.mp4' could not be loaded and was replaced with black video.",
+                    "'broken.jpg' could not be loaded and was replaced with black video.",
                     "'broken.mp4' could not be loaded and was replaced with black video."
                 },
                 result.Errors.ToArray());
@@ -378,6 +472,17 @@ public sealed class Task9CompositionTests
         {
             Directory.Delete(fixtureDirectory, recursive: true);
         }
+    }
+
+    [TestMethod]
+    public void VisualFailureBoundary_LeavesUnexpectedProgrammingDefectsUncaught()
+    {
+        Assert.IsTrue(MediaImportService.IsExpectedMediaFailure(new IOException()));
+        Assert.IsTrue(MediaImportService.IsExpectedMediaFailure(new InvalidDataException()));
+        Assert.IsTrue(MediaImportService.IsExpectedMediaFailure(new System.Runtime.InteropServices.COMException()));
+        Assert.IsFalse(MediaImportService.IsExpectedMediaFailure(new InvalidOperationException()));
+        Assert.IsFalse(MediaImportService.IsExpectedMediaFailure(new NullReferenceException()));
+        Assert.IsFalse(MediaImportService.IsExpectedMediaFailure(new OutOfMemoryException()));
     }
 
     [TestMethod]
@@ -433,6 +538,91 @@ public sealed class Task9CompositionTests
         Assert.AreEqual(700d, result.Composition.BackgroundAudioTracks[0].TrimmedDuration.TotalMilliseconds, 2);
         Assert.AreEqual(0.3, result.Composition.BackgroundAudioTracks[0].Volume);
         Assert.HasCount(0, result.Errors);
+    }
+
+    [TestMethod]
+    public async Task BuildAsync_FractionalNativeAudioDurationPreservesExactSourceEndpoints()
+    {
+        var fixtureDirectory = Path.Combine(Path.GetTempPath(), "CutFlow.Tests", Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(fixtureDirectory);
+        var fixturePath = Path.Combine(fixtureDirectory, "fractional.wav");
+        WriteSilentWave(fixturePath, durationMilliseconds: 2_000, extraSamples: 4);
+        var project = ProjectDocument.CreateNew("Fractional native audio", DateTimeOffset.UnixEpoch);
+        var audio = Asset(ProjectAssetKind.Audio, "fractional.wav", 2_000);
+        audio.SourcePath = fixturePath;
+        project.Assets.Add(audio);
+        project.AudioItems.Add(new AudioTimelineItem
+        {
+            Id = Guid.NewGuid(),
+            AssetId = audio.Id,
+            SourceInMilliseconds = 100,
+            SourceOutMilliseconds = 1_100
+        });
+
+        try
+        {
+            var result = await new CompositionService().BuildAsync(project, null, CancellationToken.None);
+            var track = result.Composition.BackgroundAudioTracks.Single();
+
+            Assert.AreEqual(2_000.5d, track.OriginalDuration.TotalMilliseconds, 0.001);
+            Assert.AreEqual(TimeSpan.Zero, track.Delay);
+            Assert.AreEqual(900.5d, track.TrimTimeFromEnd.TotalMilliseconds, 0.001);
+            Assert.AreEqual(1_000d, track.TrimmedDuration.TotalMilliseconds, 0.001);
+        }
+        finally
+        {
+            Directory.Delete(fixtureDirectory, recursive: true);
+        }
+    }
+
+    [TestMethod]
+    public void ApplyTrim_PreservesExactIntegerSourceEndpointsForFractionalNativeDuration()
+    {
+        var clip = Windows.Media.Editing.MediaClip.CreateFromColor(
+            Windows.UI.Color.FromArgb(255, 0, 0, 0),
+            TimeSpan.FromMilliseconds(2_000.5));
+
+        CompositionService.ApplyTrim(clip, 100, 1_100);
+
+        Assert.AreEqual(100d, clip.TrimTimeFromStart.TotalMilliseconds, 0.001);
+        Assert.AreEqual(900.5d, clip.TrimTimeFromEnd.TotalMilliseconds, 0.001);
+        Assert.AreEqual(1_000d, clip.TrimmedDuration.TotalMilliseconds, 0.001);
+    }
+
+    [TestMethod]
+    public async Task BuildAsync_WhenVideoSourceIsShorterThanStaleMetadata_UsesSameDurationFiller()
+    {
+        var mediaRoot = FindMediaRoot();
+        var project = ProjectDocument.CreateNew("Short native video", DateTimeOffset.UnixEpoch);
+        var video = Asset(ProjectAssetKind.Video, "valid-video.mp4", 2_500);
+        video.SourcePath = Path.Combine(mediaRoot, video.FileName);
+        var image = Asset(ProjectAssetKind.Image, "valid-image.jpg", 750);
+        image.SourcePath = Path.Combine(mediaRoot, image.FileName);
+        project.Assets.AddRange([video, image]);
+        project.VideoItems.Add(new VideoTimelineItem
+        {
+            Id = Guid.NewGuid(),
+            AssetId = video.Id,
+            SourceInMilliseconds = 500,
+            SourceOutMilliseconds = 2_500,
+            DurationMilliseconds = 2_000
+        });
+        project.VideoItems.Add(new VideoTimelineItem
+        {
+            Id = Guid.NewGuid(),
+            AssetId = image.Id,
+            DurationMilliseconds = 750
+        });
+
+        var result = await new CompositionService().BuildAsync(project, null, CancellationToken.None);
+
+        CollectionAssert.AreEqual(
+            new long[] { 2_000, 750 },
+            result.Composition.Clips.Select(clip => (long)Math.Round(clip.TrimmedDuration.TotalMilliseconds)).ToArray());
+        Assert.AreEqual(2_750d, result.Composition.Duration.TotalMilliseconds, 2);
+        Assert.AreEqual(
+            "'valid-video.mp4' could not be loaded and was replaced with black video.",
+            result.Errors.Single());
     }
 
     [TestMethod]
@@ -583,12 +773,12 @@ public sealed class Task9CompositionTests
         DurationMilliseconds = duration
     };
 
-    private static void WriteSilentWave(string path, int durationMilliseconds)
+    private static void WriteSilentWave(string path, int durationMilliseconds, int extraSamples = 0)
     {
         const int sampleRate = 8_000;
         const short channelCount = 1;
         const short bitsPerSample = 16;
-        var sampleCount = sampleRate * durationMilliseconds / 1_000;
+        var sampleCount = sampleRate * durationMilliseconds / 1_000 + extraSamples;
         var dataLength = sampleCount * channelCount * bitsPerSample / 8;
         using var writer = new BinaryWriter(File.Create(path));
         writer.Write("RIFF"u8);

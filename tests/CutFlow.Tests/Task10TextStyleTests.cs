@@ -315,6 +315,22 @@ public sealed class Task10TextStyleTests
     }
 
     [TestMethod]
+    [DataRow(false, 0d, 0d)]
+    [DataRow(true, 18d, 8d)]
+    public void TextContainerPadding_UsesTheLiveAndExportContract(bool backgroundEnabled, double horizontal, double vertical)
+    {
+        var padding = TextStyle.ResolveContainerPadding(new TextTimelineItem
+        {
+            BackgroundEnabled = backgroundEnabled
+        });
+
+        Assert.AreEqual(horizontal, padding.Left);
+        Assert.AreEqual(vertical, padding.Top);
+        Assert.AreEqual(horizontal, padding.Right);
+        Assert.AreEqual(vertical, padding.Bottom);
+    }
+
+    [TestMethod]
     public void MinimalLabelPreset_ExplicitlyEnablesItsBackground()
     {
         var item = TextPresetFactory.Create(TextPreset.MinimalLabel, 0);

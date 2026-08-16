@@ -108,7 +108,7 @@ public sealed class CompositionService
             }
             catch (Exception exception) when (IsItemFailure(exception))
             {
-                errors.Add($"'{audio.AssetName}' could not be loaded and was omitted: {exception.Message}");
+                errors.Add($"'{audio.AssetName}' could not be loaded and was omitted.");
             }
         }
 
@@ -167,16 +167,20 @@ public sealed class CompositionService
     private static MediaClip CreateBlackClip(long durationMilliseconds) =>
         MediaClip.CreateFromColor(Color.FromArgb(255, 0, 0, 0), ToTimeSpan(durationMilliseconds));
 
-    private static void ApplyTrim(MediaClip clip, long sourceInMilliseconds, long sourceOutMilliseconds)
+    internal static void ApplyTrim(MediaClip clip, long sourceInMilliseconds, long sourceOutMilliseconds)
     {
-        clip.TrimTimeFromStart = ToTimeSpan(Math.Min(sourceInMilliseconds, (long)clip.OriginalDuration.TotalMilliseconds));
-        clip.TrimTimeFromEnd = ToTimeSpan(Math.Max(0, (long)clip.OriginalDuration.TotalMilliseconds - sourceOutMilliseconds));
+        var sourceIn = ToTimeSpan(sourceInMilliseconds);
+        var sourceOut = ToTimeSpan(sourceOutMilliseconds);
+        clip.TrimTimeFromStart = sourceIn < clip.OriginalDuration ? sourceIn : clip.OriginalDuration;
+        clip.TrimTimeFromEnd = sourceOut < clip.OriginalDuration ? clip.OriginalDuration - sourceOut : TimeSpan.Zero;
     }
 
     private static void ApplyTrim(BackgroundAudioTrack track, long sourceInMilliseconds, long sourceOutMilliseconds)
     {
-        track.TrimTimeFromStart = ToTimeSpan(Math.Min(sourceInMilliseconds, (long)track.OriginalDuration.TotalMilliseconds));
-        track.TrimTimeFromEnd = ToTimeSpan(Math.Max(0, (long)track.OriginalDuration.TotalMilliseconds - sourceOutMilliseconds));
+        var sourceIn = ToTimeSpan(sourceInMilliseconds);
+        var sourceOut = ToTimeSpan(sourceOutMilliseconds);
+        track.TrimTimeFromStart = sourceIn < track.OriginalDuration ? sourceIn : track.OriginalDuration;
+        track.TrimTimeFromEnd = sourceOut < track.OriginalDuration ? track.OriginalDuration - sourceOut : TimeSpan.Zero;
     }
 
     private static bool IsItemFailure(Exception exception) =>
@@ -194,4 +198,11 @@ public sealed record CompositionBuildResult(
     bool HasVisualContent)
 {
     public bool HasContent => Composition.Clips.Count > 0 && Composition.Duration > TimeSpan.Zero;
+
+    internal static IReadOnlyList<string> SelectPreviewErrors(IEnumerable<string> errors) => errors
+        .Select(error => error.ReplaceLineEndings(" ").Trim())
+        .Where(error => error.Length > 0)
+        .Distinct(StringComparer.Ordinal)
+        .Take(3)
+        .ToArray();
 }
