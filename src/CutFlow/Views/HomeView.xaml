@@ -108,10 +108,13 @@
                                                 VerticalContentAlignment="Stretch"
                                                 Background="Transparent"
                                                 BorderThickness="0"
-                                                AutomationProperties.Name="{x:Bind Name}"
+                                                AutomationProperties.Name="{x:Bind OpenAutomationName}"
                                                 Click="ProjectOpen_Click"
                                                 Tag="{x:Bind Id}">
                                                 <Grid />
+                                                <ToolTipService.ToolTip>
+                                                    <ToolTip Content="{x:Bind OpenAutomationName}" />
+                                                </ToolTipService.ToolTip>
                                             </Button>
                                             <Grid Margin="8" Background="{StaticResource PreviewBackgroundBrush}" IsHitTestVisible="False">
                                                 <StackPanel HorizontalAlignment="Center" VerticalAlignment="Center" Spacing="8">
@@ -138,12 +141,12 @@
                                                     Width="40"
                                                     Height="40"
                                                     VerticalAlignment="Top"
-                                                    AutomationProperties.Name="{x:Bind Name}"
+                                                    AutomationProperties.Name="{x:Bind ActionsAutomationName}"
                                                     Style="{StaticResource IconButtonStyle}"
                                                     Tag="{x:Bind Id}">
                                                     <FontIcon FontSize="15" Glyph="&#xE712;" />
                                                     <ToolTipService.ToolTip>
-                                                        <ToolTip Content="Project actions" />
+                                                        <ToolTip Content="{x:Bind ActionsAutomationName}" />
                                                     </ToolTipService.ToolTip>
                                                     <Button.Flyout>
                                                         <MenuFlyout>

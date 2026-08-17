@@ -74,6 +74,33 @@ public sealed class Task11WorkspaceSettingsTests
     }
 
     [TestMethod]
+    public void PreviewTransport_NarrowWidthKeepsEveryControlReachableByHorizontalScrolling()
+    {
+        var xaml = File.ReadAllText(Path.Combine(
+            FindRepositoryRoot(),
+            "src",
+            "CutFlow",
+            "Controls",
+            "PreviewPane.xaml"));
+
+        var transportStart = xaml.IndexOf("x:Name=\"PreviewTransportScrollViewer\"", StringComparison.Ordinal);
+        var transportEnd = xaml.IndexOf("</ScrollViewer>", transportStart, StringComparison.Ordinal);
+        Assert.IsGreaterThanOrEqualTo(0, transportStart);
+        Assert.IsGreaterThan(transportStart, transportEnd);
+
+        var transport = xaml[transportStart..transportEnd];
+        Assert.Contains("HorizontalScrollBarVisibility=\"Auto\"", transport);
+        Assert.Contains("HorizontalScrollMode=\"Enabled\"", transport);
+        Assert.Contains("x:Name=\"TimecodeText\"", transport);
+        Assert.Contains("x:Name=\"PreviousFrameButton\"", transport);
+        Assert.Contains("x:Name=\"PlayButton\"", transport);
+        Assert.Contains("x:Name=\"NextFrameButton\"", transport);
+        Assert.Contains("x:Name=\"MuteButton\"", transport);
+        Assert.Contains("x:Name=\"LoopButton\"", transport);
+        Assert.Contains("x:Name=\"FitButton\"", transport);
+    }
+
+    [TestMethod]
     [DataRow(1320d, true)]
     [DataRow(1321d, false)]
     public void InspectorBreakpoint_UsesExactLogicalEditorWidth(double logicalWidth, bool expectedOverlay)
@@ -141,6 +168,7 @@ public sealed class Task11WorkspaceSettingsTests
         var restoreFocus = GetMethod(editor, "private void RestorePendingInspectorFocus", "private void InspectorToggle_Click");
         var selectionChanged = GetMethod(editor, "private void ViewModel_SelectionChanged", "private void Tool_Click");
         var presentation = GetMethod(editor, "private void UpdateProjectPresentation", "private async Task RebuildPreviewAsync");
+        var editCommitted = GetMethod(editor, "private void Inspector_EditCommitted", "private void Timeline_PlayheadChanged");
 
         Assert.Contains("x:Name=\"DesktopInspector\"", xaml);
         Assert.Contains("x:Name=\"NarrowInspector\"", xaml);
@@ -152,13 +180,49 @@ public sealed class Task11WorkspaceSettingsTests
         Assert.Contains("ResolveInspectorVisibility(", applyLayout);
         Assert.Contains("_isNarrow ? NarrowInspector : DesktopInspector", restoreFocus);
         Assert.Contains("RestoreFocus(_pendingInspectorFocus)", restoreFocus);
+        Assert.Contains("_pendingInspectorFocus = null;", selectionChanged);
         Assert.Contains("DesktopInspector.SetSelection(e.Selection);", selectionChanged);
         Assert.Contains("NarrowInspector.SetSelection(e.Selection);", selectionChanged);
+        Assert.Contains("_pendingInspectorFocus = _pendingInspectorFocus?.FocusOnly();", presentation);
         Assert.Contains("DesktopInspector.SetProject(ViewModel.Project);", presentation);
         Assert.Contains("NarrowInspector.SetProject(ViewModel.Project);", presentation);
+        Assert.Contains("_pendingInspectorFocus = _pendingInspectorFocus?.FocusOnly();", editCommitted);
         Assert.Contains("textBox.SelectionStart", inspector);
         Assert.Contains("textBox.SelectionLength", inspector);
         Assert.Contains("textBox.Focus(FocusState.Programmatic)", inspector);
+    }
+
+    [TestMethod]
+    public void InspectorFocusSnapshot_FocusOnlyDropsCapturedInput()
+    {
+        var snapshot = new Controls.InspectorFocusSnapshot("TextContentBox", "stale", 2, 3);
+
+        var focusOnly = snapshot.FocusOnly();
+
+        Assert.AreEqual("TextContentBox", focusOnly.ControlName);
+        Assert.IsNull(focusOnly.Text);
+        Assert.AreEqual(0, focusOnly.SelectionStart);
+        Assert.AreEqual(0, focusOnly.SelectionLength);
+    }
+
+    [TestMethod]
+    public void InspectorEditResponse_RefreshesBothInstancesFromCanonicalProject()
+    {
+        var source = File.ReadAllText(Path.Combine(FindRepositoryRoot(), "src", "CutFlow", "Views", "EditorView.xaml.cs"));
+        var editCommitted = GetMethod(source, "private void Inspector_EditCommitted", "private void Timeline_PlayheadChanged");
+
+        Assert.Contains("DesktopInspector.SetProject(ViewModel.Project);", editCommitted);
+        Assert.Contains("NarrowInspector.SetProject(ViewModel.Project);", editCommitted);
+    }
+
+    [TestMethod]
+    public void InspectorEnter_MovesFocusAndObservesHandledNumberBoxKeyUp()
+    {
+        var source = File.ReadAllText(Path.Combine(FindRepositoryRoot(), "src", "CutFlow", "Controls", "InspectorPanel.xaml.cs"));
+
+        Assert.Contains("CommitTextBox(textBox);\r\n            FocusManager.TryMoveFocus(FocusNavigationDirection.Next);", source.ReplaceLineEndings("\r\n"));
+        Assert.AreEqual(2, source.Split("new KeyEventHandler(TextPositionBox_KeyUp), handledEventsToo: true", StringSplitOptions.None).Length - 1);
+        Assert.Contains("if (e.Key == VirtualKey.Enter)", source);
     }
 
     private static string GetMethod(string source, string startMarker, string endMarker)

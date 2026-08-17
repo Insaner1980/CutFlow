@@ -90,9 +90,11 @@
                         <StackPanel Margin="0,0,4,0" HorizontalAlignment="Right" VerticalAlignment="Center" Orientation="Horizontal" Spacing="2">
                             <ToggleButton x:Name="VideoVisibilityButton" Tag="VideoVisibility" Width="26" Height="26" Padding="0" Checked="TrackStateButton_Changed" Unchecked="TrackStateButton_Changed" AutomationProperties.Name="Hide V1 video track">
                                 <FontIcon FontSize="11" Glyph="&#xE890;" />
+                                <ToolTipService.ToolTip><ToolTip Content="Hide V1 video track" /></ToolTipService.ToolTip>
                             </ToggleButton>
                             <ToggleButton x:Name="VideoLockButton" Tag="Video" Width="26" Height="26" Padding="0" Checked="TrackLockButton_Changed" Unchecked="TrackLockButton_Changed" AutomationProperties.Name="Lock V1 track">
                                 <FontIcon FontSize="11" Glyph="&#xE785;" />
+                                <ToolTipService.ToolTip><ToolTip Content="Lock V1 track" /></ToolTipService.ToolTip>
                             </ToggleButton>
                         </StackPanel>
                     </Grid>
@@ -103,9 +105,11 @@
                         <StackPanel Margin="0,0,4,0" HorizontalAlignment="Right" VerticalAlignment="Center" Orientation="Horizontal" Spacing="2">
                             <ToggleButton x:Name="TextVisibilityButton" Tag="TextVisibility" Width="26" Height="26" Padding="0" Checked="TrackStateButton_Changed" Unchecked="TrackStateButton_Changed" AutomationProperties.Name="Hide T1 text track">
                                 <FontIcon FontSize="11" Glyph="&#xE890;" />
+                                <ToolTipService.ToolTip><ToolTip Content="Hide T1 text track" /></ToolTipService.ToolTip>
                             </ToggleButton>
                             <ToggleButton x:Name="TextLockButton" Tag="Text" Width="26" Height="26" Padding="0" Checked="TrackLockButton_Changed" Unchecked="TrackLockButton_Changed" AutomationProperties.Name="Lock T1 track">
                                 <FontIcon FontSize="11" Glyph="&#xE785;" />
+                                <ToolTipService.ToolTip><ToolTip Content="Lock T1 track" /></ToolTipService.ToolTip>
                             </ToggleButton>
                         </StackPanel>
                     </Grid>
@@ -116,9 +120,11 @@
                         <StackPanel Margin="0,0,4,0" HorizontalAlignment="Right" VerticalAlignment="Center" Orientation="Horizontal" Spacing="2">
                             <ToggleButton x:Name="AudioMuteButton" Tag="AudioMute" Width="26" Height="26" Padding="0" Checked="TrackStateButton_Changed" Unchecked="TrackStateButton_Changed" AutomationProperties.Name="Mute A1 audio track">
                                 <FontIcon FontSize="11" Glyph="&#xE767;" />
+                                <ToolTipService.ToolTip><ToolTip Content="Mute A1 audio track" /></ToolTipService.ToolTip>
                             </ToggleButton>
                             <ToggleButton x:Name="AudioLockButton" Tag="Audio" Width="26" Height="26" Padding="0" Checked="TrackLockButton_Changed" Unchecked="TrackLockButton_Changed" AutomationProperties.Name="Lock A1 track">
                                 <FontIcon FontSize="11" Glyph="&#xE785;" />
+                                <ToolTipService.ToolTip><ToolTip Content="Lock A1 track" /></ToolTipService.ToolTip>
                             </ToggleButton>
                         </StackPanel>
                     </Grid>

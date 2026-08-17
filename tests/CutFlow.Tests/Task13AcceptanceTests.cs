@@ -215,17 +215,60 @@ public sealed class Task13AcceptanceTests
     [TestMethod]
     public void HomeProjectCard_ActionsUseASeparateFortyPixelTarget()
     {
+        var card = ProjectCardViewModel.Create(ProjectDocument.CreateNew("Accessible project", DateTimeOffset.UnixEpoch));
         var homeView = XDocument.Load(Path.Combine(FindRepositoryRoot(), "src", "CutFlow", "Views", "HomeView.xaml"));
         var buttons = homeView.Descendants().Where(element => element.Name.LocalName == "Button").ToArray();
         var openButton = buttons.Single(element => (string?)element.Attribute("Click") == "ProjectOpen_Click");
         var actionsButton = buttons.Single(element =>
-            element.Descendants().Any(descendant =>
-                descendant.Name.LocalName == "ToolTip" &&
-                (string?)descendant.Attribute("Content") == "Project actions"));
+            element.Descendants().Any(descendant => descendant.Name.LocalName == "MenuFlyout"));
 
         Assert.AreEqual("40", (string?)actionsButton.Attribute("Width"));
         Assert.AreEqual("40", (string?)actionsButton.Attribute("Height"));
         Assert.DoesNotContain(openButton, actionsButton.Ancestors());
+        Assert.AreEqual("Open project Accessible project", card.OpenAutomationName);
+        Assert.AreEqual("Project actions for Accessible project", card.ActionsAutomationName);
+        Assert.AreEqual("{x:Bind OpenAutomationName}", (string?)openButton.Attribute("AutomationProperties.Name"));
+        Assert.AreEqual("{x:Bind ActionsAutomationName}", (string?)actionsButton.Attribute("AutomationProperties.Name"));
+        Assert.AreEqual(
+            "{x:Bind OpenAutomationName}",
+            (string?)openButton.Descendants().Single(element => element.Name.LocalName == "ToolTip").Attribute("Content"));
+        Assert.AreEqual(
+            "{x:Bind ActionsAutomationName}",
+            (string?)actionsButton.Descendants().Single(element => element.Name.LocalName == "ToolTip").Attribute("Content"));
+    }
+
+    [TestMethod]
+    public void IconOnlyControls_HaveExplicitActionNamesAndTooltips()
+    {
+        var sourceRoot = Path.Combine(FindRepositoryRoot(), "src", "CutFlow");
+        var xamlFiles = Directory.GetFiles(sourceRoot, "*.xaml", SearchOption.AllDirectories)
+            .Where(path => !path.Contains($"{Path.DirectorySeparatorChar}obj{Path.DirectorySeparatorChar}", StringComparison.OrdinalIgnoreCase));
+
+        foreach (var path in xamlFiles)
+        {
+            var document = XDocument.Load(path);
+            var iconOnlyButtons = document.Descendants().Where(element =>
+                element.Name.LocalName is "Button" or "ToggleButton" or "MenuFlyoutItem" &&
+                element.Descendants().Any(descendant => descendant.Name.LocalName is "FontIcon" or "SymbolIcon" or "PathIcon" or "BitmapIcon") &&
+                string.IsNullOrWhiteSpace((string?)element.Attribute("Content")) &&
+                !element.Descendants().Any(descendant =>
+                    descendant.Name.LocalName == "TextBlock" &&
+                    !string.IsNullOrWhiteSpace((string?)descendant.Attribute("Text"))));
+
+            foreach (var button in iconOnlyButtons)
+            {
+                var identifier = (string?)button.Attribute(Xaml + "Name") ?? button.Name.LocalName;
+                Assert.IsFalse(
+                    string.IsNullOrWhiteSpace((string?)button.Attribute("AutomationProperties.Name")),
+                    $"{Path.GetFileName(path)}: {identifier} has no explicit accessible action name.");
+                Assert.Contains(
+                    descendant =>
+                        descendant.Name.LocalName == "ToolTip" &&
+                        !string.IsNullOrWhiteSpace((string?)descendant.Attribute("Content")),
+                    button.Descendants(),
+                    $"{Path.GetFileName(path)}: {identifier} has no action tooltip.");
+            }
+        }
     }
 
     [TestMethod]

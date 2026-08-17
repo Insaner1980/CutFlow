@@ -463,6 +463,22 @@ public sealed class Task8TimelineTests
     }
 
     [TestMethod]
+    public void ProjectBackgroundColor_RequiresExactOpaqueArgbAndCanonicalizesCase()
+    {
+        var viewModel = new EditorViewModel(ProjectDocument.CreateNew("Background", DateTimeOffset.UnixEpoch));
+
+        Assert.IsTrue(viewModel.SetBackgroundColor("#ff12ab34"));
+        Assert.AreEqual("#FF12AB34", viewModel.Project.Settings.BackgroundColor);
+        Assert.IsFalse(viewModel.SetBackgroundColor("#FF12AB34"));
+
+        foreach (var rejected in new[] { "#8012AB34", "#FF12AB3", "#FF12AB3G", " #FF12AB34", "#FF12AB34 " })
+        {
+            Assert.IsFalse(viewModel.SetBackgroundColor(rejected));
+            Assert.AreEqual("#FF12AB34", viewModel.Project.Settings.BackgroundColor);
+        }
+    }
+
+    [TestMethod]
     public void NewModelProperties_RoundTripAndOldJsonUsesSafeDefaults()
     {
         var project = CreateProjectWithAudio();

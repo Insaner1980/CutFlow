@@ -552,6 +552,7 @@ public sealed partial class EditorView : UserControl, IDisposable
 
     private void ViewModel_SelectionChanged(object? sender, EditorSelectionChangedEventArgs e)
     {
+        _pendingInspectorFocus = null;
         DesktopInspector.SetSelection(e.Selection);
         NarrowInspector.SetSelection(e.Selection);
         Timeline.SetSelection(e.Selection);
@@ -583,6 +584,7 @@ public sealed partial class EditorView : UserControl, IDisposable
 
     private void UpdateProjectPresentation()
     {
+        _pendingInspectorFocus = _pendingInspectorFocus?.FocusOnly();
         DesktopInspector.SetProject(ViewModel.Project);
         NarrowInspector.SetProject(ViewModel.Project);
         Preview.SetPlayhead(ViewModel.PlayheadText);
@@ -744,6 +746,7 @@ public sealed partial class EditorView : UserControl, IDisposable
 
     private void Inspector_EditCommitted(object sender, InspectorEditCommittedEventArgs e)
     {
+        _pendingInspectorFocus = _pendingInspectorFocus?.FocusOnly();
         if (e.ItemId is Guid itemId && Timeline.IsItemLocked(itemId))
         {
             ShowLockedTrackMessage(itemId);
@@ -841,6 +844,9 @@ public sealed partial class EditorView : UserControl, IDisposable
                 ViewModel.ResetTextStyle(id);
                 break;
         }
+
+        DesktopInspector.SetProject(ViewModel.Project);
+        NarrowInspector.SetProject(ViewModel.Project);
     }
 
     private void Timeline_PlayheadChanged(object sender, PlayheadChangedEventArgs e)

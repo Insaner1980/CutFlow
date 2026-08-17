@@ -180,6 +180,7 @@
                     <TextBlock x:Name="ExportStatusTitle" Style="{StaticResource SectionTitleTextBlockStyle}" Text="Exporting video" />
                     <Button x:Name="DismissExportStatusButton" Grid.Column="1" AutomationProperties.Name="Dismiss export status" Click="DismissExportStatus_Click" Style="{StaticResource IconButtonStyle}" Visibility="Collapsed">
                         <FontIcon FontSize="12" Glyph="&#xE711;" />
+                        <ToolTipService.ToolTip><ToolTip Content="Dismiss export status" /></ToolTipService.ToolTip>
                     </Button>
                 </Grid>
                 <TextBlock x:Name="ExportStatusMessage" Style="{StaticResource BodyTextBlockStyle}" />

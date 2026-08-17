@@ -2,6 +2,7 @@ using System.Globalization;
 using CutFlow.Models;
 using CutFlow.Utilities;
 using Microsoft.UI.Xaml;
+using Microsoft.UI.Xaml.Automation;
 using Microsoft.UI.Xaml.Controls;
 using Microsoft.UI.Xaml.Controls.Primitives;
 using Microsoft.UI.Xaml.Input;
@@ -27,6 +28,8 @@ public sealed partial class InspectorPanel : UserControl
         VideoVolumeSlider.AddHandler(PointerReleasedEvent, new PointerEventHandler(VolumeSlider_PointerReleased), handledEventsToo: true);
         AudioVolumeSlider.AddHandler(PointerReleasedEvent, new PointerEventHandler(VolumeSlider_PointerReleased), handledEventsToo: true);
         TextOpacitySlider.AddHandler(PointerReleasedEvent, new PointerEventHandler(TextOpacitySlider_PointerReleased), handledEventsToo: true);
+        TextHorizontalPositionBox.AddHandler(KeyUpEvent, new KeyEventHandler(TextPositionBox_KeyUp), handledEventsToo: true);
+        TextVerticalPositionBox.AddHandler(KeyUpEvent, new KeyEventHandler(TextPositionBox_KeyUp), handledEventsToo: true);
     }
 
     public event EventHandler<InspectorEditCommittedEventArgs>? EditCommitted;
@@ -103,7 +106,7 @@ public sealed partial class InspectorPanel : UserControl
 
     private void HidePanels()
     {
-        ValidationText.Visibility = Visibility.Collapsed;
+        ClearValidation();
         ProjectPanel.Visibility = Visibility.Collapsed;
         VideoPanel.Visibility = Visibility.Collapsed;
         ImagePanel.Visibility = Visibility.Collapsed;
@@ -142,6 +145,7 @@ public sealed partial class InspectorPanel : UserControl
             VideoTimelineDurationText.Text = FormatDuration(video.DurationMilliseconds);
             VideoVolumeSlider.Value = video.Volume * 100;
             VideoMuteBox.IsChecked = video.IsMuted;
+            UpdateMuteBoxPresentation(VideoMuteBox, video.IsMuted, "video");
         }
 
         return true;
@@ -166,6 +170,7 @@ public sealed partial class InspectorPanel : UserControl
         AudioSourceOutBox.Text = FormatSeconds(audio.SourceOutMilliseconds);
         AudioVolumeSlider.Value = audio.Volume * 100;
         AudioMuteBox.IsChecked = audio.IsMuted;
+        UpdateMuteBoxPresentation(AudioMuteBox, audio.IsMuted, "audio");
         return true;
     }
 
@@ -182,7 +187,7 @@ public sealed partial class InspectorPanel : UserControl
         TextPanel.Visibility = Visibility.Visible;
         TextContentBox.Text = text.Text;
         TextFontFamilyBox.SelectedItem = TextStyle.NormalizeFontFamily(text.FontFamily);
-        TextFontSizeBox.Text = text.FontSize.ToString("0.##", CultureInfo.CurrentCulture);
+        TextFontSizeBox.Text = TimelineInput.FormatDoubleRoundTrip(text.FontSize);
         TextBoldButton.IsChecked = TextStyle.IsBold(text.FontWeight);
         TextItalicButton.IsChecked = text.IsItalic;
         TextColorBox.Text = text.TextColor;
@@ -241,6 +246,7 @@ public sealed partial class InspectorPanel : UserControl
         else if (InspectorCommitGesture.ShouldCommit(textBox.Tag?.ToString(), e.Key, IsControlDown()))
         {
             CommitTextBox(textBox);
+            FocusManager.TryMoveFocus(FocusNavigationDirection.Next);
             e.Handled = true;
         }
     }
@@ -260,13 +266,13 @@ public sealed partial class InspectorPanel : UserControl
             return;
         }
 
-        ValidationText.Visibility = Visibility.Collapsed;
         switch (tag)
         {
             case "BackgroundColor":
                 CommitBackgroundColor(textBox.Text);
                 break;
             case "TextContent":
+                ClearValidation();
                 RaiseSelectedEdit(InspectorEditKind.SetTextContent, textValue: textBox.Text);
                 break;
             case "TextColor":
@@ -286,10 +292,11 @@ public sealed partial class InspectorPanel : UserControl
     {
         if (!TimelineInput.IsOpaqueArgb(value))
         {
-            ShowValidation("Enter an opaque ARGB color in #FFRRGGBB form.");
+            ShowValidation(InspectorValidationPolicy.MessageFor("BackgroundColor"));
             return;
         }
 
+        ClearValidation();
         RaiseEdit(new InspectorEditCommittedEventArgs(InspectorEditKind.SetBackgroundColor) { TextValue = value.ToUpperInvariant() });
     }
 
@@ -297,23 +304,24 @@ public sealed partial class InspectorPanel : UserControl
     {
         if (!TextStyle.IsArgb(value))
         {
-            ShowValidation("Enter an ARGB color in #AARRGGBB form.");
+            ShowValidation(InspectorValidationPolicy.MessageFor(tag));
             return;
         }
 
         var kind = tag == "TextColor" ? InspectorEditKind.SetTextColor : InspectorEditKind.SetTextBackground;
+        ClearValidation();
         RaiseSelectedEdit(kind, textValue: value.ToUpperInvariant());
     }
 
     private void CommitTextFontSize(string value)
     {
-        if (!double.TryParse(value, NumberStyles.Float, CultureInfo.CurrentCulture, out var size) ||
-            !double.IsFinite(size) || size is < 8 or > 400)
+        if (!TimelineInput.TryParseFiniteDouble(value, out var size) || size is < 8 or > 400)
         {
-            ShowValidation("Enter a font size from 8 to 400.");
+            ShowValidation(InspectorValidationPolicy.MessageFor("TextFontSize"));
             return;
         }
 
+        ClearValidation();
         RaiseSelectedEdit(InspectorEditKind.SetTextFontSize, doubleValue: size);
     }
 
@@ -321,7 +329,7 @@ public sealed partial class InspectorPanel : UserControl
     {
         if (!TimelineInput.TryParseSeconds(value, out var milliseconds))
         {
-            ShowValidation("Enter a value from 0 seconds to 24 hours.");
+            ShowValidation(InspectorValidationPolicy.MessageFor(tag));
             return;
         }
 
@@ -339,6 +347,7 @@ public sealed partial class InspectorPanel : UserControl
         };
         if (kind != InspectorEditKind.None)
         {
+            ClearValidation();
             RaiseSelectedEdit(kind, longValue: milliseconds);
         }
     }
@@ -372,9 +381,20 @@ public sealed partial class InspectorPanel : UserControl
             return;
         }
 
+        var isMuted = checkBox.IsChecked == true;
+        UpdateMuteBoxPresentation(checkBox, isMuted, checkBox == VideoMuteBox ? "video" : "audio");
         RaiseSelectedEdit(
             checkBox == VideoMuteBox ? InspectorEditKind.SetVideoMuted : InspectorEditKind.SetAudioMuted,
-            boolValue: checkBox.IsChecked == true);
+            boolValue: isMuted);
+    }
+
+    private static void UpdateMuteBoxPresentation(CheckBox checkBox, bool isMuted, string itemKind)
+    {
+        var action = isMuted ? "Unmute" : "Mute";
+        checkBox.Content = action;
+        var name = $"{action} {itemKind} item";
+        AutomationProperties.SetName(checkBox, name);
+        ToolTipService.SetToolTip(checkBox, name);
     }
 
     private void TextFontFamilyBox_SelectionChanged(object sender, SelectionChangedEventArgs e)
@@ -450,8 +470,14 @@ public sealed partial class InspectorPanel : UserControl
 
     private void TextPositionBox_ValueChanged(NumberBox sender, NumberBoxValueChangedEventArgs args)
     {
-        if (_updating || !double.IsFinite(args.NewValue) || sender.Tag is not string tag)
+        if (_updating || sender.Tag is not string tag)
         {
+            return;
+        }
+
+        if (!double.IsFinite(args.NewValue))
+        {
+            Refresh();
             return;
         }
 
@@ -460,6 +486,14 @@ public sealed partial class InspectorPanel : UserControl
                 ? InspectorEditKind.SetTextHorizontalPosition
                 : InspectorEditKind.SetTextVerticalPosition,
             doubleValue: TextStyle.ClampNormalized(args.NewValue));
+    }
+
+    private static void TextPositionBox_KeyUp(object sender, KeyRoutedEventArgs e)
+    {
+        if (e.Key == VirtualKey.Enter)
+        {
+            FocusManager.TryMoveFocus(FocusNavigationDirection.Next);
+        }
     }
 
     private void SetTextAlignmentButtons(TextHorizontalAlignment alignment)
@@ -516,9 +550,19 @@ public sealed partial class InspectorPanel : UserControl
 
     private void ShowValidation(string message)
     {
+        if (!InspectorValidationPolicy.ShouldPublish(
+                ValidationText.Text,
+                ValidationText.Visibility == Visibility.Visible,
+                message))
+        {
+            return;
+        }
+
         ValidationText.Text = message;
         ValidationText.Visibility = Visibility.Visible;
     }
+
+    private void ClearValidation() => ValidationText.Visibility = Visibility.Collapsed;
 
     private static string FormatResolution(ProjectAsset asset) => asset.Width > 0 && asset.Height > 0 ? $"{asset.Width} × {asset.Height}" : UnknownValue;
     private static string FormatDuration(long milliseconds) => $"{Math.Max(0, milliseconds) / 1_000d:0.###} s";
@@ -588,8 +632,31 @@ internal static class InspectorEditBoundary
     }
 }
 
+internal static class InspectorValidationPolicy
+{
+    public static string MessageFor(string tag) => tag switch
+    {
+        "BackgroundColor" => "Background color must use opaque #FFRRGGBB format.",
+        "TextColor" => "Text color must use #AARRGGBB format.",
+        "TextBackground" => "Text background color must use #AARRGGBB format.",
+        "TextFontSize" => "Font size must be from 8 to 400.",
+        "VideoSourceIn" or "AudioSourceIn" => "Source in must be between 0 seconds and 24 hours.",
+        "VideoSourceOut" or "AudioSourceOut" => "Source out must be between 0 seconds and 24 hours.",
+        "ImageDuration" => "Image duration must be between 0 seconds and 24 hours.",
+        "AudioStart" or "TextStart" => "Timeline start must be between 0 seconds and 24 hours.",
+        "TextDuration" => "Text duration must be between 0 seconds and 24 hours.",
+        _ => "Value must be between 0 seconds and 24 hours."
+    };
+
+    public static bool ShouldPublish(string? currentMessage, bool isVisible, string nextMessage) =>
+        !isVisible || !string.Equals(currentMessage, nextMessage, StringComparison.Ordinal);
+}
+
 internal sealed record InspectorFocusSnapshot(
     string ControlName,
     string? Text = null,
     int SelectionStart = 0,
-    int SelectionLength = 0);
+    int SelectionLength = 0)
+{
+    public InspectorFocusSnapshot FocusOnly() => new(ControlName);
+}

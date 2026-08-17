@@ -2,6 +2,8 @@ using CutFlow.Models;
 using CutFlow.Services;
 using CutFlow.Utilities;
 using Microsoft.VisualStudio.TestTools.UnitTesting;
+using Windows.Graphics.Imaging;
+using Windows.Media.Editing;
 
 namespace CutFlow.Tests;
 
@@ -135,7 +137,7 @@ public sealed class Task9CompositionTests
         Assert.IsFalse(error.Contains('\r'));
         Assert.IsFalse(error.Contains('\n'));
         Assert.IsLessThanOrEqualTo(200, error.Length);
-        Assert.Contains("replaced with black video", error);
+        Assert.Contains("replaced with the project background", error);
     }
 
     [TestMethod]
@@ -217,7 +219,7 @@ public sealed class Task9CompositionTests
         Assert.AreEqual(2_250L, durationBeforeBuild);
         Assert.AreEqual(durationBeforeBuild, plan.TargetDurationMilliseconds);
         Assert.AreEqual(
-            "'mystery.bin' has an unsupported visual kind and was replaced with black video.",
+            "'mystery.bin' has an unsupported visual kind and was replaced with the project background.",
             plan.Errors.Single());
     }
 
@@ -371,9 +373,10 @@ public sealed class Task9CompositionTests
     }
 
     [TestMethod]
-    public async Task BuildAsync_MissingVisualCreatesRealSameDurationBlackClip()
+    public async Task BuildAsync_MissingVisualCreatesSameDurationProjectBackgroundClip()
     {
         var project = ProjectDocument.CreateNew("Native filler", DateTimeOffset.UnixEpoch);
+        project.Settings.BackgroundColor = "#FF123456";
         var missing = Asset(ProjectAssetKind.Video, "missing.mp4", 1_750);
         missing.IsMissing = true;
         project.Assets.Add(missing);
@@ -390,6 +393,25 @@ public sealed class Task9CompositionTests
         Assert.HasCount(1, result.Composition.Clips);
         Assert.AreEqual(1_750d, result.Composition.Duration.TotalMilliseconds, 1);
         Assert.Contains(error => error.Contains("missing.mp4", StringComparison.Ordinal), result.Errors);
+
+        using var thumbnail = await result.Composition.GetThumbnailAsync(
+            TimeSpan.FromMilliseconds(500),
+            8,
+            8,
+            VideoFramePrecision.NearestFrame);
+        var decoder = await BitmapDecoder.CreateAsync(thumbnail);
+        var pixelData = await decoder.GetPixelDataAsync(
+            BitmapPixelFormat.Bgra8,
+            BitmapAlphaMode.Premultiplied,
+            new BitmapTransform(),
+            ExifOrientationMode.IgnoreExifOrientation,
+            ColorManagementMode.DoNotColorManage);
+        var pixels = pixelData.DetachPixelData();
+        var center = checked((((int)decoder.PixelHeight / 2 * (int)decoder.PixelWidth) + (int)decoder.PixelWidth / 2) * 4);
+        Assert.IsLessThanOrEqualTo(3, Math.Abs(pixels[center] - 0x56));
+        Assert.IsLessThanOrEqualTo(3, Math.Abs(pixels[center + 1] - 0x34));
+        Assert.IsLessThanOrEqualTo(3, Math.Abs(pixels[center + 2] - 0x12));
+        Assert.AreEqual(0xFF, pixels[center + 3]);
     }
 
     [TestMethod]
@@ -453,8 +475,8 @@ public sealed class Task9CompositionTests
             Assert.AreEqual(durationBeforeBuild, TimelineEditingService.CalculateProjectDuration(project));
             string[] expectedErrors =
             [
-                "'broken.jpg' could not be loaded and was replaced with black video.",
-                "'broken.mp4' could not be loaded and was replaced with black video."
+                "'broken.jpg' could not be loaded and was replaced with the project background.",
+                "'broken.mp4' could not be loaded and was replaced with the project background."
             ];
             Assert.AreSequenceEqual(expectedErrors, result.Errors.ToArray(), Microsoft.VisualStudio.TestTools.UnitTesting.SequenceOrder.InAnyOrder);
         }
@@ -610,7 +632,7 @@ public sealed class Task9CompositionTests
             new long[] { 2_000, 750 }, result.Composition.Clips.Select(clip => (long)Math.Round(clip.TrimmedDuration.TotalMilliseconds)).ToArray());
         Assert.AreEqual(2_750d, result.Composition.Duration.TotalMilliseconds, 2);
         Assert.AreEqual(
-            "'valid-video.mp4' could not be loaded and was replaced with black video.",
+            "'valid-video.mp4' could not be loaded and was replaced with the project background.",
             result.Errors.Single());
     }
 

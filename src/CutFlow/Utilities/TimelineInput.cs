@@ -5,6 +5,9 @@ namespace CutFlow.Utilities;
 
 public static class TimelineInput
 {
+    public static string FormatDoubleRoundTrip(double value) =>
+        value.ToString("R", CultureInfo.CurrentCulture);
+
     public static bool TryParseFiniteDouble(string? text, out double value)
     {
         var parsed = double.TryParse(text, NumberStyles.Float, CultureInfo.CurrentCulture, out value) ||

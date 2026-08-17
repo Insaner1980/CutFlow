@@ -296,6 +296,25 @@ public sealed class Task11LifecycleTests
     }
 
     [TestMethod]
+    public void TimelineSelection_UpdatesVisualAndAutomationStateForDynamicCards()
+    {
+        var root = FindRepositoryRoot();
+        var source = File.ReadAllText(Path.Combine(root, "src", "CutFlow", "Controls", "TimelineControl.xaml.cs"));
+        var addStart = source.IndexOf("private void AddClip", StringComparison.Ordinal);
+        var addEnd = source.IndexOf("private void Clip_GotFocus", addStart, StringComparison.Ordinal);
+        var updateStart = source.IndexOf("private void ApplySelectionStyle", StringComparison.Ordinal);
+        var updateEnd = source.IndexOf("private bool IsSelected", updateStart, StringComparison.Ordinal);
+        var add = source[addStart..addEnd];
+        var update = source[updateStart..updateEnd];
+
+        Assert.Contains("BorderBrush = Brush(selected ? \"AccentBrush\" : \"BorderBrush\")", source);
+        Assert.Contains("BorderThickness = new Thickness(selected ? 2 : 1)", source);
+        Assert.Contains("Background = Brush(selected ? \"SurfaceHoverBrush\" : \"SurfaceElevatedBrush\")", source);
+        Assert.Contains("AutomationProperties.SetItemStatus(hitTarget, IsSelected(bound) ? \"Selected\" : string.Empty);", add);
+        Assert.Contains("AutomationProperties.SetItemStatus(hitTarget, selected ? \"Selected\" : string.Empty);", update);
+    }
+
+    [TestMethod]
     public void PreviewMuteToggle_UpdatesItsAccessibleActionName()
     {
         var root = FindRepositoryRoot();
@@ -308,6 +327,49 @@ public sealed class Task11LifecycleTests
         Assert.Contains("\"Mute preview\"", mute);
         Assert.Contains("AutomationProperties.SetName(MuteButton, name);", mute);
         Assert.Contains("ToolTipService.SetToolTip(MuteButton, name);", mute);
+    }
+
+    [TestMethod]
+    public void InspectorItemMuteToggles_UpdateTheirActionNamesAfterRebindingAndClicks()
+    {
+        var root = FindRepositoryRoot();
+        var source = File.ReadAllText(Path.Combine(root, "src", "CutFlow", "Controls", "InspectorPanel.xaml.cs"));
+        var videoStart = source.IndexOf("private bool TryShowVideoSelection", StringComparison.Ordinal);
+        var audioStart = source.IndexOf("private bool TryShowAudioSelection", videoStart, StringComparison.Ordinal);
+        var textStart = source.IndexOf("private bool TryShowTextSelection", audioStart, StringComparison.Ordinal);
+        var clickStart = source.IndexOf("private void MuteBox_Click", StringComparison.Ordinal);
+        var presentationStart = source.IndexOf("private static void UpdateMuteBoxPresentation", clickStart, StringComparison.Ordinal);
+        var presentationEnd = source.IndexOf("private void TextFontFamilyBox_SelectionChanged", presentationStart, StringComparison.Ordinal);
+        var videoRefresh = source[videoStart..audioStart];
+        var audioRefresh = source[audioStart..textStart];
+        var click = source[clickStart..presentationStart];
+        var presentation = source[presentationStart..presentationEnd];
+
+        Assert.Contains("UpdateMuteBoxPresentation(VideoMuteBox, video.IsMuted, \"video\");", videoRefresh);
+        Assert.Contains("UpdateMuteBoxPresentation(AudioMuteBox, audio.IsMuted, \"audio\");", audioRefresh);
+        Assert.Contains("UpdateMuteBoxPresentation(checkBox, isMuted", click);
+        Assert.Contains("isMuted ? \"Unmute\" : \"Mute\"", presentation);
+        Assert.Contains("checkBox.Content = action;", presentation);
+        Assert.Contains("AutomationProperties.SetName(checkBox, name);", presentation);
+        Assert.Contains("ToolTipService.SetToolTip(checkBox, name);", presentation);
+    }
+
+    [TestMethod]
+    public void PreviewLoopToggle_UpdatesItsAccessibleActionName()
+    {
+        var root = FindRepositoryRoot();
+        var source = File.ReadAllText(Path.Combine(root, "src", "CutFlow", "Controls", "PreviewPane.xaml.cs"));
+        var loopStart = source.IndexOf("public void Loop(bool loop)", StringComparison.Ordinal);
+        var loopEnd = source.IndexOf("public void SetCanPlay(bool canPlay)", loopStart, StringComparison.Ordinal);
+        var loop = source[loopStart..loopEnd];
+        var clickStart = source.IndexOf("private void LoopButton_Click", StringComparison.Ordinal);
+        var clickEnd = source.IndexOf("private void FitButton_Click", clickStart, StringComparison.Ordinal);
+
+        Assert.Contains("\"Disable preview looping\"", loop);
+        Assert.Contains("\"Loop preview\"", loop);
+        Assert.Contains("AutomationProperties.SetName(LoopButton, name);", loop);
+        Assert.Contains("ToolTipService.SetToolTip(LoopButton, name);", loop);
+        Assert.Contains("UpdateLoopButtonPresentation(LoopButton.IsChecked == true);", source[clickStart..clickEnd]);
     }
 
     [TestMethod]

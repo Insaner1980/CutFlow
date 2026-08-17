@@ -198,6 +198,10 @@ public sealed partial class ProjectCardViewModel : ViewModelBase
 
     public string Name => Project.Name;
 
+    public string OpenAutomationName => $"Open project {Name}";
+
+    public string ActionsAutomationName => $"Project actions for {Name}";
+
     public string ModifiedText => $"Modified {Project.ModifiedAt.ToLocalTime().ToString("g", CultureInfo.CurrentCulture)}";
 
     public string AspectRatioText => Project.Settings.AspectRatio switch

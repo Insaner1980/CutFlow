@@ -290,9 +290,17 @@ public sealed partial class PreviewPane : UserControl, IDisposable
     public void Loop(bool loop)
     {
         _player.IsLoopingEnabled = false;
-        if (LoopButton.IsChecked == loop) return;
+        var changed = LoopButton.IsChecked != loop;
         LoopButton.IsChecked = loop;
-        LoopChanged?.Invoke(this, EventArgs.Empty);
+        UpdateLoopButtonPresentation(loop);
+        if (changed) LoopChanged?.Invoke(this, EventArgs.Empty);
+    }
+
+    private void UpdateLoopButtonPresentation(bool loop)
+    {
+        var name = loop ? "Disable preview looping" : "Loop preview";
+        AutomationProperties.SetName(LoopButton, name);
+        ToolTipService.SetToolTip(LoopButton, name);
     }
 
     public void SetCanPlay(bool canPlay)
@@ -653,6 +661,7 @@ public sealed partial class PreviewPane : UserControl, IDisposable
     private void LoopButton_Click(object sender, RoutedEventArgs e)
     {
         _player.IsLoopingEnabled = false;
+        UpdateLoopButtonPresentation(LoopButton.IsChecked == true);
         LoopChanged?.Invoke(this, EventArgs.Empty);
     }
 

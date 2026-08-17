@@ -406,6 +406,7 @@ public sealed partial class TimelineControl : UserControl
         if (card.Tag is ClipTag clipTag)
         {
             AutomationProperties.SetName(hitTarget, $"{clipTag.Bounds.Kind} clip");
+            AutomationProperties.SetItemStatus(hitTarget, IsSelected(bound) ? "Selected" : string.Empty);
             ToolTipService.SetToolTip(hitTarget, clipTag.Asset?.SourcePath ?? "Text item");
         }
 
@@ -797,6 +798,7 @@ public sealed partial class TimelineControl : UserControl
         card.BorderThickness = new Thickness(selected ? 2 : 1);
         card.Background = Brush(selected ? "SurfaceHoverBrush" : "SurfaceElevatedBrush");
         card.Opacity = canEdit ? 1 : 0.68;
+        AutomationProperties.SetItemStatus(hitTarget, selected ? "Selected" : string.Empty);
         if (card.Child is not Grid content)
         {
             return;

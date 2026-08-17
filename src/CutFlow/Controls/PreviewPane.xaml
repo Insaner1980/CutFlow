@@ -23,42 +23,51 @@
                 </Viewbox>
             </Border>
         </Grid>
-        <Grid Grid.Row="1" ColumnSpacing="6" VerticalAlignment="Center">
-            <Grid.ColumnDefinitions>
-                <ColumnDefinition Width="Auto" />
-                <ColumnDefinition Width="*" />
-                <ColumnDefinition Width="Auto" />
-                <ColumnDefinition Width="Auto" />
-                <ColumnDefinition Width="Auto" />
-                <ColumnDefinition Width="Auto" />
-                <ColumnDefinition Width="Auto" />
-                <ColumnDefinition Width="Auto" />
-            </Grid.ColumnDefinitions>
-            <TextBlock x:Name="TimecodeText" Grid.Column="0" VerticalAlignment="Center" AutomationProperties.Name="Current preview time and total duration" Style="{StaticResource CaptionTextBlockStyle}" Text="00:00:00:00 / 00:00:00:00" />
-            <Button x:Name="PreviousFrameButton" Grid.Column="2" AutomationProperties.Name="Previous frame" Click="PreviousFrameButton_Click" IsEnabled="False" Style="{StaticResource IconButtonStyle}" TabIndex="39">
-                <FontIcon FontSize="14" Glyph="&#xE892;" />
-                <ToolTipService.ToolTip><ToolTip Content="Previous frame" /></ToolTipService.ToolTip>
-            </Button>
-            <Button x:Name="PlayButton" Grid.Column="3" AutomationProperties.Name="Play preview unavailable" Click="PlayButton_Click" IsEnabled="False" Style="{StaticResource IconButtonStyle}" TabIndex="40">
-                <FontIcon x:Name="PlayIcon" FontSize="15" Glyph="&#xE768;" />
-                <ToolTipService.ToolTip><ToolTip x:Name="PlayToolTip" Content="Playback is unavailable until the preview has media" /></ToolTipService.ToolTip>
-            </Button>
-            <Button x:Name="NextFrameButton" Grid.Column="4" AutomationProperties.Name="Next frame" Click="NextFrameButton_Click" IsEnabled="False" Style="{StaticResource IconButtonStyle}" TabIndex="41">
-                <FontIcon FontSize="14" Glyph="&#xE893;" />
-                <ToolTipService.ToolTip><ToolTip Content="Next frame" /></ToolTipService.ToolTip>
-            </Button>
-            <ToggleButton x:Name="MuteButton" Grid.Column="5" Width="34" Height="32" AutomationProperties.Name="Mute preview" Click="MuteButton_Click" IsEnabled="False" TabIndex="42">
-                <FontIcon FontSize="14" Glyph="&#xE767;" />
-                <ToolTipService.ToolTip><ToolTip Content="Mute preview" /></ToolTipService.ToolTip>
-            </ToggleButton>
-            <ToggleButton x:Name="LoopButton" Grid.Column="6" Width="34" Height="32" AutomationProperties.Name="Loop preview" Click="LoopButton_Click" IsEnabled="False" TabIndex="43">
-                <FontIcon FontSize="14" Glyph="&#xE8EE;" />
-                <ToolTipService.ToolTip><ToolTip Content="Loop preview" /></ToolTipService.ToolTip>
-            </ToggleButton>
-            <Button x:Name="FitButton" Grid.Column="7" Height="32" Padding="10,0" AutomationProperties.Name="Fit preview" Click="FitButton_Click" Content="Fit" Style="{StaticResource CutFlowButtonStyle}" TabIndex="44">
-                <ToolTipService.ToolTip><ToolTip Content="Fit preview to the available space" /></ToolTipService.ToolTip>
-            </Button>
-        </Grid>
+        <ScrollViewer
+            x:Name="PreviewTransportScrollViewer"
+            Grid.Row="1"
+            HorizontalContentAlignment="Stretch"
+            HorizontalScrollBarVisibility="Auto"
+            HorizontalScrollMode="Enabled"
+            VerticalScrollBarVisibility="Disabled"
+            VerticalScrollMode="Disabled">
+            <Grid ColumnSpacing="6" VerticalAlignment="Center">
+                <Grid.ColumnDefinitions>
+                    <ColumnDefinition Width="Auto" />
+                    <ColumnDefinition Width="*" />
+                    <ColumnDefinition Width="Auto" />
+                    <ColumnDefinition Width="Auto" />
+                    <ColumnDefinition Width="Auto" />
+                    <ColumnDefinition Width="Auto" />
+                    <ColumnDefinition Width="Auto" />
+                    <ColumnDefinition Width="Auto" />
+                </Grid.ColumnDefinitions>
+                <TextBlock x:Name="TimecodeText" Grid.Column="0" VerticalAlignment="Center" AutomationProperties.Name="Current preview time and total duration" Style="{StaticResource CaptionTextBlockStyle}" Text="00:00:00:00 / 00:00:00:00" />
+                <Button x:Name="PreviousFrameButton" Grid.Column="2" AutomationProperties.Name="Previous frame" Click="PreviousFrameButton_Click" IsEnabled="False" Style="{StaticResource IconButtonStyle}" TabIndex="39">
+                    <FontIcon FontSize="14" Glyph="&#xE892;" />
+                    <ToolTipService.ToolTip><ToolTip Content="Previous frame" /></ToolTipService.ToolTip>
+                </Button>
+                <Button x:Name="PlayButton" Grid.Column="3" AutomationProperties.Name="Play preview unavailable" Click="PlayButton_Click" IsEnabled="False" Style="{StaticResource IconButtonStyle}" TabIndex="40">
+                    <FontIcon x:Name="PlayIcon" FontSize="15" Glyph="&#xE768;" />
+                    <ToolTipService.ToolTip><ToolTip x:Name="PlayToolTip" Content="Playback is unavailable until the preview has media" /></ToolTipService.ToolTip>
+                </Button>
+                <Button x:Name="NextFrameButton" Grid.Column="4" AutomationProperties.Name="Next frame" Click="NextFrameButton_Click" IsEnabled="False" Style="{StaticResource IconButtonStyle}" TabIndex="41">
+                    <FontIcon FontSize="14" Glyph="&#xE893;" />
+                    <ToolTipService.ToolTip><ToolTip Content="Next frame" /></ToolTipService.ToolTip>
+                </Button>
+                <ToggleButton x:Name="MuteButton" Grid.Column="5" Width="34" Height="32" AutomationProperties.Name="Mute preview" Click="MuteButton_Click" IsEnabled="False" TabIndex="42">
+                    <FontIcon FontSize="14" Glyph="&#xE767;" />
+                    <ToolTipService.ToolTip><ToolTip Content="Mute preview" /></ToolTipService.ToolTip>
+                </ToggleButton>
+                <ToggleButton x:Name="LoopButton" Grid.Column="6" Width="34" Height="32" AutomationProperties.Name="Loop preview" Click="LoopButton_Click" IsEnabled="False" TabIndex="43">
+                    <FontIcon FontSize="14" Glyph="&#xE8EE;" />
+                    <ToolTipService.ToolTip><ToolTip Content="Loop preview" /></ToolTipService.ToolTip>
+                </ToggleButton>
+                <Button x:Name="FitButton" Grid.Column="7" Height="32" Padding="10,0" AutomationProperties.Name="Fit preview" Click="FitButton_Click" Content="Fit" Style="{StaticResource CutFlowButtonStyle}" TabIndex="44">
+                    <ToolTipService.ToolTip><ToolTip Content="Fit preview to the available space" /></ToolTipService.ToolTip>
+                </Button>
+            </Grid>
+        </ScrollViewer>
         <Grid x:Name="RenderHostGrid" Grid.RowSpan="2" Width="1" Height="1" Opacity="0" IsHitTestVisible="False" HorizontalAlignment="Right" VerticalAlignment="Bottom" />
     </Grid>
 </UserControl>

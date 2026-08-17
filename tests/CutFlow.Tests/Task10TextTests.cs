@@ -799,6 +799,22 @@ public sealed partial class Task10TextTests
     }
 
     [TestMethod]
+    public void InspectorDuplicateCommit_SecondNoOpDoesNotAddHistory()
+    {
+        var project = ProjectDocument.CreateNew("Inspector", DateTimeOffset.UnixEpoch);
+        var item = new TextTimelineItem { Id = Guid.NewGuid() };
+        project.TextItems.Add(item);
+        var viewModel = new EditorViewModel(project);
+        var committed = 0;
+        viewModel.EditCommitted += (_, _) => committed++;
+
+        Assert.IsTrue(viewModel.SetTextContent(item.Id, "Changed"));
+        Assert.IsFalse(viewModel.SetTextContent(item.Id, "Changed"));
+        Assert.AreEqual(1L, viewModel.Revision);
+        Assert.AreEqual(1, committed);
+    }
+
+    [TestMethod]
     public void InspectorEditBoundary_RefreshesCanonicalStateAfterRequest()
     {
         var project = ProjectDocument.CreateNew("Inspector", DateTimeOffset.UnixEpoch);
