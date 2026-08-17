@@ -1,6 +1,6 @@
 namespace CutFlow.Services;
 
-public sealed class PreviewRebuildGate : IDisposable
+public sealed partial class PreviewRebuildGate : IDisposable
 {
     private readonly object _sync = new();
     private CancellationTokenSource? _current;
@@ -56,7 +56,7 @@ public sealed class PreviewRebuildGate : IDisposable
     }
 }
 
-public sealed class PreviewRebuildLease : IDisposable
+public sealed partial class PreviewRebuildLease : IDisposable
 {
     private readonly PreviewRebuildGate _owner;
 

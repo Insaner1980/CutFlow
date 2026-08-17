@@ -17,7 +17,7 @@ public sealed class MediaDropReaderTests
 
         Assert.IsFalse(result.IsSuccess);
         Assert.HasCount(0, result.Files);
-        StringAssert.Contains(result.ErrorMessage, "dropped");
+        Assert.Contains("dropped", result.ErrorMessage!);
     }
 
     [TestMethod]
@@ -42,7 +42,7 @@ public sealed class MediaDropReaderTests
 
             Assert.IsFalse(result.IsSuccess, expected.GetType().Name);
             Assert.AreSame(expected, result.Exception);
-            StringAssert.Contains(result.ErrorMessage, "dropped");
+            Assert.Contains("dropped", result.ErrorMessage!);
         }
     }
 
@@ -94,7 +94,7 @@ public sealed class MediaDropReaderTests
             Assert.HasCount(1, result.Files);
             Assert.HasCount(1, result.RejectedItems);
             Assert.AreEqual(folder.Name, result.RejectedItems[0].ItemName);
-            StringAssert.Contains(result.RejectedItems[0].Message, "local media files");
+            Assert.Contains("local media files", result.RejectedItems[0].Message);
         }
         finally
         {

@@ -12,9 +12,10 @@ namespace CutFlow.Views;
 
 public sealed partial class EditorView
 {
+    private static readonly TimeSpan ExportCloseTimeout = TimeSpan.FromSeconds(10);
     private CancellationTokenSource? _exportCts;
     private Task? _activeExportTask;
-    private string? _lastExportPath;
+    private ExportResultAction? _lastExportResult;
     private readonly ExportOperationState _exportState = new();
     private bool _isExporting => _exportState.IsActive;
     private bool _isRendering => _exportState.IsRendering;
@@ -22,8 +23,7 @@ public sealed partial class EditorView
     public async Task ExportAsync(nint windowHandle)
     {
         EnsureActive();
-        if (!ExportPresentation.CanStartExport(ViewModel.Project, _isExporting) ||
-            !_exportState.TryBegin(out var operationId))
+        if (!TryBeginExport(out var operationId))
         {
             return;
         }
@@ -56,57 +56,19 @@ public sealed partial class EditorView
                 return;
             }
 
-            string? destinationPath;
-            try
-            {
-                destinationPath = await FilePickerHelper.PickExportFileAsync(
-                    windowHandle,
-                    selection.FileName,
-                    _workspaceSettings.LastExportFolder,
-                    _lifetimeToken);
-            }
-            catch (OperationCanceledException) when (_lifetimeToken.IsCancellationRequested || !CanContinueExport(operationId))
-            {
-                return;
-            }
-            catch (Exception exception) when (IsExpectedExportException(exception))
-            {
-                if (CanContinueExport(operationId))
-                {
-                    ReportExportFailure(exception);
-                }
-
-                return;
-            }
-
-            if (string.IsNullOrWhiteSpace(destinationPath) || !CanContinueExport(operationId))
+            var destination = await PickExportDestinationAsync(windowHandle, operationId, selection);
+            if (destination is null || !_exportState.TryBeginRender(operationId))
             {
                 return;
             }
 
-            _workspaceSettings.LastExportFolder = Path.GetDirectoryName(destinationPath) ?? string.Empty;
-            RaiseWorkspaceSettingsChanged();
-            if (!_exportState.TryBeginRender(operationId))
-            {
-                return;
-            }
-
-            var operation = RunExportAsync(savedProjectSnapshot, destinationPath, selection.Options);
+            var operation = RunExportAsync(savedProjectSnapshot, destination.Path, destination.Options);
             _activeExportTask = operation;
-            try
-            {
-                await operation;
-            }
-            finally
-            {
-                if (ReferenceEquals(_activeExportTask, operation))
-                {
-                    _activeExportTask = null;
-                }
-            }
+            await TrackExportOperationAsync(operation);
         }
         catch (OperationCanceledException) when (_lifetimeToken.IsCancellationRequested || !CanContinueExport(operationId))
         {
+            // Closing or a superseding export operation owns the remaining cleanup.
         }
         catch (Exception exception) when (IsExpectedExportException(exception))
         {
@@ -125,6 +87,64 @@ public sealed partial class EditorView
         }
     }
 
+    private bool TryBeginExport(out long operationId)
+    {
+        operationId = 0;
+        return ExportPresentation.CanStartExport(ViewModel.Project, _isExporting) &&
+            _exportState.TryBegin(out operationId);
+    }
+
+    private async Task<ExportDestination?> PickExportDestinationAsync(
+        nint windowHandle,
+        long operationId,
+        ExportDialogSelection selection)
+    {
+        try
+        {
+            var path = await FilePickerHelper.PickExportFileAsync(
+                windowHandle,
+                selection.FileName,
+                _workspaceSettings.LastExportFolder,
+                _lifetimeToken);
+            if (string.IsNullOrWhiteSpace(path) || !CanContinueExport(operationId))
+            {
+                return null;
+            }
+
+            _workspaceSettings.LastExportFolder = Path.GetDirectoryName(path) ?? string.Empty;
+            RaiseWorkspaceSettingsChanged();
+            return new ExportDestination(path, selection.Options);
+        }
+        catch (OperationCanceledException) when (_lifetimeToken.IsCancellationRequested || !CanContinueExport(operationId))
+        {
+            return null;
+        }
+        catch (Exception exception) when (IsExpectedExportException(exception))
+        {
+            if (CanContinueExport(operationId))
+            {
+                ReportExportFailure(exception);
+            }
+
+            return null;
+        }
+    }
+
+    private async Task TrackExportOperationAsync(Task operation)
+    {
+        try
+        {
+            await operation;
+        }
+        finally
+        {
+            if (ReferenceEquals(_activeExportTask, operation))
+            {
+                _activeExportTask = null;
+            }
+        }
+    }
+
     private bool CanContinueExport(long operationId) =>
         !_disposed && _exportState.CanContinue(operationId);
 
@@ -132,13 +152,34 @@ public sealed partial class EditorView
     {
         CommitProjectName();
         _exportState.BeginClosing();
-        _exportCts?.Cancel();
-        if (_activeExportTask is { } operation)
+        if (_exportCts is { } cancellation)
         {
-            await operation;
+            await cancellation.CancelAsync();
+        }
+
+        if (_activeExportTask is { } operation &&
+            !await WaitForExportCleanupAsync(operation, ExportCloseTimeout))
+        {
+            ReportError(
+                "Export is still stopping",
+                $"{AppInfo.ProductName} stayed open so the export can finish safely. Try closing again.");
+            return false;
         }
 
         return await SaveAsync();
+    }
+
+    internal static async Task<bool> WaitForExportCleanupAsync(Task operation, TimeSpan timeout)
+    {
+        try
+        {
+            await operation.WaitAsync(timeout);
+            return true;
+        }
+        catch (TimeoutException)
+        {
+            return false;
+        }
     }
 
     public void CancelClosePreparation()
@@ -160,7 +201,10 @@ public sealed partial class EditorView
         ShowExportProgress(Path.GetFileName(destinationPath));
         try
         {
-            var progress = new Progress<double>(value => UpdateExportProgress(value, cancellation));
+            var progress = new ExportProgressDispatcher(
+                callback => DispatcherQueue.TryEnqueue(() => callback()),
+                value => ApplyExportProgress(value, cancellation),
+                cancellation.Token);
             var service = new ExportService(_compositionService, _textOverlayRenderer, _logService);
             var result = await service.ExportToPathAsync(
                 projectSnapshot,
@@ -186,7 +230,7 @@ public sealed partial class EditorView
                 default:
                     HideExportStatus();
                     ShowMessage(InfoBarSeverity.Error, "Export failed", result.ErrorMessage);
-                    _ = _logService.TryWriteAsync($"Export failed: {result.Status}");
+                    _ = _logService.TryWriteAsync($"Export failed: {result.Status}", CancellationToken.None);
                     break;
             }
         }
@@ -355,7 +399,7 @@ public sealed partial class EditorView
 
     private void ShowExportProgress(string fileName)
     {
-        _lastExportPath = null;
+        _lastExportResult = null;
         ExportStatusTitle.Text = "Exporting video";
         ExportStatusMessage.Text = $"Creating '{fileName}' at full resolution. You can keep working in the editor.";
         ExportProgressBar.Value = 0;
@@ -367,24 +411,26 @@ public sealed partial class EditorView
         ExportStatusPanel.Visibility = Visibility.Visible;
     }
 
-    private void UpdateExportProgress(double value, CancellationTokenSource operation)
+    private void ApplyExportProgress(double value, CancellationTokenSource operation)
     {
-        var normalized = ExportPresentation.NormalizeProgress(value);
-        DispatcherQueue.TryEnqueue(() =>
+        if (!CanApplyExportProgress(_disposed, _exportCts, operation))
         {
-            if (_disposed || !ReferenceEquals(_exportCts, operation))
-            {
-                return;
-            }
+            return;
+        }
 
-            ExportProgressBar.Value = normalized;
-            ExportProgressText.Text = $"{normalized:0}%";
-        });
+        ExportProgressBar.Value = value;
+        ExportProgressText.Text = $"{value:0}%";
     }
+
+    internal static bool CanApplyExportProgress(
+        bool disposed,
+        CancellationTokenSource? currentOperation,
+        CancellationTokenSource operation) =>
+        !disposed && ReferenceEquals(currentOperation, operation) && !operation.IsCancellationRequested;
 
     private void ShowExportSuccess(string destinationPath)
     {
-        _lastExportPath = destinationPath;
+        _lastExportResult = new ExportResultAction(destinationPath);
         ExportStatusTitle.Text = "Export complete";
         ExportStatusMessage.Text = $"'{Path.GetFileName(destinationPath)}' is ready.";
         ExportProgressBar.Value = 100;
@@ -398,9 +444,15 @@ public sealed partial class EditorView
     private void RefreshExportAvailability()
     {
         ExportButton.IsEnabled = ExportPresentation.CanStartExport(ViewModel.Project, _isExporting);
-        AutomationProperties.SetHelpText(
-            ExportButton,
-            ExportButton.IsEnabled ? string.Empty : _isExporting ? "Export setup is open or rendering is in progress" : "Add visual media to V1 before exporting");
+        var helpText = string.Empty;
+        if (!ExportButton.IsEnabled)
+        {
+            helpText = _isExporting
+                ? "Export setup is open or rendering is in progress"
+                : "Add visual media to V1 before exporting";
+        }
+
+        AutomationProperties.SetHelpText(ExportButton, helpText);
     }
 
     private void HideExportStatus() => ExportStatusPanel.Visibility = Visibility.Collapsed;
@@ -422,7 +474,8 @@ public sealed partial class EditorView
 
     private async Task OpenExportResultAsync(bool openFolder)
     {
-        if (string.IsNullOrWhiteSpace(_lastExportPath) || _disposed)
+        var operation = _lastExportResult;
+        if (_disposed || operation is null || !operation.TryBegin())
         {
             return;
         }
@@ -432,51 +485,165 @@ public sealed partial class EditorView
             bool launched;
             if (openFolder)
             {
-                var folderPath = Path.GetDirectoryName(_lastExportPath)
+                var folderPath = Path.GetDirectoryName(operation.DestinationPath)
                     ?? throw new InvalidOperationException("The export folder is unavailable.");
                 var folder = await Windows.Storage.StorageFolder.GetFolderFromPathAsync(folderPath);
+                if (!CanContinueOpenExportResult(_disposed, _lastExportResult, operation))
+                {
+                    return;
+                }
+
                 launched = await Launcher.LaunchFolderAsync(folder);
             }
             else
             {
-                var file = await Windows.Storage.StorageFile.GetFileFromPathAsync(_lastExportPath);
+                var file = await Windows.Storage.StorageFile.GetFileFromPathAsync(operation.DestinationPath);
+                if (!CanContinueOpenExportResult(_disposed, _lastExportResult, operation))
+                {
+                    return;
+                }
+
                 launched = await Launcher.LaunchFileAsync(file);
             }
 
             if (!launched)
             {
-                ReportOpenExportFailure(openFolder, "LauncherReturnedFalse");
+                ReportOpenExportFailure(operation, openFolder, "LauncherReturnedFalse");
             }
         }
-        catch (Exception exception) when (IsExpectedExportException(exception))
+        catch (Exception exception) when (IsExpectedExportException(exception) || exception is InvalidOperationException)
         {
-            ReportOpenExportFailure(openFolder, exception.GetType().Name);
+            ReportOpenExportFailure(operation, openFolder, exception.GetType().Name);
+        }
+        finally
+        {
+            operation.Complete();
         }
     }
 
-    private void ReportOpenExportFailure(bool openFolder, string reason)
+    internal static bool CanContinueOpenExportResult(
+        bool disposed,
+        ExportResultAction? currentOperation,
+        ExportResultAction operation) =>
+        !disposed && ReferenceEquals(currentOperation, operation);
+
+    private void ReportOpenExportFailure(ExportResultAction operation, bool openFolder, string reason)
     {
+        if (!CanContinueOpenExportResult(_disposed, _lastExportResult, operation))
+        {
+            return;
+        }
+
+        _lastExportResult = null;
+        HideExportStatus();
         ReportError(
             openFolder ? "Could not open export folder" : "Could not open exported file",
             "The exported item may have been moved or is no longer available.");
-        _ = _logService.TryWriteAsync($"Open export result failed: {reason}");
+        _ = _logService.TryWriteAsync($"Open export result failed: {reason}", CancellationToken.None);
     }
 
     private void ReportExportFailure(Exception exception)
     {
-        var message = exception switch
-        {
-            UnauthorizedAccessException => $"{AppInfo.ProductName} could not write to that location. Choose another folder and try again.",
-            IOException => "The output file could not be created. Check the destination and available disk space, then try again.",
-            ArgumentException or NotSupportedException => "The output path is invalid. Choose another filename or folder.",
-            _ => "Windows could not encode the project. Check the source files and try another output location."
-        };
+        var message = ExportFailureMapper.GetExceptionMessage(exception)
+            ?? throw new InvalidOperationException("Unexpected export exceptions must not be converted to user-facing failures.");
         ShowMessage(InfoBarSeverity.Error, "Export failed", message);
-        _ = _logService.TryWriteAsync($"Export failed: {exception.GetType().Name}");
+        _ = _logService.TryWriteAsync(
+            $"Export failed: {exception.GetType().Name}; HRESULT=0x{exception.HResult:X8}",
+            CancellationToken.None);
     }
 
-    private static bool IsExpectedExportException(Exception exception) =>
-        exception is IOException or UnauthorizedAccessException or ArgumentException or NotSupportedException or InvalidOperationException or COMException;
+    internal static bool IsExpectedExportException(Exception exception) =>
+        ExportFailureMapper.GetExceptionMessage(exception) is not null;
 
     private sealed record ExportDialogSelection(string FileName, ExportOptions Options);
+    private sealed record ExportDestination(string Path, ExportOptions Options);
+}
+
+internal sealed class ExportResultAction(string destinationPath)
+{
+    private bool _isActive;
+
+    public string DestinationPath { get; } = destinationPath;
+
+    public bool TryBegin()
+    {
+        if (_isActive)
+        {
+            return false;
+        }
+
+        _isActive = true;
+        return true;
+    }
+
+    public void Complete() => _isActive = false;
+}
+
+internal sealed class ExportProgressDispatcher : IProgress<double>
+{
+    private const double MaximumActiveProgress = 99;
+    private readonly object _sync = new();
+    private readonly Func<Action, bool> _tryEnqueue;
+    private readonly Action<double> _apply;
+    private readonly CancellationToken _cancellationToken;
+    private double _latestValue;
+    private bool _updateQueued;
+
+    public ExportProgressDispatcher(
+        Func<Action, bool> tryEnqueue,
+        Action<double> apply,
+        CancellationToken cancellationToken)
+    {
+        _tryEnqueue = tryEnqueue;
+        _apply = apply;
+        _cancellationToken = cancellationToken;
+    }
+
+    public void Report(double value)
+    {
+        if (_cancellationToken.IsCancellationRequested)
+        {
+            return;
+        }
+
+        var normalized = Math.Min(ExportPresentation.NormalizeProgress(value), MaximumActiveProgress);
+        lock (_sync)
+        {
+            if (_cancellationToken.IsCancellationRequested || normalized <= _latestValue)
+            {
+                return;
+            }
+
+            _latestValue = normalized;
+            if (_updateQueued)
+            {
+                return;
+            }
+
+            _updateQueued = true;
+        }
+
+        if (!_tryEnqueue(Drain))
+        {
+            lock (_sync)
+            {
+                _updateQueued = false;
+            }
+        }
+    }
+
+    private void Drain()
+    {
+        double value;
+        lock (_sync)
+        {
+            _updateQueued = false;
+            value = _latestValue;
+        }
+
+        if (!_cancellationToken.IsCancellationRequested)
+        {
+            _apply(value);
+        }
+    }
 }

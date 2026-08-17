@@ -75,7 +75,7 @@ public sealed class TimelineScaleTests
         Assert.AreEqual("00:00.500", labels[2]);
         Assert.AreEqual("00:00.750", labels[3]);
         Assert.AreEqual("00:01.000", labels[4]);
-        Assert.AreEqual(labels.Length, labels.Distinct().Count());
+        Assert.HasCount(labels.Length, labels.Distinct());
     }
 
     [TestMethod]

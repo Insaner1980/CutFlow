@@ -135,6 +135,8 @@
                                                 </StackPanel>
                                                 <Button
                                                     Grid.Column="1"
+                                                    Width="40"
+                                                    Height="40"
                                                     VerticalAlignment="Top"
                                                     AutomationProperties.Name="{x:Bind Name}"
                                                     Style="{StaticResource IconButtonStyle}"

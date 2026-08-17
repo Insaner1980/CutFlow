@@ -5,7 +5,7 @@ using Microsoft.VisualStudio.TestTools.UnitTesting;
 namespace CutFlow.Tests;
 
 [TestClass]
-public sealed class Task11SettingsTests
+public sealed partial class Task11SettingsTests
 {
     [TestMethod]
     public void ClampPhysicalToWorkArea_EnforcesMinimumSizeAndVisiblePositionAt96Dpi()
@@ -300,8 +300,8 @@ public sealed class Task11SettingsTests
             WindowHeight = double.NaN
         }, targetDpi: 1);
 
-        Assert.IsTrue(requested.Width > 0);
-        Assert.IsTrue(requested.Height > 0);
+        Assert.IsGreaterThan(0, requested.Width);
+        Assert.IsGreaterThan(0, requested.Height);
     }
 
     [TestMethod]
@@ -317,7 +317,7 @@ public sealed class Task11SettingsTests
     {
         using var directory = new TemporaryDirectory();
 
-        var settings = await new SettingsService(directory.Path).LoadAsync();
+        var settings = await new SettingsService(directory.Path).LoadAsync(TestContext.CancellationToken);
 
         Assert.AreEqual(1500d, settings.WindowWidth);
         Assert.AreEqual(900d, settings.WindowHeight);
@@ -337,9 +337,9 @@ public sealed class Task11SettingsTests
             WindowHeight = double.NaN,
             TimelineZoom = 999,
             TimelineHeight = -1
-        });
+        }, TestContext.CancellationToken);
 
-        var settings = await service.LoadAsync();
+        var settings = await service.LoadAsync(TestContext.CancellationToken);
 
         Assert.AreEqual(1500d, settings.WindowWidth);
         Assert.AreEqual(900d, settings.WindowHeight);
@@ -360,9 +360,9 @@ public sealed class Task11SettingsTests
             TimelineZoom = 240,
             TimelineHeight = 420,
             LoopPlayback = true
-        });
+        }, TestContext.CancellationToken);
 
-        var settings = await service.LoadAsync();
+        var settings = await service.LoadAsync(TestContext.CancellationToken);
 
         Assert.AreEqual(240d, settings.TimelineZoom);
         Assert.AreEqual(420d, settings.TimelineHeight);
@@ -382,9 +382,9 @@ public sealed class Task11SettingsTests
             WindowPixelY = 120,
             WindowPixelWidth = 1600,
             WindowPixelHeight = 960
-        });
+        }, TestContext.CancellationToken);
 
-        var settings = await service.LoadAsync();
+        var settings = await service.LoadAsync(TestContext.CancellationToken);
 
         Assert.AreEqual(AppSettings.CurrentWindowBoundsVersion, settings.WindowBoundsVersion);
         Assert.AreEqual(-1800, settings.WindowPixelX);
@@ -393,7 +393,7 @@ public sealed class Task11SettingsTests
         Assert.AreEqual(960, settings.WindowPixelHeight);
     }
 
-    private sealed class TemporaryDirectory : IDisposable
+    private sealed partial class TemporaryDirectory : IDisposable
     {
         public TemporaryDirectory()
         {
@@ -411,4 +411,6 @@ public sealed class Task11SettingsTests
             }
         }
     }
+
+    public TestContext TestContext { get; set; }
 }

@@ -22,10 +22,10 @@ public sealed class ProjectModelTests
         Assert.AreEqual(1920, project.Settings.Width);
         Assert.AreEqual(1080, project.Settings.Height);
         Assert.AreEqual(30d, project.Settings.FrameRate);
-        Assert.AreEqual(0, project.Assets.Count);
-        Assert.AreEqual(0, project.VideoItems.Count);
-        Assert.AreEqual(0, project.AudioItems.Count);
-        Assert.AreEqual(0, project.TextItems.Count);
+        Assert.IsEmpty(project.Assets);
+        Assert.IsEmpty(project.VideoItems);
+        Assert.IsEmpty(project.AudioItems);
+        Assert.IsEmpty(project.TextItems);
     }
 
     [TestMethod]
@@ -71,7 +71,7 @@ public sealed class ProjectModelTests
 
         var json = JsonSerializer.Serialize(settings);
 
-        StringAssert.Contains(json, "\"aspectRatio\":\"Portrait9By16\"");
+        Assert.Contains("\"aspectRatio\":\"Portrait9By16\"", json);
     }
 
     [TestMethod]

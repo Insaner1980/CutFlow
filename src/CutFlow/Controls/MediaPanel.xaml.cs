@@ -75,9 +75,14 @@ public sealed partial class MediaPanel : UserControl, IDisposable
 
         AssetEmptyState.Visibility = assets.Count == 0 ? Visibility.Visible : Visibility.Collapsed;
         var anyForTool = _project.Assets.Any(asset => kinds.Contains(asset.Kind));
-        EmptyTitle.Text = anyForTool && query.Length > 0
-            ? "No matching assets"
-            : _tool == EditorTool.Audio ? "No audio imported" : "No media imported";
+        if (anyForTool && query.Length > 0)
+        {
+            EmptyTitle.Text = "No matching assets";
+        }
+        else
+        {
+            EmptyTitle.Text = _tool == EditorTool.Audio ? "No audio imported" : "No media imported";
+        }
         EmptyDescription.Text = anyForTool && query.Length > 0
             ? "Try a different filename."
             : "Import files or drop them here.";
@@ -164,6 +169,7 @@ public sealed partial class MediaPanel : UserControl, IDisposable
         }
         catch (OperationCanceledException)
         {
+            // A newer thumbnail request superseded this load.
         }
         catch (Exception exception) when (MediaImportService.IsExpectedMediaFailure(exception))
         {
@@ -421,49 +427,11 @@ public sealed partial class MediaPanel : UserControl, IDisposable
                 return;
             }
 
-            if (!result.IsSuccess)
-            {
-                MediaDropFailed?.Invoke(this, new MediaDropFailedEventArgs(result.ErrorMessage!, result.Exception));
-            }
-            else if (result.Files.Count > 0 || result.RejectedItems.Count > 0)
-            {
-                var acceptedFiles = new List<StorageFile>(result.Files.Count);
-                var resultSlots = new List<ImportResult?>(result.Files.Count + result.RejectedItems.Count);
-                foreach (var file in result.Files)
-                {
-                    if (!MediaImportService.TryResolveLocalSourcePath(file.Path, out var normalizedPath, out var pathError))
-                    {
-                        resultSlots.Add(ImportResult.Failure(file.Name, pathError!));
-                    }
-                    else if (!scope.Allows(normalizedPath))
-                    {
-                        resultSlots.Add(ImportResult.Failure(
-                            file.Name,
-                            scope == MediaImportScope.Audio
-                                ? "Only MP3 and WAV files can be dropped into the Audio panel."
-                                : "Only MP4, PNG, and JPEG files can be dropped into the Media panel."));
-                    }
-                    else
-                    {
-                        acceptedFiles.Add(file);
-                        resultSlots.Add(null);
-                    }
-                }
-
-                resultSlots.AddRange(result.RejectedItems.Select(
-                    item => ImportResult.Failure(item.ItemName, item.Message)));
-                if (acceptedFiles.Count > 0 || resultSlots.Count > 0)
-                {
-                    MediaFilesDropped?.Invoke(this, new MediaFilesDroppedEventArgs(acceptedFiles, resultSlots));
-                }
-
-                e.AcceptedOperation = acceptedFiles.Count > 0
-                    ? DataPackageOperation.Copy
-                    : DataPackageOperation.None;
-            }
+            PublishDropResult(scope, result, e);
         }
         catch (OperationCanceledException)
         {
+            // The panel lifetime ended while the drop was being read.
         }
         catch (Exception exception) when (MediaImportService.IsExpectedMediaFailure(exception))
         {
@@ -477,6 +445,58 @@ public sealed partial class MediaPanel : UserControl, IDisposable
             }
         }
     }
+
+    private void PublishDropResult(MediaImportScope scope, MediaDropReadResult result, DragEventArgs e)
+    {
+        if (!result.IsSuccess)
+        {
+            MediaDropFailed?.Invoke(this, new MediaDropFailedEventArgs(result.ErrorMessage!, result.Exception));
+            return;
+        }
+
+        if (result.Files.Count == 0 && result.RejectedItems.Count == 0)
+        {
+            return;
+        }
+
+        var (acceptedFiles, resultSlots) = ClassifyDroppedFiles(scope, result);
+        MediaFilesDropped?.Invoke(this, new MediaFilesDroppedEventArgs(acceptedFiles, resultSlots));
+        e.AcceptedOperation = acceptedFiles.Count > 0
+            ? DataPackageOperation.Copy
+            : DataPackageOperation.None;
+    }
+
+    private static (List<StorageFile> AcceptedFiles, List<ImportResult?> ResultSlots) ClassifyDroppedFiles(
+        MediaImportScope scope,
+        MediaDropReadResult result)
+    {
+        var acceptedFiles = new List<StorageFile>(result.Files.Count);
+        var resultSlots = new List<ImportResult?>(result.Files.Count + result.RejectedItems.Count);
+        foreach (var file in result.Files)
+        {
+            if (!MediaImportService.TryResolveLocalSourcePath(file.Path, out var normalizedPath, out var pathError))
+            {
+                resultSlots.Add(ImportResult.Failure(file.Name, pathError!));
+            }
+            else if (!scope.Allows(normalizedPath))
+            {
+                resultSlots.Add(ImportResult.Failure(file.Name, UnsupportedDropMessage(scope)));
+            }
+            else
+            {
+                acceptedFiles.Add(file);
+                resultSlots.Add(null);
+            }
+        }
+
+        resultSlots.AddRange(result.RejectedItems.Select(
+            item => ImportResult.Failure(item.ItemName, item.Message)));
+        return (acceptedFiles, resultSlots);
+    }
+
+    private static string UnsupportedDropMessage(MediaImportScope scope) => scope == MediaImportScope.Audio
+        ? "Only MP3 and WAV files can be dropped into the Audio panel."
+        : "Only MP4, PNG, and JPEG files can be dropped into the Media panel.";
 
     private void RestartThumbnailRefresh()
     {
@@ -504,7 +524,7 @@ public sealed class MediaImportRequestedEventArgs(MediaImportScope scope) : Even
     public MediaImportScope Scope { get; } = scope;
 }
 
-public sealed class MediaAssetCard : INotifyPropertyChanged
+public sealed partial class MediaAssetCard : INotifyPropertyChanged
 {
     private BitmapImage? _thumbnail;
     private CancellationTokenSource? _thumbnailCts;
@@ -516,9 +536,7 @@ public sealed class MediaAssetCard : INotifyPropertyChanged
         FileName = string.IsNullOrWhiteSpace(asset.FileName) ? Path.GetFileName(asset.SourcePath) : asset.FileName;
         FullPath = asset.SourcePath;
         TypeText = asset.Kind.ToString();
-        DurationText = asset.Kind == ProjectAssetKind.Image
-            ? TimecodeFormatter.Format(asset.DurationMilliseconds, 30)
-            : TimecodeFormatter.Format(asset.DurationMilliseconds, 30);
+        DurationText = TimecodeFormatter.Format(asset.DurationMilliseconds, 30);
         DimensionsText = asset.Width > 0 && asset.Height > 0 ? $"{asset.Width} × {asset.Height}" : "—";
         MissingVisibility = asset.IsMissing ? Visibility.Visible : Visibility.Collapsed;
         FallbackGlyph = asset.Kind == ProjectAssetKind.Audio ? "\uE8D6" : "\uE7C5";

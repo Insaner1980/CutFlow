@@ -8,7 +8,7 @@ using Windows.UI.Text;
 namespace CutFlow.Tests;
 
 [TestClass]
-public sealed class Task10TextStyleTests
+public sealed partial class Task10TextStyleTests
 {
     [TestMethod]
     public async Task SchemaOneTextStyles_MissingFieldsUseDefaultsAndCustomFieldsRoundTrip()
@@ -30,10 +30,10 @@ public sealed class Task10TextStyleTests
                 { "id": "{{customTextId}}", "durationMilliseconds": 3000, "text": "Custom", "isItalic": true, "backgroundEnabled": true, "backgroundColor": "#CC102030", "opacity": 0.35 }
               ]
             }
-            """);
+            """, TestContext.CancellationToken);
         var service = new ProjectService(directory.Path);
 
-        var loaded = await service.LoadAsync(id);
+        var loaded = await service.LoadAsync(id, TestContext.CancellationToken);
         var defaults = loaded.TextItems.Single(item => item.Id == defaultTextId);
         var custom = loaded.TextItems.Single(item => item.Id == customTextId);
 
@@ -44,8 +44,8 @@ public sealed class Task10TextStyleTests
         Assert.IsTrue(custom.BackgroundEnabled);
         Assert.AreEqual(0.35, custom.Opacity, 0.0001);
 
-        await service.SaveAsync(loaded);
-        var roundTrip = (await service.LoadAsync(id)).TextItems.Single(item => item.Id == customTextId);
+        await service.SaveAsync(loaded, TestContext.CancellationToken);
+        var roundTrip = (await service.LoadAsync(id, TestContext.CancellationToken)).TextItems.Single(item => item.Id == customTextId);
         Assert.IsTrue(roundTrip.IsItalic);
         Assert.IsTrue(roundTrip.BackgroundEnabled);
         Assert.AreEqual("#CC102030", roundTrip.BackgroundColor);
@@ -72,13 +72,12 @@ public sealed class Task10TextStyleTests
                 { "id": "{{Guid.NewGuid()}}", "durationMilliseconds": 3000, "fontFamily": "  Georgia  " }
               ]
             }
-            """);
+            """, TestContext.CancellationToken);
 
-        var loaded = await new ProjectService(directory.Path).LoadAsync(id);
+        var loaded = await new ProjectService(directory.Path).LoadAsync(id, TestContext.CancellationToken);
 
-        CollectionAssert.AreEqual(
-            new[] { "Segoe UI", "Segoe UI", "Segoe UI", "Segoe UI", "Arial", "Georgia" },
-            loaded.TextItems.Select(item => item.FontFamily).ToArray());
+        Assert.AreSequenceEqual(
+            expected, loaded.TextItems.Select(item => item.FontFamily).ToArray());
         Assert.IsTrue(loaded.TextItems.All(item => TextStyle.SupportedFontFamilies.Contains(item.FontFamily)));
     }
 
@@ -92,9 +91,9 @@ public sealed class Task10TextStyleTests
         var project = ProjectDocument.CreateNew("Opacity", DateTimeOffset.UnixEpoch);
         project.TextItems.Add(new TextTimelineItem { Id = Guid.NewGuid(), Text = "Opacity", Opacity = opacity });
 
-        await service.SaveAsync(project);
+        await service.SaveAsync(project, TestContext.CancellationToken);
 
-        Assert.AreEqual(expected, (await service.LoadAsync(project.Id)).TextItems.Single().Opacity);
+        Assert.AreEqual(expected, (await service.LoadAsync(project.Id, TestContext.CancellationToken)).TextItems.Single().Opacity);
     }
 
     [TestMethod]
@@ -346,7 +345,7 @@ public sealed class Task10TextStyleTests
         return new EditorViewModel(project);
     }
 
-    private sealed class TemporaryDirectory : IDisposable
+    private sealed partial class TemporaryDirectory : IDisposable
     {
         public TemporaryDirectory()
         {
@@ -364,4 +363,8 @@ public sealed class Task10TextStyleTests
             }
         }
     }
+
+    public TestContext TestContext { get; set; }
+
+    private static readonly string[] expected = new[] { "Segoe UI", "Segoe UI", "Segoe UI", "Segoe UI", "Arial", "Georgia" };
 }

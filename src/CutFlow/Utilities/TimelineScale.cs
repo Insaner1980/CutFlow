@@ -55,15 +55,9 @@ public sealed class TimelineScale
 
     public long GetRulerIntervalMilliseconds()
     {
-        foreach (var interval in RulerIntervalsMilliseconds)
-        {
-            if (TimeToPixels(interval) >= MinimumRulerIntervalPixels)
-            {
-                return interval;
-            }
-        }
-
-        return RulerIntervalsMilliseconds[^1];
+        return RulerIntervalsMilliseconds.FirstOrDefault(
+            interval => TimeToPixels(interval) >= MinimumRulerIntervalPixels,
+            RulerIntervalsMilliseconds[^1]);
     }
 
     internal static string FormatRulerLabel(long milliseconds, long intervalMilliseconds)

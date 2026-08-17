@@ -19,7 +19,7 @@ public sealed class Task11WorkspaceSettingsTests
     }
 
     [TestMethod]
-    public void TimelineResize_CanceledOrLostCaptureRestoresPreviewWithoutPersisting()
+    public void TimelineResize_CanceledOrLostCaptureRestoresCanonicalHeightWithoutPersisting()
     {
         var root = FindRepositoryRoot();
         var xaml = File.ReadAllText(Path.Combine(root, "src", "CutFlow", "Views", "EditorView.xaml"));
@@ -30,12 +30,12 @@ public sealed class Task11WorkspaceSettingsTests
         var captureLost = GetMethod(source, "private void TimelineResizeHandle_PointerCaptureLost", "private bool CancelTimelineResize");
         var cancel = GetMethod(source, "private bool CancelTimelineResize", "private void ToolPanel_ImportRequested");
 
-        StringAssert.Contains(xaml, "PointerCanceled=\"TimelineResizeHandle_PointerCanceled\"");
-        StringAssert.Contains(moved, "notify: false");
-        StringAssert.Contains(released, "SetTimelineHeight(TimelineHeight, notify: true);");
-        StringAssert.Contains(canceled, "CancelTimelineResize(e.Pointer.PointerId)");
-        StringAssert.Contains(captureLost, "CancelTimelineResize(e.Pointer.PointerId, releaseCapture: false)");
-        StringAssert.Contains(cancel, "SetTimelineHeight(_timelineResizeStartHeight, notify: false);");
+        Assert.Contains("PointerCanceled=\"TimelineResizeHandle_PointerCanceled\"", xaml);
+        Assert.Contains("notify: false", moved);
+        Assert.Contains("SetTimelineHeight(TimelineHeight, notify: true);", released);
+        Assert.Contains("CancelTimelineResize(e.Pointer.PointerId)", canceled);
+        Assert.Contains("CancelTimelineResize(e.Pointer.PointerId, releaseCapture: false)", captureLost);
+        Assert.Contains("SetTimelineHeight(_workspaceSettings.TimelineHeight, notify: false);", cancel);
     }
 
     [TestMethod]
@@ -50,8 +50,115 @@ public sealed class Task11WorkspaceSettingsTests
         var sizeChanged = GetMethod(source, "private void EditorView_SizeChanged", "private void InspectorToggle_Click");
         var raiseChanged = GetMethod(source, "private void RaiseWorkspaceSettingsChanged", "private void TimelineResizeHandle_PointerPressed");
 
-        StringAssert.Contains(sizeChanged, "SetTimelineHeight(_workspaceSettings.TimelineHeight, notify: false);");
-        StringAssert.Contains(raiseChanged, "_workspaceSettings.TimelineHeight");
+        var cancel = sizeChanged.IndexOf("CancelTimelineResize();", StringComparison.Ordinal);
+        var reflow = sizeChanged.IndexOf("SetTimelineHeight(_workspaceSettings.TimelineHeight, notify: false);", StringComparison.Ordinal);
+        Assert.IsGreaterThanOrEqualTo(0, cancel, "A window resize must cancel an active timeline resize.");
+        Assert.IsGreaterThan(cancel, reflow, "The canonical height must be reapplied after canceling the drag.");
+        Assert.Contains("SetTimelineHeight(_workspaceSettings.TimelineHeight, notify: false);", sizeChanged);
+        Assert.Contains("_workspaceSettings.TimelineHeight", raiseChanged);
+    }
+
+    [TestMethod]
+    public void TimelineResize_HandleKeepsEightPixelHitTargetAndVisibleDarkThemeIndicator()
+    {
+        var xaml = File.ReadAllText(Path.Combine(
+            FindRepositoryRoot(),
+            "src",
+            "CutFlow",
+            "Views",
+            "EditorView.xaml"));
+
+        Assert.Contains("<RowDefinition Height=\"8\" />", xaml);
+        Assert.Contains("x:Name=\"TimelineResizeHandle\"", xaml);
+        Assert.Contains("Height=\"1\" VerticalAlignment=\"Center\" Background=\"{StaticResource TextTertiaryBrush}\"", xaml);
+    }
+
+    [TestMethod]
+    [DataRow(1320d, true)]
+    [DataRow(1321d, false)]
+    public void InspectorBreakpoint_UsesExactLogicalEditorWidth(double logicalWidth, bool expectedOverlay)
+    {
+        Assert.AreEqual(expectedOverlay, CutFlow.Views.EditorView.UseOverlayInspector(logicalWidth));
+    }
+
+    [TestMethod]
+    [DataRow(false, false, false, false, false)]
+    [DataRow(false, false, true, false, false)]
+    [DataRow(false, true, false, true, false)]
+    [DataRow(false, true, true, true, false)]
+    [DataRow(true, false, false, false, false)]
+    [DataRow(true, true, false, false, false)]
+    [DataRow(true, false, true, false, true)]
+    [DataRow(true, true, true, false, true)]
+    public void InspectorVisibility_ActivatesOnlyTheSurfaceForTheCurrentLayout(
+        bool isNarrow,
+        bool wideVisible,
+        bool narrowVisible,
+        bool expectedDesktop,
+        bool expectedOverlay)
+    {
+        var (showDesktop, showOverlay) = CutFlow.Views.EditorView.ResolveInspectorVisibility(
+            isNarrow,
+            wideVisible,
+            narrowVisible);
+
+        Assert.AreEqual(expectedDesktop, showDesktop);
+        Assert.AreEqual(expectedOverlay, showOverlay);
+        Assert.IsFalse(showDesktop && showOverlay);
+    }
+
+    [TestMethod]
+    public void InspectorToggle_UsesInspectorIconAndTracksEveryVisibilityRoute()
+    {
+        var root = FindRepositoryRoot();
+        var xaml = File.ReadAllText(Path.Combine(root, "src", "CutFlow", "Views", "EditorView.xaml"));
+        var editor = File.ReadAllText(Path.Combine(root, "src", "CutFlow", "Views", "EditorView.xaml.cs"));
+        var applyLayout = GetMethod(editor, "private void ApplyInspectorLayout", "private void RestorePendingInspectorFocus");
+        var toggle = GetMethod(editor, "private void InspectorToggle_Click", "private void CloseOverlayInspector_Click");
+        var close = GetMethod(editor, "private void CloseOverlayInspector_Click", "private void Inspector_EditCommitted");
+
+        Assert.Contains("<ToggleButton x:Name=\"InspectorToggleButton\"", xaml);
+        Assert.Contains("IsChecked=\"True\"", xaml);
+        Assert.Contains("Glyph=\"&#xE90D;\"", xaml);
+        Assert.Contains("DesktopInspector.Visibility = showDesktop", applyLayout);
+        Assert.Contains("InspectorOverlay.Visibility = showOverlay", applyLayout);
+        Assert.Contains("InspectorToggleButton.IsChecked = showDesktop || showOverlay;", applyLayout);
+        Assert.Contains("AutomationProperties.SetName(InspectorToggleButton, action);", applyLayout);
+        Assert.Contains("ToolTipService.SetToolTip(InspectorToggleButton, action);", applyLayout);
+        Assert.Contains("ApplyInspectorLayout();", toggle);
+        Assert.Contains("ApplyInspectorLayout();", close);
+    }
+
+    [TestMethod]
+    public void InspectorBreakpoint_ClosesStaleOverlayAndTransfersAnActiveTextEdit()
+    {
+        var root = FindRepositoryRoot();
+        var xaml = File.ReadAllText(Path.Combine(root, "src", "CutFlow", "Views", "EditorView.xaml"));
+        var editor = File.ReadAllText(Path.Combine(root, "src", "CutFlow", "Views", "EditorView.xaml.cs"));
+        var inspector = File.ReadAllText(Path.Combine(root, "src", "CutFlow", "Controls", "InspectorPanel.xaml.cs"));
+        var sizeChanged = GetMethod(editor, "private void EditorView_SizeChanged", "internal static bool UseOverlayInspector");
+        var applyLayout = GetMethod(editor, "private void ApplyInspectorLayout", "private void RestorePendingInspectorFocus");
+        var restoreFocus = GetMethod(editor, "private void RestorePendingInspectorFocus", "private void InspectorToggle_Click");
+        var selectionChanged = GetMethod(editor, "private void ViewModel_SelectionChanged", "private void Tool_Click");
+        var presentation = GetMethod(editor, "private void UpdateProjectPresentation", "private async Task RebuildPreviewAsync");
+
+        Assert.Contains("x:Name=\"DesktopInspector\"", xaml);
+        Assert.Contains("x:Name=\"NarrowInspector\"", xaml);
+        Assert.AreEqual(2, xaml.Split("EditCommitted=\"Inspector_EditCommitted\"", StringSplitOptions.None).Length - 1);
+        Assert.Contains("UseOverlayInspector(e.NewSize.Width)", sizeChanged);
+        Assert.Contains("CaptureFocus()", sizeChanged);
+        Assert.Contains("_narrowInspectorVisible = false;", sizeChanged);
+        Assert.Contains("_narrowInspectorVisible = true;", sizeChanged);
+        Assert.Contains("ResolveInspectorVisibility(", applyLayout);
+        Assert.Contains("_isNarrow ? NarrowInspector : DesktopInspector", restoreFocus);
+        Assert.Contains("RestoreFocus(_pendingInspectorFocus)", restoreFocus);
+        Assert.Contains("DesktopInspector.SetSelection(e.Selection);", selectionChanged);
+        Assert.Contains("NarrowInspector.SetSelection(e.Selection);", selectionChanged);
+        Assert.Contains("DesktopInspector.SetProject(ViewModel.Project);", presentation);
+        Assert.Contains("NarrowInspector.SetProject(ViewModel.Project);", presentation);
+        Assert.Contains("textBox.SelectionStart", inspector);
+        Assert.Contains("textBox.SelectionLength", inspector);
+        Assert.Contains("textBox.Focus(FocusState.Programmatic)", inspector);
     }
 
     private static string GetMethod(string source, string startMarker, string endMarker)

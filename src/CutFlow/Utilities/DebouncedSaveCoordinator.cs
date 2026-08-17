@@ -8,7 +8,7 @@ internal enum DebouncedSaveState
     SaveFailed
 }
 
-internal sealed class DebouncedSaveCoordinator : IDisposable
+internal sealed partial class DebouncedSaveCoordinator : IDisposable
 {
     private readonly Func<Task> _saveAsync;
     private readonly Func<CancellationToken, Task> _delayAsync;
@@ -71,8 +71,11 @@ internal sealed class DebouncedSaveCoordinator : IDisposable
             _debounceCancellation = null;
         }
 
-        pending?.Cancel();
-        pending?.Dispose();
+        if (pending is not null)
+        {
+            await pending.CancelAsync();
+            pending.Dispose();
+        }
         await SaveLatestAsync();
     }
 
@@ -107,6 +110,7 @@ internal sealed class DebouncedSaveCoordinator : IDisposable
         }
         catch (OperationCanceledException) when (cancellation.IsCancellationRequested)
         {
+            // A newer edit replaced this pending debounce operation.
         }
         catch
         {
@@ -128,7 +132,7 @@ internal sealed class DebouncedSaveCoordinator : IDisposable
 
     private async Task SaveLatestAsync()
     {
-        await _saveGate.WaitAsync();
+        await _saveGate.WaitAsync(CancellationToken.None);
         try
         {
             while (true)

@@ -84,7 +84,7 @@ public sealed class Task12ExportTests
             }
         }
 
-        CollectionAssert.AreEqual(expected, actual);
+        Assert.AreSequenceEqual(expected, actual);
     }
 
     [TestMethod]
@@ -138,11 +138,11 @@ public sealed class Task12ExportTests
         var missing = Path.Combine(directory.Path, "offline-share");
         var file = Path.Combine(directory.Path, "not-a-folder.txt");
         Directory.CreateDirectory(expected);
-        await File.WriteAllTextAsync(file, "file");
+        await File.WriteAllTextAsync(file, "file", TestContext.CancellationToken);
         var service = new SettingsService(directory.Path);
 
-        await service.SaveAsync(new AppSettings { LastExportFolder = $"  {expected}  " });
-        var loaded = await service.LoadAsync();
+        await service.SaveAsync(new AppSettings { LastExportFolder = $"  {expected}  " }, TestContext.CancellationToken);
+        var loaded = await service.LoadAsync(TestContext.CancellationToken);
 
         Assert.AreEqual(expected, loaded.LastExportFolder);
         Assert.AreEqual(string.Empty, AppSettings.Normalize(new AppSettings { LastExportFolder = "\0" }).LastExportFolder);
@@ -151,7 +151,7 @@ public sealed class Task12ExportTests
         Assert.AreEqual(string.Empty, AppSettings.Normalize(new AppSettings { LastExportFolder = file }).LastExportFolder);
 
         Directory.Delete(expected);
-        Assert.AreEqual(string.Empty, (await service.LoadAsync()).LastExportFolder);
+        Assert.AreEqual(string.Empty, (await service.LoadAsync(TestContext.CancellationToken)).LastExportFolder);
     }
 
     [TestMethod]
@@ -192,7 +192,7 @@ public sealed class Task12ExportTests
         var missing = Path.Combine(directory.Path, "offline-share");
         var file = Path.Combine(directory.Path, "not-a-folder.txt");
         var removed = Path.Combine(directory.Path, "removed");
-        await File.WriteAllTextAsync(file, "file");
+        await File.WriteAllTextAsync(file, "file", TestContext.CancellationToken);
         Directory.CreateDirectory(removed);
 
         Assert.AreEqual(Path.GetFullPath(directory.Path), FilePickerHelper.ResolveSuggestedExportFolder($"  {directory.Path}  "));
@@ -218,13 +218,13 @@ public sealed class Task12ExportTests
         {
             probeThread = Environment.CurrentManagedThreadId;
             probeStarted.Set();
-            Assert.IsTrue(releaseProbe.Wait(TimeSpan.FromSeconds(5)));
+            Assert.IsTrue(releaseProbe.Wait(TimeSpan.FromSeconds(5), TestContext.CancellationToken));
             return true;
         }
 
         var validationTask = ExportPreflight.ValidateAsync(project, refreshMissingFlags: false, Probe, CancellationToken.None);
 
-        Assert.IsTrue(probeStarted.Wait(TimeSpan.FromSeconds(5)));
+        Assert.IsTrue(probeStarted.Wait(TimeSpan.FromSeconds(5), TestContext.CancellationToken));
         Assert.IsFalse(validationTask.IsCompleted);
         Assert.AreNotEqual(callingThread, probeThread);
         releaseProbe.Set();
@@ -236,26 +236,81 @@ public sealed class Task12ExportTests
     {
         var state = new ExportOperationState();
 
-        Assert.IsTrue(state.TryBegin(out var operation));
+        Assert.IsTrue(state.TryBegin(out var setupOperation));
         Assert.IsTrue(state.IsActive);
         Assert.IsFalse(state.IsRendering);
-        Assert.IsTrue(state.CanContinue(operation));
+        Assert.IsTrue(state.CanContinue(setupOperation));
         Assert.IsFalse(state.TryBegin(out _));
-        Assert.IsTrue(state.TryBeginRender(operation));
+
+        state.BeginClosing();
+        Assert.IsFalse(state.CanContinue(setupOperation));
+        Assert.IsFalse(state.TryBeginRender(setupOperation));
+        state.CancelClosing();
+        Assert.IsFalse(state.CanContinue(setupOperation));
+        Assert.IsFalse(state.TryBeginRender(setupOperation));
+        Assert.IsFalse(state.TryBegin(out _));
+
+        state.Complete(setupOperation);
+        Assert.IsTrue(state.TryBegin(out var renderOperation));
+        Assert.AreNotEqual(setupOperation, renderOperation);
+        Assert.IsTrue(state.TryBeginRender(renderOperation));
         Assert.IsTrue(state.IsRendering);
 
         state.BeginClosing();
-        Assert.IsFalse(state.CanContinue(operation));
+        Assert.IsFalse(state.CanContinue(renderOperation));
         state.CancelClosing();
-        Assert.IsFalse(state.CanContinue(operation));
-        Assert.IsFalse(state.TryBegin(out _));
-
-        state.Complete(operation);
-        Assert.IsTrue(state.TryBegin(out var nextOperation));
-        Assert.IsTrue(state.CanContinue(nextOperation));
-        Assert.IsFalse(state.IsRendering);
-        state.Complete(nextOperation);
+        Assert.IsFalse(state.CanContinue(renderOperation));
+        state.Complete(renderOperation);
         Assert.IsFalse(state.IsActive);
+    }
+
+    [TestMethod]
+    public async Task CloseWait_BoundsHungNativeCancellationWithoutCompletingTheRender()
+    {
+        var render = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        var completed = await CutFlow.Views.EditorView.WaitForExportCleanupAsync(
+            render.Task,
+            TimeSpan.FromMilliseconds(20));
+
+        Assert.IsFalse(completed);
+        Assert.IsFalse(render.Task.IsCompleted);
+    }
+
+    [TestMethod]
+    public async Task CloseWait_AwaitsCompletedRenderCleanup()
+    {
+        var cleanup = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var wait = CutFlow.Views.EditorView.WaitForExportCleanupAsync(cleanup.Task, TimeSpan.FromSeconds(1));
+
+        Assert.IsFalse(wait.IsCompleted);
+        cleanup.SetResult();
+
+        Assert.IsTrue(await wait);
+    }
+
+    [TestMethod]
+    public void ClosePreparation_CancelsAndBoundsRenderBeforeSaving()
+    {
+        var source = File.ReadAllText(Path.Combine(
+            FindRepositoryRoot(),
+            "src",
+            "CutFlow",
+            "Views",
+            "EditorView.Export.cs"));
+        var closeStart = source.IndexOf("public async Task<bool> PrepareToCloseAsync()", StringComparison.Ordinal);
+        var closeEnd = source.IndexOf("internal static async Task<bool> WaitForExportCleanupAsync", closeStart, StringComparison.Ordinal);
+        var route = source[closeStart..closeEnd];
+        var invalidate = route.IndexOf("_exportState.BeginClosing();", StringComparison.Ordinal);
+        var cancel = route.IndexOf("await cancellation.CancelAsync();", StringComparison.Ordinal);
+        var wait = route.IndexOf("WaitForExportCleanupAsync(operation, ExportCloseTimeout)", StringComparison.Ordinal);
+        var abort = route.IndexOf("return false;", wait, StringComparison.Ordinal);
+        var save = route.IndexOf("return await SaveAsync();", StringComparison.Ordinal);
+
+        Assert.IsTrue(
+            invalidate >= 0 && cancel > invalidate && wait > cancel && abort > wait && save > abort,
+            "Close must invalidate setup, cancel and bound active render cleanup, and save only after cleanup completed.");
+        Assert.Contains("Export is still stopping", route);
     }
 
     [TestMethod]
@@ -305,28 +360,161 @@ public sealed class Task12ExportTests
         var dialogEnd = source.IndexOf("private void ShowExportProgress", dialogStart, StringComparison.Ordinal);
         var route = source[dialogStart..dialogEnd];
 
-        StringAssert.Contains(route, "dialog.Opened +=");
-        StringAssert.Contains(route, "fileNameBox.Focus(FocusState.Programmatic);");
-        StringAssert.Contains(route, "fileNameBox.SelectAll();");
-        StringAssert.Contains(route, "dialog.PrimaryButtonClick +=");
-        StringAssert.Contains(route, "ExportPresentation.TryValidateFileName(fileNameBox.Text");
-        StringAssert.Contains(route, "ExportPresentation.TryCreateOptions(");
-        StringAssert.Contains(route, "args.Cancel = true;");
-        StringAssert.Contains(route, "DefaultButton = ContentDialogButton.Primary");
-        StringAssert.Contains(route, "CloseButtonText = \"Cancel\"");
+        Assert.Contains("dialog.Opened +=", route);
+        Assert.Contains("fileNameBox.Focus(FocusState.Programmatic);", route);
+        Assert.Contains("fileNameBox.SelectAll();", route);
+        Assert.Contains("dialog.PrimaryButtonClick +=", route);
+        Assert.Contains("ExportPresentation.TryValidateFileName(fileNameBox.Text", route);
+        Assert.Contains("ExportPresentation.TryCreateOptions(", route);
+        Assert.Contains("args.Cancel = true;", route);
+        Assert.Contains("DefaultButton = ContentDialogButton.Primary", route);
+        Assert.Contains("CloseButtonText = \"Cancel\"", route);
     }
 
     [TestMethod]
     [DataRow(ExportResultStatus.Success, true, 0)]
     [DataRow(ExportResultStatus.Success, false, 0)]
-    [DataRow(ExportResultStatus.Failed, true, 1)]
+    [DataRow(ExportResultStatus.Failed, true, 2)]
     [DataRow(ExportResultStatus.Failed, false, 2)]
-    public void ResolveCompletion_PreservesCommittedSuccessAfterLateCancellation(
+    public void ResolveCompletion_PreservesPrimaryOutcomeAfterLateCancellation(
         ExportResultStatus status,
         bool cancellationRequested,
         int expected)
     {
         Assert.AreEqual((ExportCompletionState)expected, ExportPresentation.ResolveCompletion(status, cancellationRequested));
+    }
+
+    [TestMethod]
+    public void ExportProgressGate_AcceptsOnlyCurrentUncancelledOperation()
+    {
+        using var cancelled = new CancellationTokenSource();
+        using var fresh = new CancellationTokenSource();
+
+        Assert.IsTrue(CutFlow.Views.EditorView.CanApplyExportProgress(false, cancelled, cancelled));
+
+        cancelled.Cancel();
+        cancelled.Cancel();
+
+        Assert.IsFalse(CutFlow.Views.EditorView.CanApplyExportProgress(false, cancelled, cancelled));
+        Assert.IsFalse(CutFlow.Views.EditorView.CanApplyExportProgress(false, fresh, cancelled));
+        Assert.IsFalse(CutFlow.Views.EditorView.CanApplyExportProgress(true, fresh, fresh));
+        Assert.IsTrue(CutFlow.Views.EditorView.CanApplyExportProgress(false, fresh, fresh));
+    }
+
+    [TestMethod]
+    public void ExportResultAction_BlocksConcurrentActivationAndRejectsStaleOrDisposedState()
+    {
+        var current = new CutFlow.Views.ExportResultAction(@"C:\exports\committed.mp4");
+        var stale = new CutFlow.Views.ExportResultAction(@"C:\exports\stale.mp4");
+
+        Assert.IsTrue(current.TryBegin());
+        Assert.IsFalse(current.TryBegin());
+        Assert.IsTrue(CutFlow.Views.EditorView.CanContinueOpenExportResult(false, current, current));
+        Assert.IsFalse(CutFlow.Views.EditorView.CanContinueOpenExportResult(false, current, stale));
+        Assert.IsFalse(CutFlow.Views.EditorView.CanContinueOpenExportResult(true, current, current));
+
+        current.Complete();
+        Assert.IsTrue(current.TryBegin());
+        Assert.AreEqual(@"C:\exports\committed.mp4", current.DestinationPath);
+    }
+
+    [TestMethod]
+    public void ExportSuccessActions_UseCommittedDestinationAndSafeShellApis()
+    {
+        var source = File.ReadAllText(Path.Combine(
+            FindRepositoryRoot(),
+            "src",
+            "CutFlow",
+            "Views",
+            "EditorView.Export.cs"));
+        var successStart = source.IndexOf("private void ShowExportSuccess", StringComparison.Ordinal);
+        var successEnd = source.IndexOf("private void RefreshExportAvailability", successStart, StringComparison.Ordinal);
+        var successRoute = source[successStart..successEnd];
+        var openStart = source.IndexOf("private async Task OpenExportResultAsync", successEnd, StringComparison.Ordinal);
+        var openEnd = source.IndexOf("private void ReportOpenExportFailure", openStart, StringComparison.Ordinal);
+        var openRoute = source[openStart..openEnd];
+        var failureEnd = source.IndexOf("private void ReportExportFailure", openEnd, StringComparison.Ordinal);
+        var failureRoute = source[openEnd..failureEnd];
+        var dismissStart = source.IndexOf("private void DismissExportStatus_Click", successEnd, StringComparison.Ordinal);
+        var dismissEnd = source.IndexOf("private async void OpenExportedFile_Click", dismissStart, StringComparison.Ordinal);
+        var dismissRoute = source[dismissStart..dismissEnd];
+
+        Assert.Contains("new ExportResultAction(destinationPath)", successRoute);
+        Assert.Contains("operation.DestinationPath", openRoute);
+        Assert.Contains("Launcher.LaunchFileAsync(file)", openRoute);
+        Assert.Contains("Launcher.LaunchFolderAsync(folder)", openRoute);
+        Assert.Contains("_lastExportResult = null;", failureRoute);
+        Assert.Contains("HideExportStatus();", failureRoute);
+        Assert.IsFalse(openRoute.Contains("staging", StringComparison.OrdinalIgnoreCase));
+        Assert.IsFalse(openRoute.Contains("Process.Start", StringComparison.Ordinal));
+        Assert.Contains("HideExportStatus()", dismissRoute);
+        Assert.IsFalse(dismissRoute.Contains("_lastExportResult", StringComparison.Ordinal));
+        Assert.IsFalse(dismissRoute.Contains("LastExportFolder", StringComparison.Ordinal));
+    }
+
+    [TestMethod]
+    public async Task ExportProgressDispatcher_CoalescesOnTheUiQueueAndNeverRegressesOrPublishesCompletion()
+    {
+        var queued = new Queue<Action>();
+        var applied = new List<double>();
+        using var cancellation = new CancellationTokenSource();
+        var progress = new CutFlow.Views.ExportProgressDispatcher(
+            action =>
+            {
+                queued.Enqueue(action);
+                return true;
+            },
+            applied.Add,
+            cancellation.Token);
+
+        await Task.Run(() =>
+        {
+            progress.Report(40);
+            progress.Report(20);
+            progress.Report(double.NaN);
+            progress.Report(-1);
+            progress.Report(75);
+        }, TestContext.CancellationToken);
+
+        Assert.HasCount(1, queued);
+        Assert.IsEmpty(applied);
+        queued.Dequeue()();
+        Assert.AreSequenceEqual(expected, applied);
+
+        progress.Report(50);
+        progress.Report(double.PositiveInfinity);
+        Assert.IsEmpty(queued);
+
+        progress.Report(90);
+        progress.Report(100);
+        progress.Report(150);
+        Assert.HasCount(1, queued);
+        queued.Dequeue()();
+        Assert.AreSequenceEqual(expectedArray, applied);
+    }
+
+    [TestMethod]
+    public void ExportProgressDispatcher_CancellationDropsQueuedAndFutureCallbacks()
+    {
+        var queued = new Queue<Action>();
+        var applied = new List<double>();
+        using var cancellation = new CancellationTokenSource();
+        var progress = new CutFlow.Views.ExportProgressDispatcher(
+            action =>
+            {
+                queued.Enqueue(action);
+                return true;
+            },
+            applied.Add,
+            cancellation.Token);
+
+        progress.Report(42);
+        cancellation.Cancel();
+        queued.Dequeue()();
+        progress.Report(84);
+
+        Assert.IsEmpty(applied);
+        Assert.IsEmpty(queued);
     }
 
     [TestMethod]
@@ -337,7 +525,7 @@ public sealed class Task12ExportTests
         var result = ExportPreflight.Validate(project);
 
         Assert.IsFalse(result.CanExport);
-        StringAssert.Contains(result.ErrorMessage, "visual", StringComparison.OrdinalIgnoreCase);
+        Assert.Contains("visual", result.ErrorMessage, StringComparison.OrdinalIgnoreCase);
         Assert.HasCount(0, result.MissingAssetNames);
     }
 
@@ -364,7 +552,8 @@ public sealed class Task12ExportTests
         var result = ExportPreflight.Validate(project);
 
         Assert.IsFalse(result.CanExport);
-        CollectionAssert.AreEqual(new[] { "offline.mp4" }, result.MissingAssetNames.ToArray());
+        string[] expectedMissingNames = ["offline.mp4"];
+        Assert.AreSequenceEqual(expectedMissingNames, result.MissingAssetNames.ToArray());
     }
 
     [TestMethod]
@@ -372,7 +561,7 @@ public sealed class Task12ExportTests
     {
         await using var directory = new TestDirectory();
         var sourcePath = Path.Combine(directory.Path, "source.jpg");
-        await File.WriteAllTextAsync(sourcePath, "original");
+        await File.WriteAllTextAsync(sourcePath, "original", TestContext.CancellationToken);
         var asset = Asset(ProjectAssetKind.Image, "source.jpg", sourcePath);
         asset.FileSize = checked((ulong)new FileInfo(sourcePath).Length);
         asset.LastWriteUtc = File.GetLastWriteTimeUtc(sourcePath);
@@ -384,12 +573,13 @@ public sealed class Task12ExportTests
             AssetId = asset.Id,
             DurationMilliseconds = 1_000
         });
-        await File.WriteAllTextAsync(sourcePath, "changed source with a different size");
+        await File.WriteAllTextAsync(sourcePath, "changed source with a different size", TestContext.CancellationToken);
 
         var result = ExportPreflight.Validate(project);
 
         Assert.IsFalse(result.CanExport);
-        CollectionAssert.AreEqual(new[] { "source.jpg" }, result.MissingAssetNames.ToArray());
+        string[] expectedMissingNames = ["source.jpg"];
+        Assert.AreSequenceEqual(expectedMissingNames, result.MissingAssetNames.ToArray());
     }
 
     [TestMethod]
@@ -415,14 +605,13 @@ public sealed class Task12ExportTests
             CancellationToken.None);
 
         Assert.IsFalse(result.CanExport);
-        CollectionAssert.AreEqual(
-            new[]
-            {
-                @"shared.mp4 (C:\First\shared.mp4)",
-                @"SHARED.MP4 (D:\Second\SHARED.MP4)",
-                "missing.wav"
-            },
-            result.MissingAssetNames.ToArray());
+        string[] expectedMissingNames =
+        [
+            @"shared.mp4 (C:\First\shared.mp4)",
+            @"SHARED.MP4 (D:\Second\SHARED.MP4)",
+            "missing.wav"
+        ];
+        Assert.AreSequenceEqual(expectedMissingNames, result.MissingAssetNames.ToArray());
     }
 
     [TestMethod]
@@ -458,9 +647,9 @@ public sealed class Task12ExportTests
         Assert.HasCount(5, result.MissingAssetNames);
         Assert.IsFalse(result.ErrorMessage.Contains('\r'));
         Assert.IsFalse(result.ErrorMessage.Contains('\n'));
-        StringAssert.Contains(result.ErrorMessage, "one.mp4 second line");
-        StringAssert.Contains(result.ErrorMessage, "three.mp4");
-        StringAssert.Contains(result.ErrorMessage, "and 2 more");
+        Assert.Contains("one.mp4 second line", result.ErrorMessage);
+        Assert.Contains("three.mp4", result.ErrorMessage);
+        Assert.Contains("and 2 more", result.ErrorMessage);
         Assert.IsFalse(result.ErrorMessage.Contains("four.mp4", StringComparison.Ordinal));
         Assert.IsFalse(result.ErrorMessage.Contains("five.mp4", StringComparison.Ordinal));
     }
@@ -518,12 +707,10 @@ public sealed class Task12ExportTests
             CancellationToken.None);
 
         Assert.IsFalse(result.CanExport);
-        CollectionAssert.AreEqual(
-            new[] { missingVideo.FileName, $"Unknown asset {orphanId:D}", missingAudio.FileName },
-            result.MissingAssetNames.ToArray());
-        CollectionAssert.AreEqual(
-            new[] { existing.SourcePath, missingVideo.SourcePath, missingAudio.SourcePath },
-            probes);
+        Assert.AreSequenceEqual(
+            new[] { missingVideo.FileName, $"Unknown asset {orphanId:D}", missingAudio.FileName }, result.MissingAssetNames.ToArray());
+        Assert.AreSequenceEqual(
+            new[] { existing.SourcePath, missingVideo.SourcePath, missingAudio.SourcePath }, probes);
     }
 
     [TestMethod]
@@ -640,8 +827,74 @@ public sealed class Task12ExportTests
         }
         else
         {
-            StringAssert.Contains(actual, expectedMessage);
+            Assert.Contains(expectedMessage, actual!);
         }
+    }
+
+    [TestMethod]
+    public void GetFailureMessage_UnrecognizedNativeReasonDoesNotExposeItsNumericValue()
+    {
+        var actual = ExportFailureMapper.GetMessage((TranscodeFailureReason)int.MaxValue);
+
+        Assert.Contains("unrecognized transcoding error", actual!);
+        Assert.IsFalse(actual!.Contains(int.MaxValue.ToString(), StringComparison.Ordinal));
+    }
+
+    [TestMethod]
+    public void GetExceptionMessage_MapsExpectedFailuresWithoutExposingNativeDetails()
+    {
+        const string nativeDetail = "Exception from HRESULT: 0x80004005";
+        var native = new System.Runtime.InteropServices.COMException(nativeDetail, unchecked((int)0x80004005));
+
+        Assert.Contains("could not write", ExportFailureMapper.GetExceptionMessage(new UnauthorizedAccessException())!);
+        Assert.Contains("could not be created", ExportFailureMapper.GetExceptionMessage(new IOException())!);
+        Assert.Contains("path is invalid", ExportFailureMapper.GetExceptionMessage(new ArgumentException())!);
+        var nativeMessage = ExportFailureMapper.GetExceptionMessage(native);
+        Assert.Contains("Windows could not encode", nativeMessage!);
+        Assert.IsFalse(nativeMessage!.Contains(nativeDetail, StringComparison.Ordinal));
+        Assert.IsNull(ExportFailureMapper.GetExceptionMessage(new InvalidOperationException()));
+        Assert.IsNull(ExportFailureMapper.GetExceptionMessage(new OperationCanceledException()));
+        Assert.IsNull(ExportFailureMapper.GetExceptionMessage(new NullReferenceException()));
+    }
+
+    [TestMethod]
+    public void ExportExceptionBoundaries_DoNotSwallowCancellationOrProgrammingDefects()
+    {
+        Assert.IsTrue(CutFlow.Views.EditorView.IsExpectedExportException(new IOException()));
+        Assert.IsTrue(CutFlow.Views.EditorView.IsExpectedExportException(new FileNotFoundException()));
+        Assert.IsTrue(CutFlow.Views.EditorView.IsExpectedExportException(new DirectoryNotFoundException()));
+        Assert.IsTrue(CutFlow.Views.EditorView.IsExpectedExportException(new System.Runtime.InteropServices.COMException()));
+        Assert.IsFalse(CutFlow.Views.EditorView.IsExpectedExportException(new OperationCanceledException()));
+        Assert.IsFalse(CutFlow.Views.EditorView.IsExpectedExportException(new InvalidOperationException()));
+        Assert.IsFalse(CutFlow.Views.EditorView.IsExpectedExportException(new NullReferenceException()));
+
+        var source = File.ReadAllText(Path.Combine(FindRepositoryRoot(), "src", "CutFlow", "MainWindow.xaml.cs"));
+        var handlerStart = source.IndexOf("private async void Editor_ExportRequested", StringComparison.Ordinal);
+        var handlerEnd = source.IndexOf("private nint GetWindowHandle", handlerStart, StringComparison.Ordinal);
+        var handler = source[handlerStart..handlerEnd];
+
+        Assert.Contains("when (EditorView.IsExpectedExportException(exception))", handler);
+        Assert.IsFalse(handler.Contains("exception is not OutOfMemoryException", StringComparison.Ordinal));
+    }
+
+    [TestMethod]
+    public void TextOverlayFailureMessage_DoesNotExposeNativeExceptionDetails()
+    {
+        var source = File.ReadAllText(Path.Combine(
+            FindRepositoryRoot(),
+            "src",
+            "CutFlow",
+            "Services",
+            "CompositionService.cs"));
+        var catchStart = source.IndexOf(
+            "catch (Exception exception) when (IsItemFailure(exception) || exception is InvalidOperationException)",
+            StringComparison.Ordinal);
+        var errorStart = source.IndexOf("errors.Add(", catchStart, StringComparison.Ordinal);
+        var errorEnd = source.IndexOf(';', errorStart) + 1;
+        var errorStatement = source[errorStart..errorEnd];
+
+        Assert.Contains("could not be rendered and was omitted.", errorStatement);
+        Assert.IsFalse(errorStatement.Contains("exception.Message", StringComparison.Ordinal));
     }
 
     [TestMethod]
@@ -649,7 +902,7 @@ public sealed class Task12ExportTests
     {
         await using var directory = new TestDirectory();
         var destinationPath = Path.Combine(directory.Path, "output.mp4");
-        await File.WriteAllTextAsync(destinationPath, "existing destination");
+        await File.WriteAllTextAsync(destinationPath, "existing destination", TestContext.CancellationToken);
         var destination = await Windows.Storage.StorageFile.GetFileFromPathAsync(destinationPath);
         var project = ProjectDocument.CreateNew("Empty", DateTimeOffset.UnixEpoch);
 
@@ -661,8 +914,8 @@ public sealed class Task12ExportTests
             CancellationToken.None);
 
         Assert.AreEqual(ExportResultStatus.ValidationFailed, result.Status);
-        StringAssert.Contains(result.ErrorMessage, "visual", StringComparison.OrdinalIgnoreCase);
-        Assert.AreEqual("existing destination", await File.ReadAllTextAsync(destinationPath));
+        Assert.Contains("visual", result.ErrorMessage, StringComparison.OrdinalIgnoreCase);
+        Assert.AreEqual("existing destination", await File.ReadAllTextAsync(destinationPath, TestContext.CancellationToken));
     }
 
     [TestMethod]
@@ -670,7 +923,7 @@ public sealed class Task12ExportTests
     {
         await using var directory = new TestDirectory();
         var destinationPath = Path.Combine(directory.Path, "output.mp4");
-        await File.WriteAllTextAsync(destinationPath, "existing destination");
+        await File.WriteAllTextAsync(destinationPath, "existing destination", TestContext.CancellationToken);
         var destination = await Windows.Storage.StorageFile.GetFileFromPathAsync(destinationPath);
         var progressValues = new List<double>();
         string? stagingPath = null;
@@ -680,7 +933,7 @@ public sealed class Task12ExportTests
             Assert.AreEqual(directory.Path, Path.GetDirectoryName(staging.Path));
             Assert.AreNotEqual(destination.Path, staging.Path);
             progress.Report(42.5);
-            await File.WriteAllTextAsync(staging.Path, "rendered output");
+            await File.WriteAllTextAsync(staging.Path, "rendered output", TestContext.CancellationToken);
             return TranscodeFailureReason.None;
         };
         var service = new ExportService(new CompositionService(), null, render);
@@ -693,8 +946,10 @@ public sealed class Task12ExportTests
             CancellationToken.None);
 
         Assert.AreEqual(ExportResultStatus.Success, result.Status);
-        Assert.AreEqual("rendered output", await File.ReadAllTextAsync(destinationPath));
-        CollectionAssert.AreEqual(new[] { 0d, 42.5, 100d }, progressValues);
+        Assert.AreEqual(Path.GetFullPath(destinationPath), result.DestinationPath);
+        Assert.AreEqual("rendered output", await File.ReadAllTextAsync(destinationPath, TestContext.CancellationToken));
+        double[] expectedProgress = [0d, 42.5, 100d];
+        Assert.AreSequenceEqual(expectedProgress, progressValues);
         Assert.IsNotNull(stagingPath);
         Assert.IsFalse(File.Exists(stagingPath));
         Assert.HasCount(0, Directory.GetFiles(directory.Path, "*.cutflow-*.mp4"));
@@ -711,10 +966,10 @@ public sealed class Task12ExportTests
         var otherStagingFileName = ExportService.CreateStagingFileName(destinationPath, Guid.NewGuid());
 
         Assert.AreEqual(Path.GetFileName(stagingFileName), stagingFileName);
-        Assert.IsTrue(stagingFileName.Length <= ExportService.MaximumStagingFileNameLength);
+        Assert.IsLessThanOrEqualTo(ExportService.MaximumStagingFileNameLength, stagingFileName.Length);
         Assert.IsTrue(stagingFileName.EndsWith(".cutflow-00112233445566778899aabbccddeeff.mp4", StringComparison.Ordinal));
         Assert.IsFalse(stagingFileName.Contains("nested", StringComparison.Ordinal));
-        Assert.IsFalse(stagingFileName.Any(Path.GetInvalidFileNameChars().Contains));
+        Assert.DoesNotContain(Path.GetInvalidFileNameChars().Contains, stagingFileName);
         Assert.AreNotEqual(Path.GetFileName(destinationPath), stagingFileName);
         Assert.AreNotEqual(stagingFileName, otherStagingFileName);
     }
@@ -724,17 +979,17 @@ public sealed class Task12ExportTests
     {
         await using var directory = new TestDirectory();
         var destinationPath = Path.Combine(directory.Path, "output.mp4");
-        await File.WriteAllTextAsync(destinationPath, "existing destination");
+        await File.WriteAllTextAsync(destinationPath, "existing destination", TestContext.CancellationToken);
         var coincidentalStagingPath = Path.Combine(
             directory.Path,
             "output.cutflow-00112233445566778899aabbccddeeff.mp4");
-        await File.WriteAllTextAsync(coincidentalStagingPath, "unrelated staging file");
+        await File.WriteAllTextAsync(coincidentalStagingPath, "unrelated staging file", TestContext.CancellationToken);
         var destination = await StorageFile.GetFileFromPathAsync(destinationPath);
         string? operationStagingPath = null;
         ExportRenderAsync render = async (_, staging, _, _, _) =>
         {
             operationStagingPath = staging.Path;
-            await File.WriteAllTextAsync(staging.Path, "rendered output");
+            await File.WriteAllTextAsync(staging.Path, "rendered output", TestContext.CancellationToken);
             return TranscodeFailureReason.None;
         };
 
@@ -748,8 +1003,8 @@ public sealed class Task12ExportTests
         Assert.AreEqual(ExportResultStatus.Success, result.Status, result.ErrorMessage);
         Assert.IsNotNull(operationStagingPath);
         Assert.AreNotEqual(coincidentalStagingPath, operationStagingPath);
-        Assert.AreEqual("unrelated staging file", await File.ReadAllTextAsync(coincidentalStagingPath));
-        Assert.AreEqual("rendered output", await File.ReadAllTextAsync(destinationPath));
+        Assert.AreEqual("unrelated staging file", await File.ReadAllTextAsync(coincidentalStagingPath, TestContext.CancellationToken));
+        Assert.AreEqual("rendered output", await File.ReadAllTextAsync(destinationPath, TestContext.CancellationToken));
     }
 
     [TestMethod]
@@ -757,11 +1012,15 @@ public sealed class Task12ExportTests
     {
         await using var directory = new TestDirectory();
         var destinationPath = Path.Combine(directory.Path, "output.mp4");
-        await File.WriteAllTextAsync(destinationPath, "keep destination");
+        await File.WriteAllTextAsync(destinationPath, "keep destination", TestContext.CancellationToken);
+        var otherStagingPath = Path.Combine(
+            directory.Path,
+            "output.cutflow-00112233445566778899aabbccddeeff.mp4");
+        await File.WriteAllTextAsync(otherStagingPath, "other operation", TestContext.CancellationToken);
         var destination = await Windows.Storage.StorageFile.GetFileFromPathAsync(destinationPath);
         ExportRenderAsync render = async (_, staging, _, _, _) =>
         {
-            await File.WriteAllTextAsync(staging.Path, "partial output");
+            await File.WriteAllTextAsync(staging.Path, "partial output", TestContext.CancellationToken);
             return TranscodeFailureReason.InvalidProfile;
         };
         var service = new ExportService(new CompositionService(), null, render);
@@ -774,9 +1033,11 @@ public sealed class Task12ExportTests
             CancellationToken.None);
 
         Assert.AreEqual(ExportResultStatus.Failed, result.Status);
-        StringAssert.Contains(result.ErrorMessage, "encoding profile is invalid");
-        Assert.AreEqual("keep destination", await File.ReadAllTextAsync(destinationPath));
-        Assert.HasCount(0, Directory.GetFiles(directory.Path, "*.cutflow-*.mp4"));
+        Assert.Contains("encoding profile is invalid", result.ErrorMessage);
+        Assert.AreEqual("keep destination", await File.ReadAllTextAsync(destinationPath, TestContext.CancellationToken));
+        Assert.AreEqual("other operation", await File.ReadAllTextAsync(otherStagingPath, TestContext.CancellationToken));
+        Assert.AreSequenceEqual(
+            new[] { otherStagingPath }, Directory.GetFiles(directory.Path, "*.cutflow-*.mp4"));
     }
 
     [TestMethod]
@@ -787,10 +1048,10 @@ public sealed class Task12ExportTests
         await using var directory = new TestDirectory();
         var destinationPath = Path.Combine(directory.Path, "output.mp4");
         byte[] destinationBytes = [0x00, 0x43, 0x75, 0x74, 0x46, 0x6C, 0x6F, 0x77, 0x80, 0xFF];
-        if (destinationExists) await File.WriteAllBytesAsync(destinationPath, destinationBytes);
+        if (destinationExists) await File.WriteAllBytesAsync(destinationPath, destinationBytes, TestContext.CancellationToken);
         ExportRenderAsync render = async (_, staging, _, _, _) =>
         {
-            await File.WriteAllTextAsync(staging.Path, "partial output");
+            await File.WriteAllTextAsync(staging.Path, "partial output", TestContext.CancellationToken);
             return TranscodeFailureReason.InvalidProfile;
         };
         var service = new ExportService(new CompositionService(), null, render);
@@ -804,7 +1065,7 @@ public sealed class Task12ExportTests
 
         Assert.AreEqual(ExportResultStatus.Failed, result.Status);
         Assert.AreEqual(destinationExists, File.Exists(destinationPath));
-        if (destinationExists) CollectionAssert.AreEqual(destinationBytes, await File.ReadAllBytesAsync(destinationPath));
+        if (destinationExists) Assert.AreSequenceEqual(destinationBytes, await File.ReadAllBytesAsync(destinationPath, TestContext.CancellationToken));
         Assert.HasCount(0, Directory.GetFiles(directory.Path, "*.cutflow-*.mp4"));
     }
 
@@ -813,12 +1074,12 @@ public sealed class Task12ExportTests
     {
         await using var directory = new TestDirectory();
         var destinationPath = Path.Combine(directory.Path, "output.mp4");
-        await File.WriteAllTextAsync(destinationPath, "keep destination");
+        await File.WriteAllTextAsync(destinationPath, "keep destination", TestContext.CancellationToken);
         var destination = await Windows.Storage.StorageFile.GetFileFromPathAsync(destinationPath);
         using var cancellation = new CancellationTokenSource();
         ExportRenderAsync render = async (_, staging, _, _, token) =>
         {
-            await File.WriteAllTextAsync(staging.Path, "partial output");
+            await File.WriteAllTextAsync(staging.Path, "partial output", TestContext.CancellationToken);
             cancellation.Cancel();
             token.ThrowIfCancellationRequested();
             return TranscodeFailureReason.None;
@@ -832,8 +1093,71 @@ public sealed class Task12ExportTests
             new InlineProgress<double>(_ => { }),
             cancellation.Token));
 
-        Assert.AreEqual("keep destination", await File.ReadAllTextAsync(destinationPath));
+        Assert.AreEqual("keep destination", await File.ReadAllTextAsync(destinationPath, TestContext.CancellationToken));
         Assert.HasCount(0, Directory.GetFiles(directory.Path, "*.cutflow-*.mp4"));
+    }
+
+    [TestMethod]
+    public async Task ExportToPathAsync_FailedRenderDoesNotDeleteReparseTarget()
+    {
+        await using var directory = new TestDirectory();
+        var destinationPath = Path.Combine(directory.Path, "output.mp4");
+        var protectedPath = Path.Combine(directory.Path, "source.jpg");
+        File.Copy(Path.Combine(FindMediaRoot(), "valid-image.jpg"), protectedPath);
+        var originalSource = await File.ReadAllBytesAsync(protectedPath, TestContext.CancellationToken);
+        var sourceAsset = Asset(ProjectAssetKind.Image, "source.jpg", protectedPath);
+        var project = ProjectDocument.CreateNew("Reparse cleanup", DateTimeOffset.UnixEpoch);
+        project.Assets.Add(sourceAsset);
+        project.VideoItems.Add(new VideoTimelineItem
+        {
+            Id = Guid.NewGuid(),
+            AssetId = sourceAsset.Id,
+            DurationMilliseconds = 1_000
+        });
+        ExportRenderAsync render = async (_, staging, _, _, _) =>
+        {
+            await File.WriteAllTextAsync(staging.Path, "partial output", TestContext.CancellationToken);
+            File.Delete(staging.Path);
+            File.CreateSymbolicLink(staging.Path, protectedPath);
+            return TranscodeFailureReason.InvalidProfile;
+        };
+
+        var result = await new ExportService(new CompositionService(), null, render).ExportToPathAsync(
+            project,
+            destinationPath,
+            new ExportOptions(ExportResolutionTier.Hd720p, ExportQuality.Standard),
+            new InlineProgress<double>(_ => { }),
+            CancellationToken.None);
+
+        Assert.AreEqual(ExportResultStatus.Failed, result.Status);
+        Assert.AreSequenceEqual(originalSource, await File.ReadAllBytesAsync(protectedPath, TestContext.CancellationToken));
+        Assert.IsFalse(File.Exists(destinationPath));
+        Assert.HasCount(0, Directory.GetFiles(directory.Path, "*.cutflow-*.mp4"));
+    }
+
+    [TestMethod]
+    public async Task ExportToPathAsync_FailedRenderDoesNotDeleteStagingMovedToAnotherPath()
+    {
+        await using var directory = new TestDirectory();
+        var destinationPath = Path.Combine(directory.Path, "output.mp4");
+        var movedPath = Path.Combine(directory.Path, "moved-staging.mp4");
+        ExportRenderAsync render = async (_, staging, _, _, _) =>
+        {
+            await File.WriteAllTextAsync(staging.Path, "partial output", TestContext.CancellationToken);
+            File.Move(staging.Path, movedPath);
+            return TranscodeFailureReason.InvalidProfile;
+        };
+
+        var result = await new ExportService(new CompositionService(), null, render).ExportToPathAsync(
+            CreateExportableProject(),
+            destinationPath,
+            new ExportOptions(ExportResolutionTier.Hd720p, ExportQuality.Standard),
+            new InlineProgress<double>(_ => { }),
+            CancellationToken.None);
+
+        Assert.AreEqual(ExportResultStatus.Failed, result.Status);
+        Assert.AreEqual("partial output", await File.ReadAllTextAsync(movedPath, TestContext.CancellationToken));
+        Assert.IsFalse(File.Exists(destinationPath));
     }
 
     [TestMethod]
@@ -844,11 +1168,11 @@ public sealed class Task12ExportTests
         await using var directory = new TestDirectory();
         var destinationPath = Path.Combine(directory.Path, "output.mp4");
         byte[] destinationBytes = [0x00, 0x43, 0x75, 0x74, 0x46, 0x6C, 0x6F, 0x77, 0x80, 0xFF];
-        if (destinationExists) await File.WriteAllBytesAsync(destinationPath, destinationBytes);
+        if (destinationExists) await File.WriteAllBytesAsync(destinationPath, destinationBytes, TestContext.CancellationToken);
         using var cancellation = new CancellationTokenSource();
         ExportRenderAsync render = async (_, staging, _, _, token) =>
         {
-            await File.WriteAllTextAsync(staging.Path, "partial output");
+            await File.WriteAllTextAsync(staging.Path, "partial output", TestContext.CancellationToken);
             cancellation.Cancel();
             token.ThrowIfCancellationRequested();
             return TranscodeFailureReason.None;
@@ -863,7 +1187,7 @@ public sealed class Task12ExportTests
             cancellation.Token));
 
         Assert.AreEqual(destinationExists, File.Exists(destinationPath));
-        if (destinationExists) CollectionAssert.AreEqual(destinationBytes, await File.ReadAllBytesAsync(destinationPath));
+        if (destinationExists) Assert.AreSequenceEqual(destinationBytes, await File.ReadAllBytesAsync(destinationPath, TestContext.CancellationToken));
         Assert.HasCount(0, Directory.GetFiles(directory.Path, "*.cutflow-*.mp4"));
     }
 
@@ -874,10 +1198,10 @@ public sealed class Task12ExportTests
     {
         await using var directory = new TestDirectory();
         var destinationPath = Path.Combine(directory.Path, "output.mp4");
-        if (destinationExists) await File.WriteAllTextAsync(destinationPath, "old destination");
+        if (destinationExists) await File.WriteAllTextAsync(destinationPath, "old destination", TestContext.CancellationToken);
         ExportRenderAsync render = async (_, staging, _, _, _) =>
         {
-            await File.WriteAllTextAsync(staging.Path, "rendered output");
+            await File.WriteAllTextAsync(staging.Path, "rendered output", TestContext.CancellationToken);
             return TranscodeFailureReason.None;
         };
         var service = new ExportService(new CompositionService(), null, render);
@@ -890,7 +1214,7 @@ public sealed class Task12ExportTests
             CancellationToken.None);
 
         Assert.AreEqual(ExportResultStatus.Success, result.Status);
-        Assert.AreEqual("rendered output", await File.ReadAllTextAsync(destinationPath));
+        Assert.AreEqual("rendered output", await File.ReadAllTextAsync(destinationPath, TestContext.CancellationToken));
         Assert.HasCount(0, Directory.GetFiles(directory.Path, "*.cutflow-*.mp4"));
     }
 
@@ -906,12 +1230,12 @@ public sealed class Task12ExportTests
         {
             commitThread = Environment.CurrentManagedThreadId;
             commitStarted.Set();
-            Assert.IsTrue(releaseCommit.Wait(TimeSpan.FromSeconds(5)));
+            Assert.IsTrue(releaseCommit.Wait(TimeSpan.FromSeconds(5), TestContext.CancellationToken));
         });
 
         try
         {
-            Assert.IsTrue(commitStarted.Wait(TimeSpan.FromSeconds(5)));
+            Assert.IsTrue(commitStarted.Wait(TimeSpan.FromSeconds(5), TestContext.CancellationToken));
             Assert.IsFalse(commitTask.IsCompleted);
             Assert.AreNotEqual(callingThread, commitThread);
         }
@@ -951,7 +1275,7 @@ public sealed class Task12ExportTests
             CancellationToken.None);
 
         Assert.AreEqual(ExportResultStatus.Failed, result.Status);
-        StringAssert.Contains(result.ErrorMessage, "text", StringComparison.OrdinalIgnoreCase);
+        Assert.Contains("text", result.ErrorMessage, StringComparison.OrdinalIgnoreCase);
         Assert.IsFalse(nativeRenderStarted);
         Assert.IsFalse(File.Exists(destinationPath));
         Assert.HasCount(0, Directory.GetFiles(directory.Path, "*.cutflow-*.mp4"));
@@ -975,7 +1299,7 @@ public sealed class Task12ExportTests
         ExportRenderAsync render = async (composition, staging, _, _, _) =>
         {
             renderedComposition = composition;
-            await File.WriteAllTextAsync(staging.Path, "rendered output");
+            await File.WriteAllTextAsync(staging.Path, "rendered output", TestContext.CancellationToken);
             return TranscodeFailureReason.None;
         };
         var service = new ExportService(new CompositionService(), null, render);
@@ -991,7 +1315,7 @@ public sealed class Task12ExportTests
         Assert.IsNotNull(renderedComposition);
         Assert.HasCount(0, renderedComposition.OverlayLayers);
         Assert.AreEqual(2_000d, renderedComposition.Duration.TotalMilliseconds, 2);
-        Assert.AreEqual("rendered output", await File.ReadAllTextAsync(destinationPath));
+        Assert.AreEqual("rendered output", await File.ReadAllTextAsync(destinationPath, TestContext.CancellationToken));
     }
 
     [TestMethod]
@@ -1070,7 +1394,8 @@ public sealed class Task12ExportTests
 
         Assert.IsTrue(sourceChanged);
         Assert.AreEqual(ExportResultStatus.ValidationFailed, result.Status);
-        CollectionAssert.AreEqual(new[] { "source.jpg" }, ExportPreflight.Validate(project).MissingAssetNames.ToArray());
+        string[] expectedMissingNames = ["source.jpg"];
+        Assert.AreSequenceEqual(expectedMissingNames, ExportPreflight.Validate(project).MissingAssetNames.ToArray());
         Assert.IsFalse(nativeRenderStarted);
         Assert.HasCount(0, Directory.GetFiles(directory.Path, "*.cutflow-*.mp4"));
     }
@@ -1081,7 +1406,7 @@ public sealed class Task12ExportTests
         await using var directory = new TestDirectory();
         var sourcePath = Path.Combine(directory.Path, "source.mp4");
         File.Copy(Path.Combine(FindMediaRoot(), "valid-video.mp4"), sourcePath);
-        var original = await File.ReadAllBytesAsync(sourcePath);
+        var original = await File.ReadAllBytesAsync(sourcePath, TestContext.CancellationToken);
         var asset = Asset(ProjectAssetKind.Video, "source.mp4", sourcePath);
         asset.DurationMilliseconds = 2_000;
         var project = ProjectDocument.CreateNew("Source guard", DateTimeOffset.UnixEpoch);
@@ -1108,9 +1433,9 @@ public sealed class Task12ExportTests
             CancellationToken.None);
 
         Assert.AreEqual(ExportResultStatus.ValidationFailed, result.Status);
-        StringAssert.Contains(result.ErrorMessage, "source media", StringComparison.OrdinalIgnoreCase);
+        Assert.Contains("source media", result.ErrorMessage, StringComparison.OrdinalIgnoreCase);
         Assert.IsFalse(renderStarted);
-        CollectionAssert.AreEqual(original, await File.ReadAllBytesAsync(sourcePath));
+        Assert.AreSequenceEqual(original, await File.ReadAllBytesAsync(sourcePath, TestContext.CancellationToken));
         Assert.HasCount(0, Directory.GetFiles(directory.Path, "*.cutflow-*.mp4"));
     }
 
@@ -1120,7 +1445,7 @@ public sealed class Task12ExportTests
         await using var directory = new TestDirectory();
         var sourcePath = Path.Combine(directory.Path, "unused-source.mp4");
         File.Copy(Path.Combine(FindMediaRoot(), "valid-video.mp4"), sourcePath);
-        var original = await File.ReadAllBytesAsync(sourcePath);
+        var original = await File.ReadAllBytesAsync(sourcePath, TestContext.CancellationToken);
         var project = CreateExportableProject();
         project.Assets.Add(Asset(ProjectAssetKind.Video, "unused-source.mp4", sourcePath));
         var renderStarted = false;
@@ -1139,7 +1464,7 @@ public sealed class Task12ExportTests
 
         Assert.AreEqual(ExportResultStatus.ValidationFailed, result.Status);
         Assert.IsFalse(renderStarted);
-        CollectionAssert.AreEqual(original, await File.ReadAllBytesAsync(sourcePath));
+        Assert.AreSequenceEqual(original, await File.ReadAllBytesAsync(sourcePath, TestContext.CancellationToken));
         Assert.HasCount(0, Directory.GetFiles(directory.Path, "*.cutflow-*.mp4"));
     }
 
@@ -1149,7 +1474,7 @@ public sealed class Task12ExportTests
         await using var directory = new TestDirectory();
         var destinationPath = Path.Combine(directory.Path, "output.mp4");
         File.Copy(Path.Combine(FindMediaRoot(), "valid-video.mp4"), destinationPath);
-        var original = await File.ReadAllBytesAsync(destinationPath);
+        var original = await File.ReadAllBytesAsync(destinationPath, TestContext.CancellationToken);
         var renderProject = CreateExportableProject();
         var liveProject = ExportService.CreateProjectSnapshot(renderProject);
         var renderStarted = false;
@@ -1179,7 +1504,7 @@ public sealed class Task12ExportTests
         Assert.IsTrue(sourceImported);
         Assert.AreEqual(ExportResultStatus.ValidationFailed, result.Status);
         Assert.IsFalse(renderStarted);
-        CollectionAssert.AreEqual(original, await File.ReadAllBytesAsync(destinationPath));
+        Assert.AreSequenceEqual(original, await File.ReadAllBytesAsync(destinationPath, TestContext.CancellationToken));
         Assert.HasCount(0, Directory.GetFiles(directory.Path, "*.cutflow-*.mp4"));
     }
 
@@ -1189,12 +1514,12 @@ public sealed class Task12ExportTests
         await using var directory = new TestDirectory();
         var destinationPath = Path.Combine(directory.Path, "output.mp4");
         File.Copy(Path.Combine(FindMediaRoot(), "valid-video.mp4"), destinationPath);
-        var original = await File.ReadAllBytesAsync(destinationPath);
+        var original = await File.ReadAllBytesAsync(destinationPath, TestContext.CancellationToken);
         var renderProject = CreateExportableProject();
         var liveProject = ExportService.CreateProjectSnapshot(renderProject);
         ExportRenderAsync render = async (_, staging, _, _, _) =>
         {
-            await File.WriteAllTextAsync(staging.Path, "rendered output");
+            await File.WriteAllTextAsync(staging.Path, "rendered output", TestContext.CancellationToken);
             liveProject.Assets.Add(Asset(ProjectAssetKind.Video, "output.mp4", destinationPath));
             return TranscodeFailureReason.None;
         };
@@ -1208,7 +1533,7 @@ public sealed class Task12ExportTests
             CancellationToken.None);
 
         Assert.AreEqual(ExportResultStatus.ValidationFailed, result.Status);
-        CollectionAssert.AreEqual(original, await File.ReadAllBytesAsync(destinationPath));
+        Assert.AreSequenceEqual(original, await File.ReadAllBytesAsync(destinationPath, TestContext.CancellationToken));
         Assert.HasCount(0, Directory.GetFiles(directory.Path, "*.cutflow-*.mp4"));
     }
 
@@ -1223,7 +1548,7 @@ public sealed class Task12ExportTests
         ExportRenderAsync render = async (_, staging, _, _, _) =>
         {
             renderStarted = true;
-            await File.WriteAllTextAsync(staging.Path, "rendered output");
+            await File.WriteAllTextAsync(staging.Path, "rendered output", TestContext.CancellationToken);
             return TranscodeFailureReason.None;
         };
 
@@ -1236,7 +1561,7 @@ public sealed class Task12ExportTests
 
         Assert.AreEqual(ExportResultStatus.Success, result.Status, result.ErrorMessage);
         Assert.IsTrue(renderStarted);
-        Assert.AreEqual("rendered output", await File.ReadAllTextAsync(destinationPath));
+        Assert.AreEqual("rendered output", await File.ReadAllTextAsync(destinationPath, TestContext.CancellationToken));
     }
 
     [TestMethod]
@@ -1246,11 +1571,11 @@ public sealed class Task12ExportTests
     {
         await using var directory = new TestDirectory();
         var destinationPath = Path.Combine(directory.Path, "output.mp4");
-        await File.WriteAllTextAsync(destinationPath, "keep destination");
+        await File.WriteAllTextAsync(destinationPath, "keep destination", TestContext.CancellationToken);
         using var cancellation = new CancellationTokenSource();
         ExportRenderAsync render = async (_, staging, _, _, token) =>
         {
-            await File.WriteAllTextAsync(staging.Path, "partial output");
+            await File.WriteAllTextAsync(staging.Path, "partial output", TestContext.CancellationToken);
             if (cancel)
             {
                 cancellation.Cancel();
@@ -1260,7 +1585,7 @@ public sealed class Task12ExportTests
             return TranscodeFailureReason.InvalidProfile;
         };
         const string sensitiveCleanupMessage = "do not log this cleanup path or detail";
-        Func<Windows.Storage.StorageFile, Task> cleanup = _ => throw new IOException(sensitiveCleanupMessage);
+        Func<string, Task> cleanup = _ => throw new IOException(sensitiveCleanupMessage);
         var service = new ExportService(
             new CompositionService(),
             null,
@@ -1287,16 +1612,33 @@ public sealed class Task12ExportTests
                 CancellationToken.None);
 
             Assert.AreEqual(ExportResultStatus.Failed, result.Status);
-            StringAssert.Contains(result.ErrorMessage, "encoding profile is invalid");
+            Assert.Contains("encoding profile is invalid", result.ErrorMessage);
         }
 
-        Assert.AreEqual("keep destination", await File.ReadAllTextAsync(destinationPath));
+        Assert.AreEqual("keep destination", await File.ReadAllTextAsync(destinationPath, TestContext.CancellationToken));
         var logPath = Path.Combine(directory.Path, "cutflow.log");
         await WaitUntilAsync(() => File.Exists(logPath));
-        var log = await File.ReadAllTextAsync(logPath);
-        StringAssert.Contains(log, nameof(IOException));
+        var log = await File.ReadAllTextAsync(logPath, TestContext.CancellationToken);
+        Assert.Contains(nameof(IOException), log);
         Assert.IsFalse(log.Contains(sensitiveCleanupMessage, StringComparison.Ordinal));
         Assert.IsFalse(log.Contains(directory.Path, StringComparison.OrdinalIgnoreCase));
+    }
+
+    [TestMethod]
+    public async Task ExportToPathAsync_UnexpectedCleanupDefectPropagates()
+    {
+        await using var directory = new TestDirectory();
+        var destinationPath = Path.Combine(directory.Path, "output.mp4");
+        ExportRenderAsync render = (_, _, _, _, _) => Task.FromResult(TranscodeFailureReason.InvalidProfile);
+        Func<string, Task> cleanup = _ => throw new InvalidOperationException("unexpected cleanup defect");
+        var service = new ExportService(new CompositionService(), null, render, cleanup);
+
+        await Assert.ThrowsExactlyAsync<InvalidOperationException>(() => service.ExportToPathAsync(
+            CreateExportableProject(),
+            destinationPath,
+            new ExportOptions(ExportResolutionTier.Hd720p, ExportQuality.Standard),
+            new InlineProgress<double>(_ => { }),
+            CancellationToken.None));
     }
 
     [TestMethod]
@@ -1304,7 +1646,7 @@ public sealed class Task12ExportTests
     {
         await using var directory = new TestDirectory();
         var destinationPath = Path.Combine(directory.Path, "output.mp4");
-        await File.WriteAllTextAsync(destinationPath, "keep destination");
+        await File.WriteAllTextAsync(destinationPath, "keep destination", TestContext.CancellationToken);
         var logger = new SimpleLogService(directory.Path);
         var lockName = (string)typeof(SimpleLogService)
             .GetField("_processWriteLockName", System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic)!
@@ -1312,7 +1654,7 @@ public sealed class Task12ExportTests
         using var loggingBlocker = new Semaphore(1, 1, lockName);
         Assert.IsTrue(loggingBlocker.WaitOne(0));
         ExportRenderAsync render = (_, _, _, _, _) => Task.FromResult(TranscodeFailureReason.InvalidProfile);
-        Func<Windows.Storage.StorageFile, Task> cleanup = _ => throw new IOException("cleanup failed");
+        Func<string, Task> cleanup = _ => throw new IOException("cleanup failed");
         var service = new ExportService(
             new CompositionService(),
             null,
@@ -1328,7 +1670,7 @@ public sealed class Task12ExportTests
                     new ExportOptions(ExportResolutionTier.Hd720p, ExportQuality.Standard),
                     new InlineProgress<double>(_ => { }),
                     CancellationToken.None)
-                .WaitAsync(TimeSpan.FromSeconds(2));
+                .WaitAsync(TimeSpan.FromSeconds(2), TestContext.CancellationToken);
 
             Assert.AreEqual(ExportResultStatus.Failed, result.Status);
         }
@@ -1369,14 +1711,14 @@ public sealed class Task12ExportTests
             CancellationToken.None);
 
         Assert.AreEqual(ExportResultStatus.Success, result.Status, result.ErrorMessage);
-        Assert.IsTrue(new FileInfo(destinationPath).Length > 1_000);
+        Assert.IsGreaterThan(1_000, new FileInfo(destinationPath).Length);
         var file = await StorageFile.GetFileFromPathAsync(destinationPath);
         var properties = await file.Properties.GetVideoPropertiesAsync();
         Assert.AreEqual(expectedWidth, properties.Width);
         Assert.AreEqual(expectedHeight, properties.Height);
-        Assert.IsTrue(properties.Duration >= TimeSpan.FromMilliseconds(900));
+        Assert.IsGreaterThanOrEqualTo(TimeSpan.FromMilliseconds(900), properties.Duration);
         var clip = await MediaClip.CreateFromFileAsync(file);
-        Assert.IsTrue(clip.OriginalDuration >= TimeSpan.FromMilliseconds(900));
+        Assert.IsGreaterThanOrEqualTo(TimeSpan.FromMilliseconds(900), clip.OriginalDuration);
     }
 
     private static ProjectAsset Asset(ProjectAssetKind kind, string name, string path) => new()
@@ -1455,4 +1797,9 @@ public sealed class Task12ExportTests
             return ValueTask.CompletedTask;
         }
     }
+
+    public TestContext TestContext { get; set; }
+
+    private static readonly double[] expected = new[] { 75d };
+    private static readonly double[] expectedArray = new[] { 75d, 99d };
 }

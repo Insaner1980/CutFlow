@@ -16,11 +16,13 @@ public sealed class CompositionRootTests
             "Controls",
             "PreviewPane.xaml.cs"));
 
-        StringAssert.Contains(
-            previewPane,
-            "TextStyle.ParseBrush(opaqueArgb, ProjectSettings.DefaultBackgroundColor)");
+        Assert.Contains(
+            "TextStyle.ParseBrush(opaqueArgb, ProjectSettings.DefaultBackgroundColor)",
+            previewPane);
         Assert.IsFalse(previewPane.Contains("private static SolidColorBrush ParseBrush", StringComparison.Ordinal));
     }
+
+    private static readonly string[] expected = new[] { "MainWindow.xaml.cs" };
 
     [TestMethod]
     public void LoggingService_IsConstructedOnceAndSharedWithEditorAndExport()
@@ -41,16 +43,16 @@ public sealed class CompositionRootTests
             .Where(path => File.ReadAllText(Path.Combine(sourceRoot, path)).Contains("new SimpleLogService(", StringComparison.Ordinal))
             .ToArray();
 
-        CollectionAssert.AreEqual(new[] { "MainWindow.xaml.cs" }, constructionSites);
-        StringAssert.Contains(
-            mainWindow,
-            "new EditorView(editorViewModel, _projectService, _mediaImportService, _logService, _appSettings)");
-        StringAssert.Contains(
-            editorView,
-            "_logService = logService ?? throw new ArgumentNullException(nameof(logService));");
-        StringAssert.Contains(
-            editorExport,
-            "new ExportService(_compositionService, _textOverlayRenderer, _logService)");
+        Assert.AreSequenceEqual(expected, constructionSites);
+        Assert.Contains(
+            "new EditorView(editorViewModel, _projectService, _mediaImportService, _logService, _appSettings)",
+            mainWindow);
+        Assert.Contains(
+            "_logService = logService ?? throw new ArgumentNullException(nameof(logService));",
+            editorView);
+        Assert.Contains(
+            "new ExportService(_compositionService, _textOverlayRenderer, _logService)",
+            editorExport);
         Assert.IsFalse(exportService.Contains("new SimpleLogService(", StringComparison.Ordinal));
     }
 
@@ -69,8 +71,8 @@ public sealed class CompositionRootTests
         var commit = relink.IndexOf("ViewModel.ApplyRelinkedAsset(candidate)", StringComparison.Ordinal);
         var cleanup = relink.IndexOf("TryDeleteCache(oldCacheReference);", StringComparison.Ordinal);
 
-        Assert.IsTrue(commit >= 0);
-        Assert.IsTrue(cleanup > commit);
+        Assert.IsGreaterThanOrEqualTo(0, commit);
+        Assert.IsGreaterThan(commit, cleanup);
 
         var cleanupStart = editorView.IndexOf("private void TryDeleteCache", StringComparison.Ordinal);
         var cleanupEnd = editorView.IndexOf("private void CommitImportResults", cleanupStart, StringComparison.Ordinal);

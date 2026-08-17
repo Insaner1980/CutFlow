@@ -13,6 +13,8 @@ public sealed class ArchitectureConfigurationTests
         Assert.AreEqual(Architecture.X64, RuntimeInformation.ProcessArchitecture);
     }
 
+    private static readonly string[] expected = new[] { "x64" };
+
     [TestMethod]
     public void SolutionAndProjects_ExposeOnlyX64()
     {
@@ -24,7 +26,7 @@ public sealed class ArchitectureConfigurationTests
             .Select(platform => (string?)platform.Attribute("Name"))
             .ToArray();
 
-        CollectionAssert.AreEqual(new[] { "x64" }, solutionPlatforms);
+        Assert.AreSequenceEqual(expected, solutionPlatforms);
 
         foreach (var projectPath in ProjectPaths(repositoryRoot))
         {
@@ -59,11 +61,9 @@ public sealed class ArchitectureConfigurationTests
                 .ToArray();
 
             Assert.AreEqual("PrepareForBuild", (string?)validationTarget.Attribute("BeforeTargets"), projectPath);
-            CollectionAssert.Contains(errorConditions, "'$(Platform)' != 'x64'", projectPath);
-            CollectionAssert.Contains(
-                errorConditions,
-                "'$(RuntimeIdentifier)' != '' and '$(RuntimeIdentifier)' != 'win-x64'",
-                projectPath);
+            Assert.Contains("'$(Platform)' != 'x64'", errorConditions, projectPath);
+            Assert.Contains(
+                "'$(RuntimeIdentifier)' != '' and '$(RuntimeIdentifier)' != 'win-x64'", errorConditions, projectPath);
         }
     }
 

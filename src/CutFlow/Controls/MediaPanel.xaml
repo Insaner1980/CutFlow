@@ -118,7 +118,7 @@
                                                     Background="{StaticResource WarningBrush}"
                                                     CornerRadius="3"
                                                     Visibility="{Binding MissingVisibility}">
-                                                    <TextBlock FontSize="9" Foreground="Black" Text="Missing" />
+                                                    <TextBlock FontSize="9" Foreground="{StaticResource WindowBackgroundBrush}" Text="Missing" />
                                                 </Border>
                                             </Grid>
                                         </Border>

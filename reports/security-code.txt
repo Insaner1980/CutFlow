@@ -1,7 +1,7 @@
 semgrep csharp
 Root: C:\Dev\CutFlow
 Command: semgrep scan --config p/csharp --error --metrics=off .
-Started: 2026-08-16 13.03.26
+Started: 2026-08-17 13.10.31
 
                
                
@@ -21,7 +21,7 @@ Started: 2026-08-16 13.03.26
  • Targets scanned: 58
  • Parsed lines: ~99.6%
  • Scan skipped: 
-   ◦ Files matching .semgrepignore patterns: 42
+   ◦ Files matching .semgrepignore patterns: 43
  • Scan was limited to files tracked by git
  • For a detailed list of skipped files and lines, run semgrep with the --verbose flag
 Ran 27 rules on 58 files: 0 findings.

@@ -4,7 +4,7 @@ using Microsoft.VisualStudio.TestTools.UnitTesting;
 namespace CutFlow.Tests;
 
 [TestClass]
-public sealed class ThumbnailServiceTests
+public sealed partial class ThumbnailServiceTests
 {
     [TestMethod]
     public void CacheKey_IsDeterministicAndIncludesNormalizedPathMetadataAndRequestedSize()
@@ -75,7 +75,7 @@ public sealed class ThumbnailServiceTests
         Assert.IsFalse(Path.IsPathRooted(relative));
         Assert.AreEqual($"cache/thumbnails/{key}.jpg", relative);
         Assert.AreEqual(Path.Combine(project.Path, "cache", "thumbnails", $"{key}.jpg"), resolved);
-        StringAssert.Contains(json, $"\"thumbnailCachePath\":\"cache/thumbnails/{key}.jpg\"");
+        Assert.Contains($"\"thumbnailCachePath\":\"cache/thumbnails/{key}.jpg\"", json);
         Assert.IsFalse(Directory.Exists(Path.Combine(project.Path, "cache", "thumbnails")));
         Assert.ThrowsExactly<InvalidDataException>(() => ThumbnailService.ResolveProjectCachePath(project.Path, @"..\source.mp4"));
         Assert.ThrowsExactly<InvalidDataException>(() => ThumbnailService.ResolveProjectCachePath(project.Path, @"C:\outside.jpg"));
@@ -117,13 +117,13 @@ public sealed class ThumbnailServiceTests
         Directory.CreateSymbolicLink(linkedThumbnailsPath, externalDirectory.FullName);
         var relativePath = ThumbnailService.CreateRelativeCachePath(new string('a', 64));
         var externalPath = Path.Combine(externalDirectory.FullName, Path.GetFileName(relativePath));
-        await File.WriteAllTextAsync(externalPath, "preserve external thumbnail");
+        await File.WriteAllTextAsync(externalPath, "preserve external thumbnail", TestContext.CancellationToken);
         var asset = new Models.ProjectAsset { ThumbnailCachePath = relativePath };
 
         var service = new ThumbnailService(project.Path);
 
         Assert.ThrowsExactly<InvalidDataException>(() => service.TryDeleteCachedThumbnail(asset));
-        Assert.AreEqual("preserve external thumbnail", await File.ReadAllTextAsync(externalPath));
+        Assert.AreEqual("preserve external thumbnail", await File.ReadAllTextAsync(externalPath, TestContext.CancellationToken));
     }
 
     [TestMethod]
@@ -134,7 +134,7 @@ public sealed class ThumbnailServiceTests
         await using var destination = new MemoryStream();
 
         await ThumbnailService.CopyBoundedAsync(source, destination, 64, CancellationToken.None);
-        CollectionAssert.AreEqual(data, destination.ToArray());
+        Assert.AreSequenceEqual(data, destination.ToArray());
 
         await using var tooLarge = new MemoryStream(new byte[65]);
         await using var rejectedDestination = new MemoryStream();
@@ -162,10 +162,10 @@ public sealed class ThumbnailServiceTests
         var relativePath = ThumbnailService.CreateRelativeCachePath(request.CacheKey);
         var cachePath = ThumbnailService.ResolveProjectCachePath(project.Path, relativePath);
         Directory.CreateDirectory(Path.GetDirectoryName(cachePath)!);
-        await File.WriteAllBytesAsync(cachePath, [0xFF, 0xD8, 0xFF, 0xD9]);
+        await File.WriteAllBytesAsync(cachePath, [0xFF, 0xD8, 0xFF, 0xD9], TestContext.CancellationToken);
         var source = await Windows.Storage.StorageFile.GetFileFromPathAsync(sourcePath);
 
-        var result = await new ThumbnailService(project.Path).GetOrCreateThumbnailAsync(source, asset);
+        var result = await new ThumbnailService(project.Path).GetOrCreateThumbnailAsync(source, asset, cancellationToken: TestContext.CancellationToken);
 
         Assert.IsNotNull(result);
         Assert.IsTrue(await ThumbnailService.IsUsableCachedThumbnailAsync(result, CancellationToken.None));
@@ -179,7 +179,7 @@ public sealed class ThumbnailServiceTests
         var corruptPath = Path.Combine(project.Path, "corrupt.jpg");
         var oversizedPath = Path.Combine(project.Path, "oversized.jpg");
         File.Copy(Path.Combine(AppContext.BaseDirectory, "TestMedia", "valid-image.jpg"), validPath);
-        await File.WriteAllTextAsync(corruptPath, "not a jpeg");
+        await File.WriteAllTextAsync(corruptPath, "not a jpeg", TestContext.CancellationToken);
         await using (var oversized = new FileStream(oversizedPath, FileMode.CreateNew, FileAccess.Write, FileShare.None))
         {
             oversized.SetLength(ThumbnailService.MaximumCachedThumbnailBytes + 1);
@@ -212,18 +212,18 @@ public sealed class ThumbnailServiceTests
         };
         var service = new ThumbnailService(project.Path);
         var source = await Windows.Storage.StorageFile.GetFileFromPathAsync(sourcePath);
-        var originalCachePath = await service.GetOrCreateThumbnailAsync(source, asset);
+        var originalCachePath = await service.GetOrCreateThumbnailAsync(source, asset, cancellationToken: TestContext.CancellationToken);
         Assert.IsNotNull(originalCachePath);
         var originalRequest = ThumbnailService.CaptureRequest(asset, ThumbnailService.DefaultRequestedSize);
 
         await using (var stream = new FileStream(sourcePath, FileMode.Append, FileAccess.Write, FileShare.Read))
         {
-            await stream.WriteAsync(new byte[] { 0 });
+            await stream.WriteAsync(new byte[] { 0 }, TestContext.CancellationToken);
         }
         File.SetLastWriteTimeUtc(sourcePath, originalInfo.LastWriteTimeUtc.AddMinutes(1));
         source = await Windows.Storage.StorageFile.GetFileFromPathAsync(sourcePath);
 
-        var refreshedCachePath = await service.GetOrCreateThumbnailAsync(source, asset);
+        var refreshedCachePath = await service.GetOrCreateThumbnailAsync(source, asset, cancellationToken: TestContext.CancellationToken);
         var currentInfo = new FileInfo(sourcePath);
         var refreshedRequest = ThumbnailService.CaptureRequest(asset, ThumbnailService.DefaultRequestedSize);
 
@@ -264,13 +264,13 @@ public sealed class ThumbnailServiceTests
 
         await using (var stream = new FileStream(sourcePath, FileMode.Append, FileAccess.Write, FileShare.Read))
         {
-            await stream.WriteAsync(new byte[] { 0 });
+            await stream.WriteAsync(new byte[] { 0 }, TestContext.CancellationToken);
         }
         File.SetLastWriteTimeUtc(sourcePath, originalInfo.LastWriteTimeUtc.AddMinutes(1));
         var source = await Windows.Storage.StorageFile.GetFileFromPathAsync(sourcePath);
 
-        Assert.IsNotNull(await service.GetOrCreateThumbnailAsync(source, asset));
-        Assert.IsFalse(service.TryCommitGeneratedThumbnail(asset, oldRequest, oldTemporaryPath, oldRelativePath));
+        Assert.IsNotNull(await service.GetOrCreateThumbnailAsync(source, asset, cancellationToken: TestContext.CancellationToken));
+        Assert.IsFalse(service.TryCommitGeneratedThumbnail(asset, oldRequest, oldTemporaryPath, oldRelativePath, TestContext.CancellationToken));
         Assert.IsFalse(File.Exists(oldTemporaryPath));
         Assert.IsFalse(File.Exists(oldFinalPath));
         Assert.AreNotEqual(oldRequest.CacheKey, ThumbnailService.CaptureRequest(asset, ThumbnailService.DefaultRequestedSize).CacheKey);
@@ -301,7 +301,7 @@ public sealed class ThumbnailServiceTests
         asset.LastWriteUtc = DateTimeOffset.UnixEpoch.AddDays(1);
         asset.ThumbnailCachePath = string.Empty;
 
-        Assert.IsFalse(service.TryCommitGeneratedThumbnail(asset, request, temporaryPath, relativePath));
+        Assert.IsFalse(service.TryCommitGeneratedThumbnail(asset, request, temporaryPath, relativePath, TestContext.CancellationToken));
         Assert.IsFalse(File.Exists(temporaryPath));
         Assert.IsFalse(File.Exists(finalPath));
         Assert.AreEqual(string.Empty, asset.ThumbnailCachePath);
@@ -388,7 +388,7 @@ public sealed class ThumbnailServiceTests
         Assert.IsFalse(ThumbnailService.IsStoragePathForRequest(replacementRequest, @"C:\Media\old.png"));
     }
 
-    private sealed class TemporaryProjectRoot : IDisposable
+    private sealed partial class TemporaryProjectRoot : IDisposable
     {
         public TemporaryProjectRoot()
         {
@@ -406,4 +406,6 @@ public sealed class ThumbnailServiceTests
             }
         }
     }
+
+    public TestContext TestContext { get; set; }
 }

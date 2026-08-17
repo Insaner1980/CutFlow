@@ -90,9 +90,8 @@ public sealed class MediaImportServiceTests
             [null, unsupported, null],
             [first, last]);
 
-        CollectionAssert.AreEqual(
-            new[] { "first.mp4", "notes.txt", "last.jpg" },
-            merged.Select(result => result.FileName).ToArray());
+        Assert.AreSequenceEqual(
+            expected, merged.Select(result => result.FileName).ToArray());
         Assert.AreSame(first.Asset, merged[0].Asset);
         Assert.AreSame(last.Asset, merged[2].Asset);
     }
@@ -125,14 +124,14 @@ public sealed class MediaImportServiceTests
             Assert.IsNull(error);
 
             Assert.IsFalse(MediaImportService.TryResolveLocalSourcePath("source.png", out _, out error));
-            StringAssert.Contains(error, "fully qualified");
+            Assert.Contains("fully qualified", error!);
 
             Assert.IsFalse(MediaImportService.TryResolveLocalSourcePath(@"\\?\" + sourcePath, out _, out error));
-            StringAssert.Contains(error, "device paths");
+            Assert.Contains("device paths", error!);
 
             File.Delete(sourcePath);
             Assert.IsFalse(MediaImportService.TryResolveLocalSourcePath(sourcePath, out _, out error));
-            StringAssert.Contains(error, "local path");
+            Assert.Contains("local path", error!);
         }
         finally
         {
@@ -162,11 +161,11 @@ public sealed class MediaImportServiceTests
             var results = await new MediaImportService().ImportAsync(
                 [missing, available],
                 project,
-                Path.Combine(testRoot, "Projects"));
+                Path.Combine(testRoot, "Projects"), TestContext.CancellationToken);
 
             Assert.HasCount(2, results);
             Assert.IsFalse(results[0].IsSuccess);
-            StringAssert.Contains(results[0].ErrorMessage, "local path");
+            Assert.Contains("local path", results[0].ErrorMessage!);
             Assert.IsTrue(results[1].IsSuccess, results[1].ErrorMessage);
             Assert.HasCount(0, project.Assets);
             var asset = results[1].Asset!;
@@ -175,8 +174,8 @@ public sealed class MediaImportServiceTests
             Assert.AreEqual("available.jpg", asset.FileName);
             Assert.AreEqual(ProjectAssetKind.Image, asset.Kind);
             Assert.AreEqual(MediaImportService.DefaultImageDurationMilliseconds, asset.DurationMilliseconds);
-            Assert.IsTrue(asset.Width > 0);
-            Assert.IsTrue(asset.Height > 0);
+            Assert.IsGreaterThan(0, asset.Width);
+            Assert.IsGreaterThan(0, asset.Height);
             Assert.AreEqual(checked((ulong)new FileInfo(availablePath).Length), asset.FileSize);
             Assert.AreEqual(File.GetLastWriteTimeUtc(availablePath), asset.LastWriteUtc);
             Assert.AreEqual(TimeSpan.Zero, asset.LastWriteUtc.Offset);
@@ -201,7 +200,7 @@ public sealed class MediaImportServiceTests
         try
         {
             var sourceBytes = await File.ReadAllBytesAsync(
-                Path.Combine(AppContext.BaseDirectory, "TestMedia", "valid-image.jpg"));
+                Path.Combine(AppContext.BaseDirectory, "TestMedia", "valid-image.jpg"), TestContext.CancellationToken);
             var exifOrientationSegment = new byte[]
             {
                 0xFF, 0xE1, 0x00, 0x22,
@@ -215,7 +214,7 @@ public sealed class MediaImportServiceTests
             Buffer.BlockCopy(sourceBytes, 0, orientedBytes, 0, 2);
             Buffer.BlockCopy(exifOrientationSegment, 0, orientedBytes, 2, exifOrientationSegment.Length);
             Buffer.BlockCopy(sourceBytes, 2, orientedBytes, 2 + exifOrientationSegment.Length, sourceBytes.Length - 2);
-            await File.WriteAllBytesAsync(sourcePath, orientedBytes);
+            await File.WriteAllBytesAsync(sourcePath, orientedBytes, TestContext.CancellationToken);
 
             var file = await Windows.Storage.StorageFile.GetFileFromPathAsync(sourcePath);
             using (var stream = await file.OpenReadAsync())
@@ -230,7 +229,7 @@ public sealed class MediaImportServiceTests
             var results = await new MediaImportService().ImportAsync(
                 [file],
                 new ProjectDocument(),
-                Path.Combine(testRoot, "Projects"));
+                Path.Combine(testRoot, "Projects"), TestContext.CancellationToken);
 
             Assert.HasCount(1, results);
             Assert.IsTrue(results[0].IsSuccess, results[0].ErrorMessage);
@@ -277,16 +276,15 @@ public sealed class MediaImportServiceTests
             var results = await new MediaImportService().ImportAsync(
                 files,
                 project,
-                Path.Combine(testRoot, "Projects"));
+                Path.Combine(testRoot, "Projects"), TestContext.CancellationToken);
 
-            CollectionAssert.AreEqual(
-                new[] { "first.jpg", "notes.txt", "duplicate.jpg", "last.jpg" },
-                results.Select(result => result.FileName).ToArray());
+            string[] expectedFileNames = ["first.jpg", "notes.txt", "duplicate.jpg", "last.jpg"];
+            Assert.AreSequenceEqual(expectedFileNames, results.Select(result => result.FileName).ToArray());
             Assert.IsTrue(results[0].IsSuccess, results[0].ErrorMessage);
             Assert.IsFalse(results[1].IsSuccess);
-            StringAssert.Contains(results[1].ErrorMessage, "Supported formats");
+            Assert.Contains("Supported formats", results[1].ErrorMessage!);
             Assert.IsTrue(results[2].IsDuplicate);
-            StringAssert.Contains(results[2].ErrorMessage, "duplicate.jpg");
+            Assert.Contains("duplicate.jpg", results[2].ErrorMessage!);
             Assert.IsTrue(results[3].IsSuccess, results[3].ErrorMessage);
             Assert.HasCount(1, project.Assets);
         }
@@ -337,7 +335,7 @@ public sealed class MediaImportServiceTests
                 replacement,
                 existing,
                 project,
-                Path.Combine(testRoot, "Projects"));
+                Path.Combine(testRoot, "Projects"), TestContext.CancellationToken);
 
             Assert.IsFalse(result.IsSuccess);
             Assert.AreEqual(existingKind, existing.Kind);
@@ -390,14 +388,14 @@ public sealed class MediaImportServiceTests
                 replacement,
                 existing,
                 project,
-                Path.Combine(testRoot, "Projects"));
+                Path.Combine(testRoot, "Projects"), TestContext.CancellationToken);
 
             Assert.IsTrue(result.IsSuccess, result.ErrorMessage);
             Assert.AreSame(existing, result.Asset);
             Assert.AreEqual(kind, existing.Kind);
             Assert.AreEqual(replacementPath, existing.SourcePath);
             Assert.AreEqual(sourceFixture, existing.FileName);
-            Assert.IsTrue(existing.DurationMilliseconds >= ProjectDocument.MinimumItemDurationMilliseconds);
+            Assert.IsGreaterThanOrEqualTo(ProjectDocument.MinimumItemDurationMilliseconds, existing.DurationMilliseconds);
             if (kind == ProjectAssetKind.Audio)
             {
                 Assert.AreEqual(0, existing.Width);
@@ -405,8 +403,8 @@ public sealed class MediaImportServiceTests
             }
             else
             {
-                Assert.IsTrue(existing.Width > 0);
-                Assert.IsTrue(existing.Height > 0);
+                Assert.IsGreaterThan(0, existing.Width);
+                Assert.IsGreaterThan(0, existing.Height);
             }
 
             Assert.AreEqual(string.Empty, existing.ThumbnailCachePath);
@@ -441,17 +439,17 @@ public sealed class MediaImportServiceTests
         var projectsRoot = Path.Combine(testRoot, "Projects");
         var sourcePath = Path.Combine(projectsRoot, Guid.NewGuid().ToString("D"), "cache", "source.png");
         Directory.CreateDirectory(Path.GetDirectoryName(sourcePath)!);
-        await File.WriteAllTextAsync(sourcePath, "source bytes");
+        await File.WriteAllTextAsync(sourcePath, "source bytes", TestContext.CancellationToken);
         try
         {
             var source = await Windows.Storage.StorageFile.GetFileFromPathAsync(sourcePath);
             var service = new MediaImportService();
             var project = new ProjectDocument();
 
-            var imported = await service.ImportAsync([source], project, projectsRoot);
+            var imported = await service.ImportAsync([source], project, projectsRoot, TestContext.CancellationToken);
 
             Assert.IsFalse(imported.Single().IsSuccess);
-            StringAssert.Contains(imported.Single().ErrorMessage, "managed project folders");
+            Assert.Contains("managed project folders", imported.Single().ErrorMessage!);
             Assert.HasCount(0, project.Assets);
 
             var existing = new ProjectAsset
@@ -463,13 +461,13 @@ public sealed class MediaImportServiceTests
             };
             project.Assets.Add(existing);
 
-            var relinked = await service.RelinkAsync(source, existing, project, projectsRoot);
+            var relinked = await service.RelinkAsync(source, existing, project, projectsRoot, TestContext.CancellationToken);
 
             Assert.IsFalse(relinked.IsSuccess);
-            StringAssert.Contains(relinked.ErrorMessage, "managed project folders");
+            Assert.Contains("managed project folders", relinked.ErrorMessage!);
             Assert.AreEqual(@"C:\Media\old.png", existing.SourcePath);
             Assert.AreEqual(@"cache\thumbnails\old.jpg", existing.ThumbnailCachePath);
-            Assert.AreEqual("source bytes", await File.ReadAllTextAsync(sourcePath));
+            Assert.AreEqual("source bytes", await File.ReadAllTextAsync(sourcePath, TestContext.CancellationToken));
         }
         finally
         {
@@ -571,7 +569,7 @@ public sealed class MediaImportServiceTests
         var project = new ProjectDocument { Assets = [existing] };
 
         Assert.IsFalse(MediaImportService.TryApplyRelink(existing, replacement, project, out var error));
-        StringAssert.Contains(error, "Video");
+        Assert.Contains("Video", error!);
         Assert.AreEqual(@"C:\Old\clip.mp4", existing.SourcePath);
         Assert.IsTrue(existing.IsMissing);
     }
@@ -622,8 +620,8 @@ public sealed class MediaImportServiceTests
             FileSize: 45_000, LastWriteUtc: DateTimeOffset.UnixEpoch.AddDays(1));
 
         Assert.IsFalse(MediaImportService.TryApplyRelink(existing, replacement, project, out var error));
-        StringAssert.Contains(error, replacementFileName);
-        StringAssert.Contains(error, "timeline");
+        Assert.Contains(replacementFileName, error!);
+        Assert.Contains("timeline", error!);
         Assert.AreEqual(id, existing.Id);
         Assert.AreEqual(kind == ProjectAssetKind.Video ? @"C:\Old\clip.mp4" : @"C:\Old\song.wav", existing.SourcePath);
         Assert.AreEqual(3_000L, existing.DurationMilliseconds);
@@ -694,7 +692,7 @@ public sealed class MediaImportServiceTests
             FileSize: 45_000, LastWriteUtc: DateTimeOffset.UnixEpoch.AddDays(1));
 
         Assert.IsFalse(MediaImportService.TryApplyRelink(existing, replacement, project, out var error));
-        StringAssert.Contains(error, "2750 ms");
+        Assert.Contains("2750 ms", error!);
         Assert.AreEqual(@"C:\Old\clip.mp4", existing.SourcePath);
         Assert.AreEqual(3_000L, existing.DurationMilliseconds);
     }
@@ -731,15 +729,14 @@ public sealed class MediaImportServiceTests
             {
                 checkedPaths.Add(path);
                 return path.EndsWith("present.mp4", StringComparison.OrdinalIgnoreCase);
-            });
+            }, TestContext.CancellationToken);
 
         Assert.AreEqual(2, changed);
         Assert.HasCount(2, project.Assets);
         Assert.IsFalse(present.IsMissing);
         Assert.IsTrue(missing.IsMissing);
-        CollectionAssert.AreEqual(
-            new[] { @"C:\Media\present.mp4", @"C:\Media\missing.mp4" },
-            checkedPaths);
+        Assert.AreSequenceEqual(
+            expectedArray, checkedPaths);
     }
 
     [TestMethod]
@@ -748,7 +745,7 @@ public sealed class MediaImportServiceTests
         var testRoot = Path.Combine(Path.GetTempPath(), "CutFlow.Tests", Guid.NewGuid().ToString("N"));
         var sourcePath = Path.Combine(testRoot, "source.png");
         Directory.CreateDirectory(testRoot);
-        await File.WriteAllTextAsync(sourcePath, "original");
+        await File.WriteAllTextAsync(sourcePath, "original", TestContext.CancellationToken);
         try
         {
             var asset = new ProjectAsset
@@ -765,11 +762,11 @@ public sealed class MediaImportServiceTests
                 IsMissing = true
             };
             var project = new ProjectDocument { Assets = [asset] };
-            await File.WriteAllTextAsync(sourcePath, "changed source with a different size");
+            await File.WriteAllTextAsync(sourcePath, "changed source with a different size", TestContext.CancellationToken);
             var recordedFileSize = asset.FileSize;
             var recordedLastWriteUtc = asset.LastWriteUtc;
 
-            await new MediaImportService().RefreshMissingAsync(project);
+            await new MediaImportService().RefreshMissingAsync(project, TestContext.CancellationToken);
 
             Assert.IsFalse(asset.IsMissing);
             Assert.AreEqual("recorded-name.png", asset.FileName);
@@ -803,7 +800,7 @@ public sealed class MediaImportServiceTests
             }
 
             return true;
-        });
+        }, TestContext.CancellationToken);
 
         Assert.AreEqual(2, changed);
         Assert.IsTrue(denied.IsMissing);
@@ -837,7 +834,7 @@ public sealed class MediaImportServiceTests
         project.VideoItems.Add(new VideoTimelineItem { Id = Guid.NewGuid(), AssetId = asset.Id, SourceOutMilliseconds = 1_000 });
 
         Assert.IsFalse(MediaImportService.TryRemoveAssetReference(project, asset.Id, out var error));
-        StringAssert.Contains(error, "timeline");
+        Assert.Contains("timeline", error!);
         Assert.HasCount(1, project.Assets);
     }
 
@@ -851,4 +848,9 @@ public sealed class MediaImportServiceTests
         Assert.IsNull(error);
         Assert.HasCount(0, project.Assets);
     }
+
+    public TestContext TestContext { get; set; }
+
+    private static readonly string[] expected = new[] { "first.mp4", "notes.txt", "last.jpg" };
+    private static readonly string[] expectedArray = new[] { @"C:\Media\present.mp4", @"C:\Media\missing.mp4" };
 }

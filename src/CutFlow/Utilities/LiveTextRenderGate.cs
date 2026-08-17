@@ -67,8 +67,8 @@ internal sealed class LiveTextRenderKey : IEquatable<LiveTextRenderKey>
 
     public bool Equals(LiveTextRenderKey? other) =>
         other is not null &&
-        _surfaceWidth.Equals(other._surfaceWidth) &&
-        _surfaceHeight.Equals(other._surfaceHeight) &&
+        BitConverter.DoubleToInt64Bits(_surfaceWidth) == BitConverter.DoubleToInt64Bits(other._surfaceWidth) &&
+        BitConverter.DoubleToInt64Bits(_surfaceHeight) == BitConverter.DoubleToInt64Bits(other._surfaceHeight) &&
         _isTrackVisible == other._isTrackVisible &&
         _items.SequenceEqual(other._items);
 

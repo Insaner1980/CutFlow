@@ -45,8 +45,8 @@ public sealed class UnsupportedToolTests
             "ToggleButton"
         };
 
-        Assert.IsFalse(
-            unsupportedContent.Descendants().Any(element => interactiveElementNames.Contains(element.Name.LocalName)),
+        Assert.DoesNotContain(
+            element => interactiveElementNames.Contains(element.Name.LocalName), unsupportedContent.Descendants(),
             "Unsupported categories must remain informational empty states without focusable actions.");
     }
 

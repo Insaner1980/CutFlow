@@ -82,10 +82,10 @@ public sealed class Task11LifecycleTests
         var firstCloseGuard = initialize.IndexOf("if (!_lifecycle.CanContinueInitialization)", StringComparison.Ordinal);
         var homeView = File.ReadAllText(Path.Combine(root, "src", "CutFlow", "Views", "HomeView.xaml.cs"));
 
-        Assert.IsTrue(windowReadyAwait >= 0);
-        Assert.IsTrue(settingsAwait > windowReadyAwait);
-        Assert.IsTrue(settingsCommit > settingsAwait);
-        Assert.IsTrue(firstCloseGuard > settingsCommit);
+        Assert.IsGreaterThanOrEqualTo(0, windowReadyAwait);
+        Assert.IsGreaterThan(windowReadyAwait, settingsAwait);
+        Assert.IsGreaterThan(settingsAwait, settingsCommit);
+        Assert.IsGreaterThan(settingsCommit, firstCloseGuard);
         Assert.IsTrue(initialize.Contains("await _viewModel.ShowHomeAsync();", StringComparison.Ordinal));
         Assert.Contains("Startup recovery failed:", initialize);
         Assert.Contains("_lifecycle.ApproveClose();", initialize);
@@ -110,10 +110,10 @@ public sealed class Task11LifecycleTests
         var construction = showCurrentView.IndexOf("new EditorView(editorViewModel", detach, StringComparison.Ordinal);
         var exposure = showCurrentView.IndexOf("_editorView = editorView;", construction, StringComparison.Ordinal);
 
-        Assert.IsTrue(replacementGuard >= 0);
-        Assert.IsTrue(detach > replacementGuard);
-        Assert.IsTrue(construction > detach);
-        Assert.IsTrue(exposure > construction);
+        Assert.IsGreaterThanOrEqualTo(0, replacementGuard);
+        Assert.IsGreaterThan(replacementGuard, detach);
+        Assert.IsGreaterThan(detach, construction);
+        Assert.IsGreaterThan(construction, exposure);
         Assert.Contains("ReferenceEquals(_editorView.ViewModel, editorViewModel)", showCurrentView);
         Assert.Contains("ReferenceEquals(ContentHost.Content, _editorView)", showCurrentView);
     }
@@ -130,9 +130,9 @@ public sealed class Task11LifecycleTests
         var clearContent = detach.IndexOf("ContentHost.Content = null;", StringComparison.Ordinal);
         var dispose = detach.IndexOf("editor.Dispose();", StringComparison.Ordinal);
 
-        Assert.IsTrue(clearTitleBar >= 0);
-        Assert.IsTrue(clearContent > clearTitleBar);
-        Assert.IsTrue(dispose > clearContent);
+        Assert.IsGreaterThanOrEqualTo(0, clearTitleBar);
+        Assert.IsGreaterThan(clearTitleBar, clearContent);
+        Assert.IsGreaterThan(clearContent, dispose);
     }
 
     [TestMethod]
@@ -168,10 +168,10 @@ public sealed class Task11LifecycleTests
         var seek = commit.IndexOf("SeekPreviewAndTimeline(positionMilliseconds);", StringComparison.Ordinal);
         var modelCommit = commit.IndexOf("ViewModel.AddImportedAssetsToTimeline", StringComparison.Ordinal);
 
-        Assert.IsTrue(lockGate >= 0);
-        Assert.IsTrue(revalidate > lockGate);
-        Assert.IsTrue(seek > lockGate);
-        Assert.IsTrue(modelCommit > lockGate);
+        Assert.IsGreaterThanOrEqualTo(0, lockGate);
+        Assert.IsGreaterThan(lockGate, revalidate);
+        Assert.IsGreaterThan(lockGate, seek);
+        Assert.IsGreaterThan(lockGate, modelCommit);
     }
 
     [TestMethod]
@@ -188,11 +188,11 @@ public sealed class Task11LifecycleTests
         Assert.Contains("TimelineTrackState.VideoVisibility => TimelineTrackKind.Video", handler);
         Assert.Contains("TimelineTrackState.TextVisibility => TimelineTrackKind.Text", handler);
         Assert.Contains("TimelineTrackState.AudioMute => TimelineTrackKind.Audio", handler);
-        Assert.IsTrue(lockGate >= 0);
-        Assert.IsTrue(restore > lockGate);
-        Assert.IsTrue(handler.IndexOf("ViewModel.SetVideoTrackVisible", StringComparison.Ordinal) > restore);
-        Assert.IsTrue(handler.IndexOf("ViewModel.SetTextTrackVisible", StringComparison.Ordinal) > restore);
-        Assert.IsTrue(handler.IndexOf("ViewModel.SetAudioTrackMuted", StringComparison.Ordinal) > restore);
+        Assert.IsGreaterThanOrEqualTo(0, lockGate);
+        Assert.IsGreaterThan(lockGate, restore);
+        Assert.IsGreaterThan(restore, handler.IndexOf("ViewModel.SetVideoTrackVisible", StringComparison.Ordinal));
+        Assert.IsGreaterThan(restore, handler.IndexOf("ViewModel.SetTextTrackVisible", StringComparison.Ordinal));
+        Assert.IsGreaterThan(restore, handler.IndexOf("ViewModel.SetAudioTrackMuted", StringComparison.Ordinal));
     }
 
     [TestMethod]
@@ -207,9 +207,9 @@ public sealed class Task11LifecycleTests
         var updateLayout = setZoom.IndexOf("TimelineScroller.UpdateLayout();", StringComparison.Ordinal);
         var changeView = setZoom.IndexOf("TimelineScroller.ChangeView(offset", StringComparison.Ordinal);
 
-        Assert.IsTrue(updateWidth >= 0);
-        Assert.IsTrue(updateLayout > updateWidth);
-        Assert.IsTrue(changeView > updateLayout);
+        Assert.IsGreaterThanOrEqualTo(0, updateWidth);
+        Assert.IsGreaterThan(updateWidth, updateLayout);
+        Assert.IsGreaterThan(updateLayout, changeView);
     }
 
     [TestMethod]
@@ -218,9 +218,9 @@ public sealed class Task11LifecycleTests
         var root = FindRepositoryRoot();
         var editor = File.ReadAllText(Path.Combine(root, "src", "CutFlow", "Views", "EditorView.xaml.cs"));
         var helperStart = editor.IndexOf("private void SeekPreviewAndTimeline", StringComparison.Ordinal);
-        Assert.IsTrue(helperStart >= 0);
+        Assert.IsGreaterThanOrEqualTo(0, helperStart);
         var helperEnd = editor.IndexOf("private void Preview_PlaybackPositionChanged", helperStart, StringComparison.Ordinal);
-        Assert.IsTrue(helperEnd > helperStart);
+        Assert.IsGreaterThan(helperStart, helperEnd);
         var helper = editor[helperStart..helperEnd];
         Assert.Contains("Preview.Seek(positionMilliseconds);", helper);
         Assert.Contains("ViewModel.Seek(positionMilliseconds);", helper);
@@ -241,9 +241,9 @@ public sealed class Task11LifecycleTests
         var replace = rebuild.IndexOf("Preview.ReplaceComposition", StringComparison.Ordinal);
         var positionArgument = rebuild.IndexOf("requestedPosition,", replace, StringComparison.Ordinal);
 
-        Assert.IsTrue(modelPosition >= 0);
-        Assert.IsTrue(replace > modelPosition);
-        Assert.IsTrue(positionArgument > replace);
+        Assert.IsGreaterThanOrEqualTo(0, modelPosition);
+        Assert.IsGreaterThan(modelPosition, replace);
+        Assert.IsGreaterThan(replace, positionArgument);
     }
 
     [TestMethod]
@@ -262,10 +262,10 @@ public sealed class Task11LifecycleTests
         Assert.Contains("InfoBarSeverity.Warning", rebuild);
         Assert.Contains("ClearPreviewMessage();", rebuild);
         Assert.Contains("ShowPreviewMessage(InfoBarSeverity.Error", rebuild);
-        Assert.IsTrue(showMessage >= 0);
-        Assert.IsTrue(clearMessage > showMessage);
-        StringAssert.Contains(editor[showMessage..clearMessage], "_previewInfoBarIsCurrent = true;");
-        StringAssert.Contains(editor[clearMessage..], "if (!_previewInfoBarIsCurrent)");
+        Assert.IsGreaterThanOrEqualTo(0, showMessage);
+        Assert.IsGreaterThan(showMessage, clearMessage);
+        Assert.Contains("_previewInfoBarIsCurrent = true;", editor[showMessage..clearMessage]);
+        Assert.Contains("if (!_previewInfoBarIsCurrent)", editor[clearMessage..]);
     }
 
     [TestMethod]
@@ -338,7 +338,7 @@ public sealed class Task11LifecycleTests
         Assert.Contains("private readonly DispatcherQueueTimer _positionTimer;", source);
         Assert.AreEqual(1, source.Split("DispatcherQueue.CreateTimer();", StringSplitOptions.None).Length - 1);
         Assert.DoesNotContain("DispatcherTimer", source);
-        Assert.IsTrue(constructor.IndexOf("InitializeComponent();", StringComparison.Ordinal) < constructor.IndexOf("DispatcherQueue.CreateTimer();", StringComparison.Ordinal));
+        Assert.IsLessThan(constructor.IndexOf("DispatcherQueue.CreateTimer();", StringComparison.Ordinal), constructor.IndexOf("InitializeComponent();", StringComparison.Ordinal));
         Assert.Contains("Interval = TimeSpan.FromMilliseconds(33);", constructor);
         Assert.Contains("_positionTimer.Tick += PositionTimer_Tick;", constructor);
         Assert.DoesNotContain("new MediaPlayer", replace);
@@ -386,7 +386,7 @@ public sealed class Task11LifecycleTests
         Assert.DoesNotContain("_playbackState.SetIntent(true);", handler);
         Assert.IsTrue(seekToStart > restartCheck && publishStart > seekToStart && resume > publishStart);
         Assert.IsTrue(stopTimer > resume && clearIntent > stopTimer && pause > clearIntent && publishEnd > pause);
-        Assert.IsTrue(source.Split("_player.IsLoopingEnabled = false;", StringSplitOptions.None).Length - 1 >= 2);
+        Assert.IsGreaterThanOrEqualTo(2, source.Split("_player.IsLoopingEnabled = false;", StringSplitOptions.None).Length - 1);
         Assert.DoesNotContain("_player.IsLoopingEnabled = true;", source);
     }
 
@@ -422,7 +422,7 @@ public sealed class Task11LifecycleTests
         var renderEnd = timeline.IndexOf("private Border CreateVideoCard", renderStart, StringComparison.Ordinal);
         var render = timeline[renderStart..renderEnd];
         var loadStart = timeline.IndexOf("private async Task LoadThumbnailSafelyAsync", StringComparison.Ordinal);
-        var loadEnd = timeline.IndexOf("private static bool IsControlDown", loadStart, StringComparison.Ordinal);
+        var loadEnd = timeline.IndexOf("private static string FormatDuration", loadStart, StringComparison.Ordinal);
         var load = timeline[loadStart..loadEnd];
         var publish = load.IndexOf("new Image { Source = bitmap", StringComparison.Ordinal);
         var finalGenerationCheck = load.LastIndexOf("IsCurrentThumbnail(", publish, StringComparison.Ordinal);
@@ -488,11 +488,11 @@ public sealed class Task11LifecycleTests
         var finalEditorFlush = closePreparation.LastIndexOf("await _editorView.PrepareToCloseAsync()", StringComparison.Ordinal);
         var approval = closePreparation.IndexOf("_lifecycle.ApproveClose();", StringComparison.Ordinal);
 
-        Assert.IsTrue(editorPreparation >= 0);
-        Assert.IsTrue(capture > editorPreparation);
-        Assert.IsTrue(save > capture);
-        Assert.IsTrue(finalEditorFlush > save);
-        Assert.IsTrue(approval > finalEditorFlush);
+        Assert.IsGreaterThanOrEqualTo(0, editorPreparation);
+        Assert.IsGreaterThan(editorPreparation, capture);
+        Assert.IsGreaterThan(capture, save);
+        Assert.IsGreaterThan(save, finalEditorFlush);
+        Assert.IsGreaterThan(finalEditorFlush, approval);
         Assert.Contains("args.Cancel = true;", handler);
         Assert.Contains("if (_lifecycle.CloseApproved)", handler);
         Assert.Contains("SaveBeforeClosingAsync(sender)", handler);
@@ -511,9 +511,9 @@ public sealed class Task11LifecycleTests
         var clamp = save.IndexOf("WindowGeometry.ClampPhysicalToWorkArea", StringComparison.Ordinal);
         var persistence = save.IndexOf("_appSettings.WindowPixelX = bounds.X;", StringComparison.Ordinal);
 
-        Assert.IsTrue(displayLookup >= 0);
-        Assert.IsTrue(clamp > displayLookup);
-        Assert.IsTrue(persistence > clamp);
+        Assert.IsGreaterThanOrEqualTo(0, displayLookup);
+        Assert.IsGreaterThan(displayLookup, clamp);
+        Assert.IsGreaterThan(clamp, persistence);
         Assert.Contains("var workArea = displayArea.WorkArea;", save);
         Assert.Contains("var outerBounds = displayArea.OuterBounds;", save);
     }
@@ -536,9 +536,9 @@ public sealed class Task11LifecycleTests
             failureCatch,
             StringComparison.Ordinal);
 
-        Assert.IsTrue(failureCatch >= 0);
-        Assert.IsTrue(consumeQueuedNotice > failureCatch);
-        Assert.IsTrue(reportCloseFailure > consumeQueuedNotice);
+        Assert.IsGreaterThanOrEqualTo(0, failureCatch);
+        Assert.IsGreaterThan(failureCatch, consumeQueuedNotice);
+        Assert.IsGreaterThan(consumeQueuedNotice, reportCloseFailure);
     }
 
     private static string FindRepositoryRoot()

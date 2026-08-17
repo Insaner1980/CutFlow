@@ -32,3 +32,9 @@ BundleArtifacts/
 !.env.example
 *.log
 *.tmp
+
+# SonarQube local analysis output
+.sonar/
+.sonarqube/
+reports/sonar.txt
+reports/sonar-test-results/

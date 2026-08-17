@@ -1,10 +1,11 @@
+using System.Diagnostics.CodeAnalysis;
 using CutFlow.Models;
 using CutFlow.Services;
 using CutFlow.Utilities;
 
 namespace CutFlow.ViewModels;
 
-public sealed class EditorViewModel : ViewModelBase
+public sealed partial class EditorViewModel : ViewModelBase
 {
     public const string SavedStatus = "Saved";
     public const string SavingStatus = "Saving…";
@@ -34,6 +35,8 @@ public sealed class EditorViewModel : ViewModelBase
     public event EventHandler? EditCommitted;
     public event EventHandler<PlaybackChangedEventArgs>? PlaybackChanged;
 
+    [SuppressMessage("Performance", "CA1822:Mark members as static", Justification = "WinUI x:Bind resolves this property through the view-model instance.")]
+    [SuppressMessage("Major Code Smell", "S2325:Methods and properties that don't access instance data should be static", Justification = "WinUI x:Bind resolves this property through the view-model instance.")]
     public string ProductName => AppInfo.ProductName;
 
     public ProjectDocument Project
@@ -231,12 +234,19 @@ public sealed class EditorViewModel : ViewModelBase
             return false;
         }
 
-        var timelineStart = asset.Kind == ProjectAssetKind.Audio
-            ? Math.Clamp(
+        long timelineStart;
+        if (asset.Kind == ProjectAssetKind.Audio)
+        {
+            timelineStart = Math.Clamp(
                 playheadMilliseconds,
                 0,
-                ProjectDocument.MaximumTimelineDurationMilliseconds - ProjectDocument.MinimumItemDurationMilliseconds)
-            : TimelineLayoutProjection.GetVideoBounds(project).LastOrDefault().EndMilliseconds;
+                ProjectDocument.MaximumTimelineDurationMilliseconds - ProjectDocument.MinimumItemDurationMilliseconds);
+        }
+        else
+        {
+            var videoBounds = TimelineLayoutProjection.GetVideoBounds(project);
+            timelineStart = videoBounds.Count == 0 ? 0 : videoBounds[^1].EndMilliseconds;
+        }
         if (asset.Kind == ProjectAssetKind.Audio &&
             asset.DurationMilliseconds > ProjectDocument.MaximumTimelineDurationMilliseconds - timelineStart)
         {
@@ -419,14 +429,13 @@ public sealed class EditorViewModel : ViewModelBase
 
     public bool DuplicateTimelineItem(Guid itemId) => DuplicateSelection(SelectionForTimelineItem(itemId));
 
-    private EditorSelection SelectionForTimelineItem(Guid itemId) =>
-        Project.VideoItems.Any(item => item.Id == itemId)
-            ? new EditorSelection(EditorSelectionKind.VideoItem, itemId)
-            : Project.AudioItems.Any(item => item.Id == itemId)
-                ? new EditorSelection(EditorSelectionKind.AudioItem, itemId)
-                : Project.TextItems.Any(item => item.Id == itemId)
-                    ? new EditorSelection(EditorSelectionKind.TextItem, itemId)
-                    : EditorSelection.None;
+    private EditorSelection SelectionForTimelineItem(Guid itemId)
+    {
+        if (Project.VideoItems.Any(item => item.Id == itemId)) return new EditorSelection(EditorSelectionKind.VideoItem, itemId);
+        if (Project.AudioItems.Any(item => item.Id == itemId)) return new EditorSelection(EditorSelectionKind.AudioItem, itemId);
+        if (Project.TextItems.Any(item => item.Id == itemId)) return new EditorSelection(EditorSelectionKind.TextItem, itemId);
+        return EditorSelection.None;
+    }
 
     private bool DuplicateSelection(EditorSelection selection)
     {
@@ -529,7 +538,7 @@ public sealed class EditorViewModel : ViewModelBase
     public bool SetTextFontSize(Guid itemId, double fontSize) => UpdateText(itemId, item =>
     {
         var normalized = double.IsFinite(fontSize) ? Math.Clamp(fontSize, 8, 400) : TextTimelineItem.DefaultFontSize;
-        if (item.FontSize == normalized) return false;
+        if (SameDouble(item.FontSize, normalized)) return false;
         item.FontSize = normalized;
         return true;
     });
@@ -580,7 +589,7 @@ public sealed class EditorViewModel : ViewModelBase
     public bool SetTextOpacity(Guid itemId, double opacity) => UpdateText(itemId, item =>
     {
         var normalized = TextStyle.ClampOpacity(opacity);
-        if (item.Opacity == normalized) return false;
+        if (SameDouble(item.Opacity, normalized)) return false;
         item.Opacity = normalized;
         return true;
     });
@@ -620,7 +629,7 @@ public sealed class EditorViewModel : ViewModelBase
 
         var x = TextStyle.ClampNormalized(normalizedX);
         var y = TextStyle.ClampNormalized(normalizedY);
-        if (item.NormalizedX == x && item.NormalizedY == y)
+        if (SameDouble(item.NormalizedX, x) && SameDouble(item.NormalizedY, y))
         {
             return false;
         }
@@ -633,7 +642,7 @@ public sealed class EditorViewModel : ViewModelBase
     public bool SetTextHorizontalPosition(Guid itemId, double normalizedX) => UpdateText(itemId, item =>
     {
         var normalized = TextStyle.ClampNormalized(normalizedX);
-        if (item.NormalizedX == normalized) return false;
+        if (SameDouble(item.NormalizedX, normalized)) return false;
         item.NormalizedX = normalized;
         return true;
     });
@@ -641,7 +650,7 @@ public sealed class EditorViewModel : ViewModelBase
     public bool SetTextVerticalPosition(Guid itemId, double normalizedY) => UpdateText(itemId, item =>
     {
         var normalized = TextStyle.ClampNormalized(normalizedY);
-        if (item.NormalizedY == normalized) return false;
+        if (SameDouble(item.NormalizedY, normalized)) return false;
         item.NormalizedY = normalized;
         return true;
     });
@@ -650,13 +659,13 @@ public sealed class EditorViewModel : ViewModelBase
     {
         var isDefault =
             item.FontFamily == TextTimelineItem.DefaultFontFamily &&
-            item.FontSize == TextTimelineItem.DefaultFontSize &&
+            SameDouble(item.FontSize, TextTimelineItem.DefaultFontSize) &&
             item.FontWeight == TextTimelineItem.DefaultFontWeight &&
             !item.IsItalic &&
             item.TextColor == TextTimelineItem.DefaultTextColor &&
             item.BackgroundColor == TextTimelineItem.DefaultBackgroundColor &&
             !item.BackgroundEnabled &&
-            item.Opacity == TextTimelineItem.DefaultOpacity &&
+            SameDouble(item.Opacity, TextTimelineItem.DefaultOpacity) &&
             item.Alignment == TextHorizontalAlignment.Center;
         if (isDefault)
         {
@@ -775,6 +784,8 @@ public sealed class EditorViewModel : ViewModelBase
     public void MarkSaving() => SaveStatus = SavingStatus;
 
     public void MarkSaveFailed() => SaveStatus = SaveFailedStatus;
+
+    private static bool SameDouble(double left, double right) => left.CompareTo(right) == 0;
 
     private void NormalizeSelection()
     {

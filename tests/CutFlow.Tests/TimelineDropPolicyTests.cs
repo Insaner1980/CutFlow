@@ -146,7 +146,7 @@ public sealed class TimelineDropPolicyTests
         MediaAssetDragPayload.Set(data, asset);
 
         Assert.IsTrue(data.GetView().Contains(MediaAssetDragPayload.FormatId));
-        CollectionAssert.Contains(data.Properties.FileTypes.ToArray(), ".WAV");
+        Assert.Contains(".WAV", data.Properties.FileTypes.ToArray());
     }
 
     [TestMethod]

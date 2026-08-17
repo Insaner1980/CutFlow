@@ -1,4 +1,5 @@
 using System.Collections.ObjectModel;
+using System.Diagnostics.CodeAnalysis;
 using System.Globalization;
 using CutFlow.Models;
 using CutFlow.Services;
@@ -8,7 +9,7 @@ using Microsoft.UI.Xaml.Media.Imaging;
 
 namespace CutFlow.ViewModels;
 
-public sealed class HomeViewModel : ViewModelBase
+public sealed partial class HomeViewModel : ViewModelBase
 {
     private readonly ProjectService _projectService;
     private readonly Func<ProjectDocument, string, CancellationToken, Task<string?>> _thumbnailPathResolver;
@@ -30,8 +31,12 @@ public sealed class HomeViewModel : ViewModelBase
 
     public ObservableCollection<ProjectCardViewModel> Projects { get; } = [];
 
+    [SuppressMessage("Performance", "CA1822:Mark members as static", Justification = "WinUI x:Bind resolves this property through the view-model instance.")]
+    [SuppressMessage("Major Code Smell", "S2325:Methods and properties that don't access instance data should be static", Justification = "WinUI x:Bind resolves this property through the view-model instance.")]
     public string ProductName => AppInfo.ProductName;
 
+    [SuppressMessage("Performance", "CA1822:Mark members as static", Justification = "WinUI x:Bind resolves this property through the view-model instance.")]
+    [SuppressMessage("Major Code Smell", "S2325:Methods and properties that don't access instance data should be static", Justification = "WinUI x:Bind resolves this property through the view-model instance.")]
     public string LocalSettingsDescription =>
         $"{AppInfo.ProductName} currently uses its dark workspace theme. Projects, settings, and generated caches are stored in the app's local data folder.";
 
@@ -165,7 +170,7 @@ public sealed class HomeViewModel : ViewModelBase
     }
 }
 
-public sealed class ProjectCardViewModel : ViewModelBase
+public sealed partial class ProjectCardViewModel : ViewModelBase
 {
     private string? _thumbnailPath;
 

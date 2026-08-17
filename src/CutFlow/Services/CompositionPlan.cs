@@ -45,65 +45,88 @@ public sealed class CompositionPlan
         var audioTracks = new List<CompositionAudioPlan>();
         var textOverlays = new List<CompositionTextOverlayPlan>();
         var errors = new List<string>();
-        long visualDuration = 0;
+        var visualDuration = AddVisuals(project, assets, visuals, errors);
+        AddAudioTracks(project, assets, audioTracks, errors);
+        AddTextOverlays(project, textOverlays);
 
-        foreach (var item in project.VideoItems)
+        var targetDuration = Math.Max(0, TimelineEditingService.CalculateProjectDuration(project));
+        if (targetDuration > visualDuration)
         {
-            if (item.DurationMilliseconds <= 0)
-            {
-                continue;
-            }
+            visuals.Add(CompositionVisualPlan.Filler(Guid.Empty, targetDuration - visualDuration));
+        }
 
-            if (!project.Settings.VideoTrackVisible)
-            {
-                visuals.Add(CompositionVisualPlan.Filler(item.Id, item.DurationMilliseconds));
-                visualDuration = TimelineMath.SaturatingAdd(visualDuration, item.DurationMilliseconds);
-                continue;
-            }
+        return new CompositionPlan(
+            visuals,
+            audioTracks,
+            textOverlays,
+            errors,
+            targetDuration);
+    }
 
-            if (!assets.TryGetValue(item.AssetId, out var asset))
-            {
-                errors.Add($"Unknown visual ({item.Id:D}) is unavailable.");
-                visuals.Add(CompositionVisualPlan.Filler(item.Id, item.DurationMilliseconds));
-                visualDuration = TimelineMath.SaturatingAdd(visualDuration, item.DurationMilliseconds);
-                continue;
-            }
-
-            if (asset.Kind is not (ProjectAssetKind.Video or ProjectAssetKind.Image))
-            {
-                errors.Add($"'{AssetName(asset)}' has an unsupported visual kind and was replaced with black video.");
-                visuals.Add(CompositionVisualPlan.Filler(item.Id, item.DurationMilliseconds, AssetName(asset)));
-                visualDuration = TimelineMath.SaturatingAdd(visualDuration, item.DurationMilliseconds);
-                continue;
-            }
-
-            if (asset.IsMissing)
-            {
-                errors.Add($"'{AssetName(asset)}' is missing and was replaced with black video.");
-                visuals.Add(CompositionVisualPlan.Filler(item.Id, item.DurationMilliseconds, AssetName(asset)));
-                visualDuration = TimelineMath.SaturatingAdd(visualDuration, item.DurationMilliseconds);
-                continue;
-            }
-
-            visuals.Add(new CompositionVisualPlan(
-                item.Id,
-                asset.Kind == ProjectAssetKind.Image ? CompositionVisualKind.Image : CompositionVisualKind.Video,
-                asset.SourcePath,
-                AssetName(asset),
-                item.DurationMilliseconds,
-                Math.Max(0, item.SourceInMilliseconds),
-                Math.Max(item.SourceInMilliseconds, item.SourceOutMilliseconds),
-                item.IsMuted ? 0 : ClampVolume(item.Volume)));
+    private static long AddVisuals(
+        ProjectDocument project,
+        Dictionary<Guid, ProjectAsset> assets,
+        List<CompositionVisualPlan> visuals,
+        List<string> errors)
+    {
+        long visualDuration = 0;
+        foreach (var item in project.VideoItems.Where(item => item.DurationMilliseconds > 0))
+        {
+            visuals.Add(CreateVisualPlan(item, project.Settings.VideoTrackVisible, assets, errors));
             visualDuration = TimelineMath.SaturatingAdd(visualDuration, item.DurationMilliseconds);
         }
 
-        foreach (var item in project.AudioItems)
-        {
-            if (item.DurationMilliseconds <= 0)
-            {
-                continue;
-            }
+        return visualDuration;
+    }
 
+    private static CompositionVisualPlan CreateVisualPlan(
+        VideoTimelineItem item,
+        bool videoTrackVisible,
+        Dictionary<Guid, ProjectAsset> assets,
+        List<string> errors)
+    {
+        if (!videoTrackVisible)
+        {
+            return CompositionVisualPlan.Filler(item.Id, item.DurationMilliseconds);
+        }
+
+        if (!assets.TryGetValue(item.AssetId, out var asset))
+        {
+            errors.Add($"Unknown visual ({item.Id:D}) is unavailable.");
+            return CompositionVisualPlan.Filler(item.Id, item.DurationMilliseconds);
+        }
+
+        if (asset.Kind is not (ProjectAssetKind.Video or ProjectAssetKind.Image))
+        {
+            errors.Add($"'{AssetName(asset)}' has an unsupported visual kind and was replaced with black video.");
+            return CompositionVisualPlan.Filler(item.Id, item.DurationMilliseconds, AssetName(asset));
+        }
+
+        if (asset.IsMissing)
+        {
+            errors.Add($"'{AssetName(asset)}' is missing and was replaced with black video.");
+            return CompositionVisualPlan.Filler(item.Id, item.DurationMilliseconds, AssetName(asset));
+        }
+
+        return new CompositionVisualPlan(
+            item.Id,
+            asset.Kind == ProjectAssetKind.Image ? CompositionVisualKind.Image : CompositionVisualKind.Video,
+            asset.SourcePath,
+            AssetName(asset),
+            item.DurationMilliseconds,
+            Math.Max(0, item.SourceInMilliseconds),
+            Math.Max(item.SourceInMilliseconds, item.SourceOutMilliseconds),
+            item.IsMuted ? 0 : ClampVolume(item.Volume));
+    }
+
+    private static void AddAudioTracks(
+        ProjectDocument project,
+        Dictionary<Guid, ProjectAsset> assets,
+        List<CompositionAudioPlan> audioTracks,
+        List<string> errors)
+    {
+        foreach (var item in project.AudioItems.Where(item => item.DurationMilliseconds > 0))
+        {
             if (!assets.TryGetValue(item.AssetId, out var asset) || asset.IsMissing)
             {
                 errors.Add($"'{(asset is null ? $"Unknown audio ({item.Id:D})" : AssetName(asset))}' is unavailable and was omitted.");
@@ -119,30 +142,21 @@ public sealed class CompositionPlan
                 Math.Max(item.SourceInMilliseconds, item.SourceOutMilliseconds),
                 project.Settings.AudioTrackMuted || item.IsMuted ? 0 : ClampVolume(item.Volume)));
         }
+    }
 
-        foreach (var item in project.Settings.TextTrackVisible ? project.TextItems : [])
+    private static void AddTextOverlays(ProjectDocument project, List<CompositionTextOverlayPlan> textOverlays)
+    {
+        if (!project.Settings.TextTrackVisible)
         {
-            if (item.DurationMilliseconds > 0)
-            {
-                textOverlays.Add(new CompositionTextOverlayPlan(
-                    item.Id,
-                    Math.Max(0, item.StartMilliseconds),
-                    item.DurationMilliseconds));
-            }
+            return;
         }
 
-        var targetDuration = Math.Max(0, TimelineEditingService.CalculateProjectDuration(project));
-        if (targetDuration > visualDuration)
-        {
-            visuals.Add(CompositionVisualPlan.Filler(Guid.Empty, targetDuration - visualDuration));
-        }
-
-        return new CompositionPlan(
-            visuals,
-            audioTracks,
-            textOverlays,
-            errors,
-            targetDuration);
+        textOverlays.AddRange(project.TextItems
+            .Where(item => item.DurationMilliseconds > 0)
+            .Select(item => new CompositionTextOverlayPlan(
+                item.Id,
+                Math.Max(0, item.StartMilliseconds),
+                item.DurationMilliseconds)));
     }
 
     private static string AssetName(ProjectAsset asset)

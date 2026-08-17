@@ -239,88 +239,69 @@ public sealed class TextOverlayRenderer
         }
 
         var offset = PngSignatureLength;
-        var isFirstChunk = true;
-        var hasIhdr = false;
-        var hasPlte = false;
-        var hasIdat = false;
-        var idatSequenceEnded = false;
-        var hasImageData = false;
+        var state = new PngValidationState();
         while (offset <= bytes.Length - PngChunkOverheadLength)
         {
             cancellationToken.ThrowIfCancellationRequested();
-            var dataLength = BinaryPrimitives.ReadUInt32BigEndian(bytes.Slice(offset, sizeof(uint)));
-            if (dataLength > int.MaxValue || dataLength > bytes.Length - offset - PngChunkOverheadLength)
+            if (!TryReadPngChunk(bytes, offset, cancellationToken, out var chunk))
             {
                 return false;
             }
 
-            var chunkDataLength = (int)dataLength;
-            var chunkType = bytes.Slice(offset + sizeof(uint), sizeof(uint));
-            var chunkData = bytes.Slice(offset + (2 * sizeof(uint)), chunkDataLength);
-            var crcOffset = offset + (2 * sizeof(uint)) + chunkDataLength;
-            var storedCrc = BinaryPrimitives.ReadUInt32BigEndian(bytes.Slice(crcOffset, sizeof(uint)));
-            if (storedCrc != CalculateCrc32(chunkType, chunkData, cancellationToken))
+            if (!state.TryAccept(chunk))
             {
                 return false;
             }
 
-            var isIhdr = chunkType.SequenceEqual("IHDR"u8);
-            var isPlte = chunkType.SequenceEqual("PLTE"u8);
-            var isIdat = chunkType.SequenceEqual("IDAT"u8);
-            var isIend = chunkType.SequenceEqual("IEND"u8);
-            if (isFirstChunk)
+            if (chunk.Kind == PngChunkKind.Iend)
             {
-                if (!isIhdr || chunkDataLength != IhdrDataLength)
-                {
-                    return false;
-                }
-
-                hasIhdr = true;
-            }
-            else if (isIhdr)
-            {
-                return false;
+                return chunk.DataLength == 0 && state.HasImageData && chunk.EndOffset == bytes.Length;
             }
 
-            if (isPlte)
-            {
-                if (hasPlte || hasIdat)
-                {
-                    return false;
-                }
-
-                hasPlte = true;
-            }
-            else if (isIdat)
-            {
-                if (idatSequenceEnded)
-                {
-                    return false;
-                }
-
-                hasIdat = true;
-                hasImageData |= chunkDataLength > 0;
-            }
-            else
-            {
-                idatSequenceEnded |= hasIdat;
-                if (!isIhdr && !isIend && (chunkType[0] & 0x20) == 0)
-                {
-                    return false;
-                }
-            }
-
-            var chunkEnd = crcOffset + sizeof(uint);
-            if (isIend)
-            {
-                return chunkDataLength == 0 && hasIhdr && hasImageData && chunkEnd == bytes.Length;
-            }
-
-            offset = chunkEnd;
-            isFirstChunk = false;
+            offset = chunk.EndOffset;
         }
 
         return false;
+    }
+
+    private static bool TryReadPngChunk(
+        ReadOnlySpan<byte> bytes,
+        int offset,
+        CancellationToken cancellationToken,
+        out PngChunk chunk)
+    {
+        var dataLength = BinaryPrimitives.ReadUInt32BigEndian(bytes.Slice(offset, sizeof(uint)));
+        if (dataLength > int.MaxValue || dataLength > bytes.Length - offset - PngChunkOverheadLength)
+        {
+            chunk = default;
+            return false;
+        }
+
+        var chunkDataLength = (int)dataLength;
+        var chunkType = bytes.Slice(offset + sizeof(uint), sizeof(uint));
+        var chunkData = bytes.Slice(offset + (2 * sizeof(uint)), chunkDataLength);
+        var crcOffset = offset + (2 * sizeof(uint)) + chunkDataLength;
+        var storedCrc = BinaryPrimitives.ReadUInt32BigEndian(bytes.Slice(crcOffset, sizeof(uint)));
+        if (storedCrc != CalculateCrc32(chunkType, chunkData, cancellationToken))
+        {
+            chunk = default;
+            return false;
+        }
+
+        chunk = new PngChunk(
+            ClassifyPngChunk(chunkType),
+            chunkDataLength,
+            crcOffset + sizeof(uint));
+        return true;
+    }
+
+    private static PngChunkKind ClassifyPngChunk(ReadOnlySpan<byte> chunkType)
+    {
+        if (chunkType.SequenceEqual("IHDR"u8)) return PngChunkKind.Ihdr;
+        if (chunkType.SequenceEqual("PLTE"u8)) return PngChunkKind.Plte;
+        if (chunkType.SequenceEqual("IDAT"u8)) return PngChunkKind.Idat;
+        if (chunkType.SequenceEqual("IEND"u8)) return PngChunkKind.Iend;
+        return (chunkType[0] & 0x20) == 0 ? PngChunkKind.Critical : PngChunkKind.Ancillary;
     }
 
     private static uint CalculateCrc32(
@@ -437,8 +418,8 @@ public sealed class TextOverlayRenderer
         int pixelHeight,
         double rasterizationScale)
     {
-        if (pixelWidth <= 0) throw new ArgumentOutOfRangeException(nameof(pixelWidth));
-        if (pixelHeight <= 0) throw new ArgumentOutOfRangeException(nameof(pixelHeight));
+        ArgumentOutOfRangeException.ThrowIfNegativeOrZero(pixelWidth);
+        ArgumentOutOfRangeException.ThrowIfNegativeOrZero(pixelHeight);
         if (!double.IsFinite(rasterizationScale) || rasterizationScale <= 0) rasterizationScale = 1;
         return (
             Math.Max(1, (int)Math.Round(pixelWidth / rasterizationScale, MidpointRounding.AwayFromZero)),
@@ -536,9 +517,90 @@ public sealed class TextOverlayRenderer
                 file.Delete();
                 remainingDeletes--;
             }
-            catch (IOException) { }
-            catch (UnauthorizedAccessException) { }
-            catch (InvalidDataException) { }
+            catch (IOException)
+            {
+                // Cache pruning is best effort; the next pass can retry this file.
+            }
+            catch (UnauthorizedAccessException)
+            {
+                // Cache pruning is best effort; the next pass can retry this file.
+            }
+            catch (InvalidDataException)
+            {
+                // A reparse-point rejection leaves the untrusted entry untouched.
+            }
         }
+    }
+
+    private readonly record struct PngChunk(PngChunkKind Kind, int DataLength, int EndOffset);
+
+    private sealed class PngValidationState
+    {
+        private bool _isFirstChunk = true;
+        private bool _hasPlte;
+        private bool _hasIdat;
+        private bool _idatSequenceEnded;
+
+        public bool HasImageData { get; private set; }
+
+        public bool TryAccept(PngChunk chunk)
+        {
+            if (_isFirstChunk)
+            {
+                _isFirstChunk = false;
+                return chunk.Kind == PngChunkKind.Ihdr && chunk.DataLength == IhdrDataLength;
+            }
+
+            if (chunk.Kind == PngChunkKind.Ihdr)
+            {
+                return false;
+            }
+
+            if (chunk.Kind == PngChunkKind.Plte)
+            {
+                return AcceptPalette();
+            }
+
+            if (chunk.Kind == PngChunkKind.Idat)
+            {
+                return AcceptImageData(chunk.DataLength);
+            }
+
+            _idatSequenceEnded |= _hasIdat;
+            return chunk.Kind != PngChunkKind.Critical;
+        }
+
+        private bool AcceptPalette()
+        {
+            if (_hasPlte || _hasIdat)
+            {
+                return false;
+            }
+
+            _hasPlte = true;
+            return true;
+        }
+
+        private bool AcceptImageData(int dataLength)
+        {
+            if (_idatSequenceEnded)
+            {
+                return false;
+            }
+
+            _hasIdat = true;
+            HasImageData |= dataLength > 0;
+            return true;
+        }
+    }
+
+    private enum PngChunkKind
+    {
+        Ihdr,
+        Plte,
+        Idat,
+        Iend,
+        Ancillary,
+        Critical
     }
 }

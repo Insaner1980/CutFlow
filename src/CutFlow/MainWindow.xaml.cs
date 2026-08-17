@@ -170,6 +170,7 @@ public sealed partial class MainWindow : Window
         }
         catch (OperationCanceledException) when (!_lifecycle.CanContinueClosing)
         {
+            // Window closing canceled the pending initialization.
         }
         catch (Exception exception)
         {
@@ -343,6 +344,7 @@ public sealed partial class MainWindow : Window
             }
             catch (OperationCanceledException)
             {
+                // The editor lifetime ended while the project was being created.
             }
             catch (Exception exception) when (exception is IOException or UnauthorizedAccessException or InvalidDataException or ArgumentException or InvalidOperationException)
             {
@@ -378,6 +380,7 @@ public sealed partial class MainWindow : Window
         }
         catch (OperationCanceledException)
         {
+            // The editor lifetime ended while the picker or import was active.
         }
         catch (Exception exception) when (MediaImportService.IsExpectedMediaFailure(exception))
         {
@@ -407,6 +410,7 @@ public sealed partial class MainWindow : Window
         }
         catch (OperationCanceledException)
         {
+            // The editor lifetime ended while the picker or relink was active.
         }
         catch (Exception exception) when (MediaImportService.IsExpectedMediaFailure(exception))
         {
@@ -428,12 +432,12 @@ public sealed partial class MainWindow : Window
         {
             await editor.ExportAsync(GetWindowHandle());
         }
-        catch (Exception exception) when (exception is not OutOfMemoryException)
+        catch (Exception exception) when (EditorView.IsExpectedExportException(exception))
         {
             if (_lifecycle.CanHandleEditorEvent(_editorView, editor))
             {
                 editor.ReportError("Export failed", $"{AppInfo.ProductName} could not start the export. Try again or choose another output location.");
-                _ = _logService.TryWriteAsync($"Export start failed: {exception.GetType().Name}");
+                _ = _logService.TryWriteAsync($"Export start failed: {exception.GetType().Name}; HRESULT=0x{exception.HResult:X8}");
             }
         }
     }
@@ -643,14 +647,14 @@ public sealed partial class MainWindow : Window
 
     private static double ToLogical(int value, uint dpi) => value * 96d / (dpi == 0 ? 96 : dpi);
 
-    [DllImport("user32.dll")]
-    private static extern nint MonitorFromRect(ref NativeRect rectangle, uint flags);
+    [LibraryImport("user32.dll")]
+    private static partial nint MonitorFromRect(ref NativeRect rectangle, uint flags);
 
-    [DllImport("user32.dll")]
-    private static extern nint MonitorFromWindow(nint windowHandle, uint flags);
+    [LibraryImport("user32.dll")]
+    private static partial nint MonitorFromWindow(nint windowHandle, uint flags);
 
-    [DllImport("shcore.dll")]
-    private static extern int GetScaleFactorForMonitor(nint monitor, out int scaleFactor);
+    [LibraryImport("shcore.dll")]
+    private static partial int GetScaleFactorForMonitor(nint monitor, out int scaleFactor);
 
     [StructLayout(LayoutKind.Sequential)]
     private readonly struct NativeRect(int left, int top, int right, int bottom)

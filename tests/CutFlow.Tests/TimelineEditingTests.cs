@@ -31,9 +31,8 @@ public sealed class TimelineEditingTests
         var changed = TimelineEditingService.ReorderVideoItem(project, moved.Id, 2);
 
         Assert.IsTrue(changed);
-        CollectionAssert.AreEqual(
-            new[] { expectedFirst, expectedSecond, moved.Id },
-            project.VideoItems.Select(item => item.Id).ToArray());
+        Assert.AreSequenceEqual(
+            new[] { expectedFirst, expectedSecond, moved.Id }, project.VideoItems.Select(item => item.Id).ToArray());
         Assert.AreEqual(6_000L, TimelineEditingService.CalculateProjectDuration(project));
     }
 
@@ -58,7 +57,7 @@ public sealed class TimelineEditingTests
         var changed = TimelineEditingService.SplitVideoItem(project, original.Id, 6_000);
 
         Assert.IsTrue(changed);
-        Assert.AreEqual(3, project.VideoItems.Count);
+        Assert.HasCount(3, project.VideoItems);
         Assert.AreEqual(0L, project.VideoItems[1].SourceInMilliseconds);
         Assert.AreEqual(2_000L, project.VideoItems[1].SourceOutMilliseconds);
         Assert.AreEqual(2_000L, project.VideoItems[2].SourceInMilliseconds);
@@ -79,7 +78,7 @@ public sealed class TimelineEditingTests
         var changed = TimelineEditingService.SplitVideoItem(project, original.Id, timelinePositionMilliseconds);
 
         Assert.IsFalse(changed);
-        Assert.AreEqual(1, project.VideoItems.Count);
+        Assert.HasCount(1, project.VideoItems);
         Assert.AreEqual(original.SourceInMilliseconds, project.VideoItems[0].SourceInMilliseconds);
         Assert.AreEqual(original.SourceOutMilliseconds, project.VideoItems[0].SourceOutMilliseconds);
     }
@@ -166,7 +165,7 @@ public sealed class TimelineEditingTests
         Assert.IsTrue(TimelineEditingService.DeleteSelection(
             project,
             new EditorSelection(EditorSelectionKind.VideoItem, deleted.Id)));
-        Assert.AreEqual(2, project.VideoItems.Count);
+        Assert.HasCount(2, project.VideoItems);
         Assert.AreEqual(4_000L, TimelineEditingService.CalculateProjectDuration(project));
         Assert.IsFalse(TimelineEditingService.DeleteSelection(project, EditorSelection.None));
     }

@@ -4,7 +4,7 @@ using Microsoft.VisualStudio.TestTools.UnitTesting;
 namespace CutFlow.Tests;
 
 [TestClass]
-public sealed class SimpleLogServiceTests
+public sealed partial class SimpleLogServiceTests
 {
     [TestMethod]
     [DataRow(false)]
@@ -14,14 +14,14 @@ public sealed class SimpleLogServiceTests
         using var directory = new TemporaryDirectory();
         if (createEmptyLog)
         {
-            await File.WriteAllTextAsync(directory.LogPath, string.Empty);
+            await File.WriteAllTextAsync(directory.LogPath, string.Empty, TestContext.CancellationToken);
         }
 
         var log = new SimpleLogService(directory.Path);
 
-        await log.WriteAsync("first entry");
+        await log.WriteAsync("first entry", TestContext.CancellationToken);
 
-        var lines = await File.ReadAllLinesAsync(directory.LogPath);
+        var lines = await File.ReadAllLinesAsync(directory.LogPath, TestContext.CancellationToken);
         Assert.HasCount(1, lines);
         AssertEntry(lines[0], "first entry");
     }
@@ -31,16 +31,16 @@ public sealed class SimpleLogServiceTests
     {
         using var directory = new TemporaryDirectory();
         var existingLines = Enumerable.Range(0, 500).Select(index => $"malformed-{index:D3}").ToArray();
-        await File.WriteAllTextAsync(directory.LogPath, string.Join(Environment.NewLine, existingLines));
+        await File.WriteAllTextAsync(directory.LogPath, string.Join(Environment.NewLine, existingLines), TestContext.CancellationToken);
         var log = new SimpleLogService(directory.Path, maximumEntries: 200);
 
-        await log.WriteAsync("new entry\r\nwith another line");
+        await log.WriteAsync("new entry\r\nwith another line", TestContext.CancellationToken);
 
-        var lines = await File.ReadAllLinesAsync(directory.LogPath);
+        var lines = await File.ReadAllLinesAsync(directory.LogPath, TestContext.CancellationToken);
         Assert.HasCount(200, lines);
-        CollectionAssert.AreEqual(existingLines[^199..], lines[..199]);
+        Assert.AreSequenceEqual(existingLines[^199..], lines[..199]);
         AssertEntry(lines[^1], "new entry with another line");
-        Assert.IsTrue((await File.ReadAllTextAsync(directory.LogPath)).EndsWith(Environment.NewLine, StringComparison.Ordinal));
+        Assert.IsTrue((await File.ReadAllTextAsync(directory.LogPath, TestContext.CancellationToken)).EndsWith(Environment.NewLine, StringComparison.Ordinal));
     }
 
     [TestMethod]
@@ -50,13 +50,13 @@ public sealed class SimpleLogServiceTests
         var first = new SimpleLogService(directory.Path);
         var second = new SimpleLogService(directory.Path);
         var writes = Enumerable.Range(0, 300)
-            .Select(index => (index % 2 == 0 ? first : second).WriteAsync($"entry-{index:D3}"));
+            .Select(index => (index % 2 == 0 ? first : second).WriteAsync($"entry-{index:D3}", TestContext.CancellationToken));
 
         await Task.WhenAll(writes);
 
-        var lines = await File.ReadAllLinesAsync(directory.LogPath);
+        var lines = await File.ReadAllLinesAsync(directory.LogPath, TestContext.CancellationToken);
         Assert.HasCount(200, lines);
-        Assert.AreEqual(200, lines.Distinct(StringComparer.Ordinal).Count());
+        Assert.HasCount(200, lines.Distinct(StringComparer.Ordinal));
         Assert.IsTrue(lines.All(
             line => TryReadEntry(line, out var message) && message.StartsWith("entry-", StringComparison.Ordinal)));
         Assert.HasCount(0, Directory.EnumerateFiles(directory.Path, "*.tmp").ToArray());
@@ -73,13 +73,13 @@ public sealed class SimpleLogServiceTests
 
         using (var conflictingHandle = new EventWaitHandle(false, EventResetMode.ManualReset, lockName))
         {
-            await Assert.ThrowsExactlyAsync<WaitHandleCannotBeOpenedException>(() => log.WriteAsync("blocked entry"));
+            await Assert.ThrowsExactlyAsync<WaitHandleCannotBeOpenedException>(() => log.WriteAsync("blocked entry", TestContext.CancellationToken));
         }
 
         using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(2));
         await log.WriteAsync("recovered entry", timeout.Token);
 
-        var lines = await File.ReadAllLinesAsync(directory.LogPath);
+        var lines = await File.ReadAllLinesAsync(directory.LogPath, TestContext.CancellationToken);
         Assert.HasCount(1, lines);
         AssertEntry(lines[0], "recovered entry");
     }
@@ -91,8 +91,8 @@ public sealed class SimpleLogServiceTests
         var existingLines = Enumerable.Range(0, 199)
             .Select(index => $"existing-{index:D3}-{new string('x', 64 * 1024)}")
             .ToArray();
-        await File.WriteAllLinesAsync(directory.LogPath, existingLines);
-        var originalLog = await File.ReadAllTextAsync(directory.LogPath);
+        await File.WriteAllLinesAsync(directory.LogPath, existingLines, TestContext.CancellationToken);
+        var originalLog = await File.ReadAllTextAsync(directory.LogPath, TestContext.CancellationToken);
         using var cancellation = new CancellationTokenSource();
         using var watcher = new FileSystemWatcher(directory.Path, "*.tmp")
         {
@@ -112,7 +112,7 @@ public sealed class SimpleLogServiceTests
         {
         }
 
-        Assert.AreEqual(originalLog, await File.ReadAllTextAsync(directory.LogPath));
+        Assert.AreEqual(originalLog, await File.ReadAllTextAsync(directory.LogPath, TestContext.CancellationToken));
         Assert.HasCount(0, Directory.EnumerateFiles(directory.Path, "*.tmp").ToArray());
     }
 
@@ -123,12 +123,12 @@ public sealed class SimpleLogServiceTests
         var log = new SimpleLogService(directory.Path);
         var exception = new InvalidOperationException("CR\rLF\nCRLF\r\nFF\fNEL\u0085LS\u2028PS\u2029end");
 
-        await log.WriteAsync($"Failure: {exception}");
+        await log.WriteAsync($"Failure: {exception}", TestContext.CancellationToken);
 
-        var lines = await File.ReadAllLinesAsync(directory.LogPath);
+        var lines = await File.ReadAllLinesAsync(directory.LogPath, TestContext.CancellationToken);
         Assert.HasCount(1, lines);
         var separatorIndex = lines[0].IndexOf(' ');
-        Assert.IsTrue(separatorIndex > 0);
+        Assert.IsGreaterThan(0, separatorIndex);
         Assert.AreEqual(TimeSpan.Zero, DateTimeOffset.Parse(lines[0][..separatorIndex]).Offset);
         Assert.AreEqual(
             "Failure: System.InvalidOperationException: CR LF CRLF FF NEL LS PS end",
@@ -141,15 +141,15 @@ public sealed class SimpleLogServiceTests
         using var directory = new TemporaryDirectory();
         var log = new SimpleLogService(directory.Path);
 
-        await log.WriteAsync(new string('a', 1024) + "tail");
-        await log.WriteAsync(new string('b', 1023) + "😀tail");
+        await log.WriteAsync(new string('a', 1024) + "tail", TestContext.CancellationToken);
+        await log.WriteAsync(new string('b', 1023) + "😀tail", TestContext.CancellationToken);
 
-        var messages = (await File.ReadAllLinesAsync(directory.LogPath))
+        var messages = (await File.ReadAllLinesAsync(directory.LogPath, TestContext.CancellationToken))
             .Select(line => line[(line.IndexOf(' ') + 1)..])
             .ToArray();
         Assert.AreEqual(new string('a', 1024), messages[0]);
         Assert.AreEqual(new string('b', 1023), messages[1]);
-        Assert.IsFalse(messages.Any(message => message.Any(char.IsSurrogate)));
+        Assert.DoesNotContain(message => message.Any(char.IsSurrogate), messages);
     }
 
     [TestMethod]
@@ -158,7 +158,7 @@ public sealed class SimpleLogServiceTests
         using var directory = new TemporaryDirectory();
         var log = new SimpleLogService(directory.Path);
 
-        await log.TryWriteAsync(null!);
+        await log.TryWriteAsync(null!, TestContext.CancellationToken);
 
         Assert.IsFalse(File.Exists(directory.LogPath));
     }
@@ -178,7 +178,7 @@ public sealed class SimpleLogServiceTests
             timestamp.Offset == TimeSpan.Zero;
     }
 
-    private sealed class TemporaryDirectory : IDisposable
+    private sealed partial class TemporaryDirectory : IDisposable
     {
         public TemporaryDirectory()
         {
@@ -198,4 +198,6 @@ public sealed class SimpleLogServiceTests
             }
         }
     }
+
+    public TestContext TestContext { get; set; }
 }

@@ -31,6 +31,8 @@ public sealed class EditorViewModelTests
         Assert.AreEqual(7_000L, Services.TimelineEditingService.CalculateProjectDuration(viewModel.Project));
     }
 
+    private static readonly bool[] expected = new[] { true, true };
+
     [TestMethod]
     public void AddImportedAssetsToTimeline_CommitsOrderedVisualBatchAsOneUndoableEdit()
     {
@@ -52,12 +54,11 @@ public sealed class EditorViewModelTests
 
         var added = viewModel.AddImportedAssetsToTimeline([video, image], [video.Id, image.Id]);
 
-        CollectionAssert.AreEqual(new[] { true, true }, added.ToArray());
+        Assert.AreSequenceEqual(expected, added.ToArray());
         Assert.AreEqual(1, committed);
         Assert.AreEqual(1L, viewModel.Revision);
-        CollectionAssert.AreEqual(
-            new[] { existing.Id, video.Id, image.Id },
-            viewModel.Project.VideoItems.Select(item => item.AssetId).ToArray());
+        Assert.AreSequenceEqual(
+            new[] { existing.Id, video.Id, image.Id }, viewModel.Project.VideoItems.Select(item => item.AssetId).ToArray());
         Assert.AreEqual(0L, viewModel.Project.VideoItems[1].SourceInMilliseconds);
         Assert.AreEqual(2_000L, viewModel.Project.VideoItems[1].SourceOutMilliseconds);
         Assert.AreEqual(0L, viewModel.Project.VideoItems[2].SourceInMilliseconds);

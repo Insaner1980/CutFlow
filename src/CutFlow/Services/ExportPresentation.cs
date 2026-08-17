@@ -87,12 +87,10 @@ public static class ExportPresentation
 
     internal static ExportCompletionState ResolveCompletion(
         ExportResultStatus status,
-        bool cancellationRequested) =>
+        bool _) =>
         status == ExportResultStatus.Success
             ? ExportCompletionState.Success
-            : cancellationRequested
-                ? ExportCompletionState.Cancelled
-                : ExportCompletionState.Failed;
+            : ExportCompletionState.Failed;
 }
 
 internal enum ExportCompletionState

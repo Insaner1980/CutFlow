@@ -72,10 +72,10 @@
                 <FontIcon FontSize="14" Glyph="&#xE7A6;" />
                 <ToolTipService.ToolTip><ToolTip Content="Redo" /></ToolTipService.ToolTip>
             </Button>
-            <Button x:Name="InspectorToggleButton" Grid.Column="5" Margin="6,0,2,0" AutomationProperties.Name="Toggle inspector" Click="InspectorToggle_Click" Style="{StaticResource IconButtonStyle}" TabIndex="3">
-                <FontIcon FontSize="14" Glyph="&#xE713;" />
-                <ToolTipService.ToolTip><ToolTip Content="Show or hide inspector" /></ToolTipService.ToolTip>
-            </Button>
+            <ToggleButton x:Name="InspectorToggleButton" Grid.Column="5" Width="34" Height="32" Margin="6,0,2,0" Padding="0" AutomationProperties.Name="Hide inspector" Click="InspectorToggle_Click" IsChecked="True" TabIndex="3">
+                <FontIcon FontSize="14" Glyph="&#xE90D;" />
+                <ToolTipService.ToolTip><ToolTip Content="Hide inspector" /></ToolTipService.ToolTip>
+            </ToggleButton>
             <Button x:Name="ExportButton" Grid.Column="6" Margin="8,0" AutomationProperties.Name="Export project" Click="Export_Click" Style="{StaticResource AccentButtonStyle}" TabIndex="4">
                 <StackPanel Orientation="Horizontal" Spacing="7">
                     <FontIcon FontSize="14" Glyph="&#xE898;" />
@@ -134,7 +134,7 @@
                 PointerReleased="TimelineResizeHandle_PointerReleased"
                 PointerCanceled="TimelineResizeHandle_PointerCanceled"
                 PointerCaptureLost="TimelineResizeHandle_PointerCaptureLost">
-            <Border Height="1" VerticalAlignment="Center" Background="{StaticResource BorderBrush}" IsHitTestVisible="False" />
+            <Border Height="1" VerticalAlignment="Center" Background="{StaticResource TextTertiaryBrush}" IsHitTestVisible="False" />
         </Border>
         <controls:TimelineControl
             x:Name="Timeline"

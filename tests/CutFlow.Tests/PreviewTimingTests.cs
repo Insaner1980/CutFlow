@@ -91,6 +91,16 @@ public sealed class PreviewTimingTests
         Assert.AreEqual(2, calls);
     }
 
+    private static readonly string[] FailedSourceSwapExpectedSteps =
+            {
+                "invalidate-generation",
+                "detach-events",
+                "pause",
+                "clear-source-and-state",
+                "dispose-source",
+                "attach-events"
+            };
+
     [TestMethod]
     public void FailedSourceSwapCleanup_InvalidatesBeforeNativeCleanupAndReattachesLast()
     {
@@ -104,17 +114,8 @@ public sealed class PreviewTimingTests
             () => calls.Add("dispose-source"),
             () => calls.Add("attach-events"));
 
-        CollectionAssert.AreEqual(
-            new[]
-            {
-                "invalidate-generation",
-                "detach-events",
-                "pause",
-                "clear-source-and-state",
-                "dispose-source",
-                "attach-events"
-            },
-            calls);
+        Assert.AreSequenceEqual(
+            FailedSourceSwapExpectedSteps, calls);
 
         calls.Clear();
         Assert.ThrowsExactly<InvalidOperationException>(() =>
@@ -129,37 +130,11 @@ public sealed class PreviewTimingTests
                 () => calls.Add("clear-source-and-state"),
                 () => calls.Add("dispose-source"),
                 () => calls.Add("attach-events")));
-        CollectionAssert.AreEqual(
-            new[]
-            {
-                "invalidate-generation",
-                "detach-events",
-                "pause",
-                "clear-source-and-state",
-                "dispose-source",
-                "attach-events"
-            },
-            calls);
+        Assert.AreSequenceEqual(
+            FailedSourceSwapExpectedSteps, calls);
     }
 
-    [TestMethod]
-    public void SuccessfulSourceSwap_StabilizesNewStateBeforeAttachingCurrentGenerationEvents()
-    {
-        var calls = new List<string>();
-
-        PreviewPane.RunSuccessfulSourceSwap(
-            () => calls.Add("invalidate-generation"),
-            () => calls.Add("detach-events"),
-            () => calls.Add("pause"),
-            () => calls.Add("clear-source-and-state"),
-            () => calls.Add("dispose-old-source"),
-            () => calls.Add("install-new-source-and-state"),
-            () => calls.Add("restore-position-and-intent"),
-            () => calls.Add("attach-events"),
-            () => calls.Add("resume-playback"));
-
-        CollectionAssert.AreEqual(
-            new[]
+    private static readonly string[] SuccessfulSourceSwapExpectedSteps =
             {
                 "invalidate-generation",
                 "detach-events",
@@ -170,9 +145,30 @@ public sealed class PreviewTimingTests
                 "restore-position-and-intent",
                 "attach-events",
                 "resume-playback"
-            },
-            calls);
+            };
+
+    [TestMethod]
+    public void SuccessfulSourceSwap_StabilizesNewStateBeforeAttachingCurrentGenerationEvents()
+    {
+        var calls = new List<string>();
+
+        PreviewPane.RunSuccessfulSourceSwap([
+            () => calls.Add("invalidate-generation"),
+            () => calls.Add("detach-events"),
+            () => calls.Add("pause"),
+            () => calls.Add("clear-source-and-state"),
+            () => calls.Add("dispose-old-source"),
+            () => calls.Add("install-new-source-and-state"),
+            () => calls.Add("restore-position-and-intent"),
+            () => calls.Add("attach-events"),
+            () => calls.Add("resume-playback")
+        ]);
+
+        Assert.AreSequenceEqual(
+            SuccessfulSourceSwapExpectedSteps, calls);
     }
+
+    private static readonly bool[] PlayingOnlyReports = [true];
 
     [TestMethod]
     public void PlaybackStateCoordinator_IntentChangesDoNotReportUntilActualStateArrives()
@@ -184,15 +180,18 @@ public sealed class PreviewTimingTests
         Assert.HasCount(0, reports);
 
         Assert.IsTrue(state.ReportActual(isPlaying: true, reports.Add));
-        CollectionAssert.AreEqual(new[] { true }, reports);
+        Assert.AreSequenceEqual(PlayingOnlyReports, reports);
 
         Assert.IsFalse(state.ToggleIntent());
-        CollectionAssert.AreEqual(new[] { true }, reports);
+        Assert.AreSequenceEqual(PlayingOnlyReports, reports);
 
         Assert.IsTrue(state.ReportActual(isPlaying: false, reports.Add));
-        CollectionAssert.AreEqual(new[] { true, false }, reports);
+        Assert.AreSequenceEqual(PlayThenPauseReports, reports);
         Assert.IsFalse(state.ReportActual(isPlaying: false, reports.Add));
     }
+
+    private static readonly bool[] FalseThenTrueReports = [false, true];
+    private static readonly bool[] PlayThenPauseReports = [true, false];
 
     [TestMethod]
     public void PlaybackStateCoordinator_DelayedNativeStateCannotOverrideNewerIntent()
@@ -214,7 +213,7 @@ public sealed class PreviewTimingTests
         state.SetIntent(true);
         Assert.IsFalse(state.ReportActual(isPlaying: false, reports.Add));
 
-        CollectionAssert.AreEqual(new[] { false, true }, reports);
+        Assert.AreSequenceEqual(FalseThenTrueReports, reports);
     }
 
     [TestMethod]

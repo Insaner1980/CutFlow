@@ -14,15 +14,9 @@ public sealed class SimpleLogService
 
     public SimpleLogService(string? rootPath = null, int maximumEntries = 200, int maximumMessageLength = 1024)
     {
-        if (maximumEntries <= 0)
-        {
-            throw new ArgumentOutOfRangeException(nameof(maximumEntries));
-        }
+        ArgumentOutOfRangeException.ThrowIfNegativeOrZero(maximumEntries);
 
-        if (maximumMessageLength <= 0)
-        {
-            throw new ArgumentOutOfRangeException(nameof(maximumMessageLength));
-        }
+        ArgumentOutOfRangeException.ThrowIfNegativeOrZero(maximumMessageLength);
 
         var localRootPath = rootPath ?? ApplicationData.Current.LocalFolder.Path;
         if (string.IsNullOrWhiteSpace(localRootPath))
@@ -122,12 +116,13 @@ public sealed class SimpleLogService
     {
         if (!cancellationToken.CanBeCanceled)
         {
-            await Task.Run(() => processWriteLock.WaitOne());
+            await Task.Run(() => processWriteLock.WaitOne(), CancellationToken.None);
             return;
         }
 
         var signaledHandle = await Task.Run(
-            () => WaitHandle.WaitAny([processWriteLock, cancellationToken.WaitHandle]));
+            () => WaitHandle.WaitAny([processWriteLock, cancellationToken.WaitHandle]),
+            CancellationToken.None);
         if (signaledHandle != 0)
         {
             throw new OperationCanceledException(cancellationToken);

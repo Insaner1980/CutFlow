@@ -78,25 +78,19 @@ public sealed partial class TimelineControl : UserControl
 
     public void SetTimeline(
         ProjectDocument project,
-        EditorSelection selection,
-        long playheadMilliseconds,
-        string playheadText,
-        string durationText,
-        bool canUndo,
-        bool canRedo,
-        string projectRootPath)
+        TimelinePresentation presentation)
     {
         CancelPointerInteraction();
         _project = project ?? throw new ArgumentNullException(nameof(project));
-        _selection = selection;
-        _projectRootPath = projectRootPath ?? string.Empty;
+        _selection = presentation.Selection;
+        _projectRootPath = presentation.ProjectRootPath ?? string.Empty;
         _durationMilliseconds = TimelineEditingService.CalculateProjectDuration(project);
-        _playheadMilliseconds = Math.Clamp(playheadMilliseconds, 0, _durationMilliseconds);
-        _durationText = durationText;
+        _playheadMilliseconds = Math.Clamp(presentation.PlayheadMilliseconds, 0, _durationMilliseconds);
+        _durationText = presentation.DurationText;
         _videoBounds = TimelineLayoutProjection.GetVideoBounds(project);
-        TimelineTimecode.Text = $"{playheadText} / {durationText}";
-        UndoButton.IsEnabled = canUndo;
-        RedoButton.IsEnabled = canRedo;
+        TimelineTimecode.Text = $"{presentation.PlayheadText} / {presentation.DurationText}";
+        UndoButton.IsEnabled = presentation.CanUndo;
+        RedoButton.IsEnabled = presentation.CanRedo;
         _updatingTrackState = true;
         try
         {
@@ -162,13 +156,10 @@ public sealed partial class TimelineControl : UserControl
             return EditorSelectionKind.None;
         }
 
-        return _project.VideoItems.Any(item => item.Id == itemId)
-            ? EditorSelectionKind.VideoItem
-            : _project.TextItems.Any(item => item.Id == itemId)
-                ? EditorSelectionKind.TextItem
-                : _project.AudioItems.Any(item => item.Id == itemId)
-                    ? EditorSelectionKind.AudioItem
-                    : EditorSelectionKind.None;
+        if (_project.VideoItems.Any(item => item.Id == itemId)) return EditorSelectionKind.VideoItem;
+        if (_project.TextItems.Any(item => item.Id == itemId)) return EditorSelectionKind.TextItem;
+        if (_project.AudioItems.Any(item => item.Id == itemId)) return EditorSelectionKind.AudioItem;
+        return EditorSelectionKind.None;
     }
 
     private void UpdateContentWidth()
@@ -280,7 +271,7 @@ public sealed partial class TimelineControl : UserControl
         return CreateCard(content, new ClipTag(bound, asset, item.SourceInMilliseconds, item.SourceOutMilliseconds, false));
     }
 
-    private Grid CreateCardContent(string title, IReadOnlyList<string> badges, long durationMilliseconds, ImageSource? thumbnail)
+    private static Grid CreateCardContent(string title, IReadOnlyList<string> badges, long durationMilliseconds, ImageSource? thumbnail)
     {
         var horizontalPadding = ResourceDouble("TimelineCardHorizontalPadding");
         var verticalPadding = ResourceDouble("TimelineCardVerticalPadding");
@@ -336,7 +327,7 @@ public sealed partial class TimelineControl : UserControl
         return card;
     }
 
-    private Border CreateTrimHandle(HorizontalAlignment alignment, bool selected) => new()
+    private static Border CreateTrimHandle(HorizontalAlignment alignment, bool selected) => new()
     {
         Tag = "TrimHandle",
         Width = 3,
@@ -480,32 +471,25 @@ public sealed partial class TimelineControl : UserControl
 
         var localX = e.GetCurrentPoint(hitTarget).Position.X;
         var hit = TimelineCardHitTest.Resolve(localX, hitTarget.ActualWidth, TrimHitWidth);
-        var operation = hit == TimelineCardHit.Start
-            ? tag.Bounds.Kind switch
-            {
-                EditorSelectionKind.VideoItem => TimelineDragOperation.VideoTrimStart,
-                EditorSelectionKind.AudioItem => TimelineDragOperation.AudioTrimStart,
-                EditorSelectionKind.TextItem => TimelineDragOperation.TextTrimStart,
-                _ => TimelineDragOperation.None
-            }
-            : hit == TimelineCardHit.End
-                ? tag.Bounds.Kind switch
-                {
-                    EditorSelectionKind.VideoItem => TimelineDragOperation.VideoTrimEnd,
-                    EditorSelectionKind.AudioItem => TimelineDragOperation.AudioTrimEnd,
-                    EditorSelectionKind.TextItem => TimelineDragOperation.TextTrimEnd,
-                    _ => TimelineDragOperation.None
-                }
-                : tag.Bounds.Kind switch
-                {
-                    EditorSelectionKind.VideoItem => TimelineDragOperation.VideoReorder,
-                    EditorSelectionKind.AudioItem => TimelineDragOperation.AudioMove,
-                    EditorSelectionKind.TextItem => TimelineDragOperation.TextMove,
-                    _ => TimelineDragOperation.None
-                };
+        var operation = ResolveDragOperation(hit, tag.Bounds.Kind);
         BeginDrag(hitTarget, tag, operation, e);
         e.Handled = true;
     }
+
+    private static TimelineDragOperation ResolveDragOperation(TimelineCardHit hit, EditorSelectionKind kind) =>
+        (hit, kind) switch
+        {
+            (TimelineCardHit.Start, EditorSelectionKind.VideoItem) => TimelineDragOperation.VideoTrimStart,
+            (TimelineCardHit.Start, EditorSelectionKind.AudioItem) => TimelineDragOperation.AudioTrimStart,
+            (TimelineCardHit.Start, EditorSelectionKind.TextItem) => TimelineDragOperation.TextTrimStart,
+            (TimelineCardHit.End, EditorSelectionKind.VideoItem) => TimelineDragOperation.VideoTrimEnd,
+            (TimelineCardHit.End, EditorSelectionKind.AudioItem) => TimelineDragOperation.AudioTrimEnd,
+            (TimelineCardHit.End, EditorSelectionKind.TextItem) => TimelineDragOperation.TextTrimEnd,
+            (_, EditorSelectionKind.VideoItem) => TimelineDragOperation.VideoReorder,
+            (_, EditorSelectionKind.AudioItem) => TimelineDragOperation.AudioMove,
+            (_, EditorSelectionKind.TextItem) => TimelineDragOperation.TextMove,
+            _ => TimelineDragOperation.None
+        };
 
     private void BeginDrag(
         FrameworkElement element,
@@ -594,7 +578,6 @@ public sealed partial class TimelineControl : UserControl
         var deltaMilliseconds = PixelsToSignedTime(pointerX - _dragInitialPointerX);
         var minimum = ProjectDocument.MinimumItemDurationMilliseconds;
         var startPixels = _scale.TimeToPixels(tag.Bounds.StartMilliseconds);
-        var initialWidth = _scale.TimeToPixels(tag.Bounds.DurationMilliseconds);
         switch (_dragOperation)
         {
             case TimelineDragOperation.VideoReorder:
@@ -801,20 +784,28 @@ public sealed partial class TimelineControl : UserControl
                 continue;
             }
 
-            var selected = _selection.Kind == tag.Bounds.Kind && _selection.ItemId == tag.Bounds.ItemId;
-            Canvas.SetZIndex(hitTarget, selected ? 1 : 0);
-            card.BorderBrush = Brush(selected ? "AccentBrush" : "BorderBrush");
-            card.BorderThickness = new Thickness(selected ? 2 : 1);
-            card.Background = Brush(selected ? "SurfaceHoverBrush" : "SurfaceElevatedBrush");
-            card.Opacity = _trackLocks.CanEdit(tag.Bounds.Kind) ? 1 : 0.68;
-            if (card.Child is Grid content)
-            {
-                var showHandles = selected && _trackLocks.CanEdit(tag.Bounds.Kind);
-                foreach (var handle in content.Children.OfType<Border>().Where(element => Equals(element.Tag, "TrimHandle")))
-                {
-                    handle.Visibility = showHandles ? Visibility.Visible : Visibility.Collapsed;
-                }
-            }
+            ApplySelectionStyle(hitTarget, card, tag.Bounds);
+        }
+    }
+
+    private void ApplySelectionStyle(ContentControl hitTarget, Border card, TimelineItemBounds bounds)
+    {
+        var selected = _selection.Kind == bounds.Kind && _selection.ItemId == bounds.ItemId;
+        var canEdit = _trackLocks.CanEdit(bounds.Kind);
+        Canvas.SetZIndex(hitTarget, selected ? 1 : 0);
+        card.BorderBrush = Brush(selected ? "AccentBrush" : "BorderBrush");
+        card.BorderThickness = new Thickness(selected ? 2 : 1);
+        card.Background = Brush(selected ? "SurfaceHoverBrush" : "SurfaceElevatedBrush");
+        card.Opacity = canEdit ? 1 : 0.68;
+        if (card.Child is not Grid content)
+        {
+            return;
+        }
+
+        var visibility = selected && canEdit ? Visibility.Visible : Visibility.Collapsed;
+        foreach (var handle in content.Children.OfType<Border>().Where(element => Equals(element.Tag, "TrimHandle")))
+        {
+            handle.Visibility = visibility;
         }
     }
 
@@ -1078,103 +1069,24 @@ public sealed partial class TimelineControl : UserControl
     private async void TimelineContent_Drop(object sender, DragEventArgs e)
     {
         var lifetimeToken = _lifetimeToken;
-        if (lifetimeToken.IsCancellationRequested)
+        if (lifetimeToken.IsCancellationRequested || !TryGetDropTarget(e, out var track, out var position))
         {
             return;
         }
 
-        var track = HitTestTrack(e.GetPosition(TimelineContent).Y);
-        if (track is not TimelineTrackKind.Video and not TimelineTrackKind.Audio)
-        {
-            RejectDrop(track == TimelineTrackKind.Text
-                ? "Files and media assets cannot be dropped on T1. Add text from the Text panel."
-                : "Drop video or images on V1, or audio on A1.");
-            return;
-        }
-
-        if (_trackLocks.IsLocked(track))
-        {
-            RejectDrop($"{TimelineDropPolicy.DisplayName(track)} is locked. Unlock the track before adding media.");
-            return;
-        }
-
-        var position = DropPosition(e.GetPosition(TimelineContent).X);
         try
         {
             if (e.DataView.Contains(MediaAssetDragPayload.FormatId))
             {
-                var payload = await e.DataView.GetDataAsync(MediaAssetDragPayload.FormatId);
-                lifetimeToken.ThrowIfCancellationRequested();
-                if (!MediaAssetDragPayload.TryParseAssetId(payload, out var assetId))
-                {
-                    RejectDrop($"{AppInfo.ProductName} could not identify the dragged library asset. Try dragging it again.");
-                    return;
-                }
-
-                var asset = _project?.Assets.FirstOrDefault(candidate => candidate.Id == assetId);
-                if (asset is null)
-                {
-                    RejectDrop("The dragged asset is no longer in this project.");
-                    return;
-                }
-
-                if (!TimelineDropPolicy.Evaluate(track, asset.Kind, isLocked: false).IsAllowed)
-                {
-                    RejectDrop(track == TimelineTrackKind.Video
-                        ? $"'{asset.FileName}' is audio. Drop it on A1."
-                        : $"'{asset.FileName}' is visual media. Drop it on V1.");
-                    return;
-                }
-
-                AssetDropped?.Invoke(this, new TimelineAssetDroppedEventArgs(assetId, track, position));
-                e.AcceptedOperation = DataPackageOperation.Copy;
+                await DropLibraryAssetAsync(e, track, position, lifetimeToken);
                 return;
             }
 
-            if (!e.DataView.Contains(StandardDataFormats.StorageItems))
-            {
-                return;
-            }
-
-            var result = await MediaDropReader.ReadAsync(
-                async () => await e.DataView.GetStorageItemsAsync(),
-                lifetimeToken);
-            lifetimeToken.ThrowIfCancellationRequested();
-            if (!result.IsSuccess)
-            {
-                RejectDrop(result.ErrorMessage!);
-            }
-            else if (result.Files.Count == 0)
-            {
-                RejectDrop(result.RejectedItems.Count > 0
-                    ? string.Join(" ", result.RejectedItems.Take(3).Select(item => $"'{item.ItemName}': {item.Message}"))
-                    : $"The drop did not contain any files {AppInfo.ProductName} can import.");
-            }
-            else
-            {
-                var scope = track == TimelineTrackKind.Video ? MediaImportScope.Visual : MediaImportScope.Audio;
-                var hasCompatibleFile = result.Files.Any(file =>
-                    MediaImportService.TryResolveLocalSourcePath(file.Path, out var path, out _) &&
-                    scope.Allows(path));
-                if (!hasCompatibleFile)
-                {
-                    RejectDrop(track == TimelineTrackKind.Video
-                        ? "Drop MP4, PNG, or JPEG files on V1."
-                        : "Drop MP3 or WAV files on A1.");
-                    e.AcceptedOperation = DataPackageOperation.None;
-                    return;
-                }
-
-                MediaFilesDropped?.Invoke(this, new TimelineMediaFilesDroppedEventArgs(
-                    result.Files,
-                    track,
-                    position,
-                    result.RejectedItems.Select(item => $"'{item.ItemName}': {item.Message}").ToList()));
-                e.AcceptedOperation = DataPackageOperation.Copy;
-            }
+            await DropStorageItemsAsync(e, track, position, lifetimeToken);
         }
         catch (OperationCanceledException)
         {
+            // The timeline lifetime ended while the drop was being read.
         }
         catch (Exception exception) when (MediaImportService.IsExpectedMediaFailure(exception))
         {
@@ -1183,6 +1095,111 @@ public sealed partial class TimelineControl : UserControl
                 RejectDrop($"{AppInfo.ProductName} could not read the dropped item. Try importing it with the file picker.");
             }
         }
+    }
+
+    private bool TryGetDropTarget(DragEventArgs e, out TimelineTrackKind track, out long position)
+    {
+        track = HitTestTrack(e.GetPosition(TimelineContent).Y);
+        position = 0;
+        if (track is not TimelineTrackKind.Video and not TimelineTrackKind.Audio)
+        {
+            RejectDrop(track == TimelineTrackKind.Text
+                ? "Files and media assets cannot be dropped on T1. Add text from the Text panel."
+                : "Drop video or images on V1, or audio on A1.");
+            return false;
+        }
+
+        if (_trackLocks.IsLocked(track))
+        {
+            RejectDrop($"{TimelineDropPolicy.DisplayName(track)} is locked. Unlock the track before adding media.");
+            return false;
+        }
+
+        position = DropPosition(e.GetPosition(TimelineContent).X);
+        return true;
+    }
+
+    private async Task DropLibraryAssetAsync(
+        DragEventArgs e,
+        TimelineTrackKind track,
+        long position,
+        CancellationToken lifetimeToken)
+    {
+        var payload = await e.DataView.GetDataAsync(MediaAssetDragPayload.FormatId);
+        lifetimeToken.ThrowIfCancellationRequested();
+        if (!MediaAssetDragPayload.TryParseAssetId(payload, out var assetId))
+        {
+            RejectDrop($"{AppInfo.ProductName} could not identify the dragged library asset. Try dragging it again.");
+            return;
+        }
+
+        var asset = _project?.Assets.FirstOrDefault(candidate => candidate.Id == assetId);
+        if (asset is null)
+        {
+            RejectDrop("The dragged asset is no longer in this project.");
+            return;
+        }
+
+        if (!TimelineDropPolicy.Evaluate(track, asset.Kind, isLocked: false).IsAllowed)
+        {
+            RejectDrop(track == TimelineTrackKind.Video
+                ? $"'{asset.FileName}' is audio. Drop it on A1."
+                : $"'{asset.FileName}' is visual media. Drop it on V1.");
+            return;
+        }
+
+        AssetDropped?.Invoke(this, new TimelineAssetDroppedEventArgs(assetId, track, position));
+        e.AcceptedOperation = DataPackageOperation.Copy;
+    }
+
+    private async Task DropStorageItemsAsync(
+        DragEventArgs e,
+        TimelineTrackKind track,
+        long position,
+        CancellationToken lifetimeToken)
+    {
+        if (!e.DataView.Contains(StandardDataFormats.StorageItems))
+        {
+            return;
+        }
+
+        var result = await MediaDropReader.ReadAsync(
+            async () => await e.DataView.GetStorageItemsAsync(),
+            lifetimeToken);
+        lifetimeToken.ThrowIfCancellationRequested();
+        if (!result.IsSuccess)
+        {
+            RejectDrop(result.ErrorMessage!);
+            return;
+        }
+
+        if (result.Files.Count == 0)
+        {
+            RejectDrop(result.RejectedItems.Count > 0
+                ? string.Join(" ", result.RejectedItems.Take(3).Select(item => $"'{item.ItemName}': {item.Message}"))
+                : $"The drop did not contain any files {AppInfo.ProductName} can import.");
+            return;
+        }
+
+        var scope = track == TimelineTrackKind.Video ? MediaImportScope.Visual : MediaImportScope.Audio;
+        var hasCompatibleFile = result.Files.Any(file =>
+            MediaImportService.TryResolveLocalSourcePath(file.Path, out var path, out _) &&
+            scope.Allows(path));
+        if (!hasCompatibleFile)
+        {
+            RejectDrop(track == TimelineTrackKind.Video
+                ? "Drop MP4, PNG, or JPEG files on V1."
+                : "Drop MP3 or WAV files on A1.");
+            e.AcceptedOperation = DataPackageOperation.None;
+            return;
+        }
+
+        MediaFilesDropped?.Invoke(this, new TimelineMediaFilesDroppedEventArgs(
+            result.Files,
+            track,
+            position,
+            result.RejectedItems.Select(item => $"'{item.ItemName}': {item.Message}").ToList()));
+        e.AcceptedOperation = DataPackageOperation.Copy;
     }
 
     private TimelineTrackKind HitTestTrack(double pointerY) => TimelineDropPolicy.HitTest(
@@ -1336,9 +1353,11 @@ public sealed partial class TimelineControl : UserControl
         }
         catch (OperationCanceledException)
         {
+            // A newer thumbnail request superseded this load.
         }
         catch (Exception exception) when (MediaImportService.IsExpectedMediaFailure(exception))
         {
+            // The card keeps its fallback visual when a thumbnail cannot be decoded.
         }
     }
 
@@ -1370,9 +1389,6 @@ public sealed partial class TimelineControl : UserControl
         }
     }
 
-    private static bool IsControlDown() =>
-        InputKeyboardSource.GetKeyStateForCurrentThread(VirtualKey.Control).HasFlag(CoreVirtualKeyStates.Down);
-
     private static string FormatDuration(long milliseconds) => $"{Math.Max(0, milliseconds) / 1_000d:0.0}s";
 
     private static double ResourceDouble(string key) => (double)Application.Current.Resources[key];
@@ -1387,6 +1403,15 @@ public sealed partial class TimelineControl : UserControl
         bool IsImage);
 
 }
+
+public sealed record TimelinePresentation(
+    EditorSelection Selection,
+    long PlayheadMilliseconds,
+    string PlayheadText,
+    string DurationText,
+    bool CanUndo,
+    bool CanRedo,
+    string ProjectRootPath);
 
 internal enum TimelineDragOperation
 {
@@ -1412,11 +1437,7 @@ internal static class TimelineDragPreview
         long originalBoundaryMilliseconds)
     {
         var adjustedSourceOut = (decimal)sourceOutMilliseconds + boundaryMilliseconds - originalBoundaryMilliseconds;
-        return adjustedSourceOut > long.MaxValue
-            ? long.MaxValue
-            : adjustedSourceOut < long.MinValue
-                ? long.MinValue
-                : (long)adjustedSourceOut;
+        return (long)decimal.Clamp(adjustedSourceOut, long.MinValue, long.MaxValue);
     }
 
     public static long InitialValue(

@@ -11,6 +11,8 @@ namespace CutFlow.Tests;
 public sealed class Task13AcceptanceTests
 {
     private static readonly XNamespace Xaml = "http://schemas.microsoft.com/winfx/2006/xaml";
+    private static readonly string[] expected = new[] { ".mp4", ".png", ".jpg", ".jpeg" };
+    private static readonly string[] expectedArray = new[] { ".mp3", ".wav" };
 
     [TestMethod]
     public void RenameProject_TrimsTheNameAndParticipatesInUndoRedo()
@@ -58,8 +60,8 @@ public sealed class Task13AcceptanceTests
             .Descendants()
             .Single(element => (string?)element.Attribute(Xaml + "Name") == "ProjectNameBox");
 
-        Assert.IsFalse(
-            projectName.Ancestors().Any(element => (string?)element.Attribute(Xaml + "Name") == "TitleBarDragRegion"),
+        Assert.DoesNotContain(
+            element => (string?)element.Attribute(Xaml + "Name") == "TitleBarDragRegion", projectName.Ancestors(),
             "The editable project name must not be inside the non-client drag region.");
     }
 
@@ -73,9 +75,9 @@ public sealed class Task13AcceptanceTests
             "Views",
             "EditorView.Export.cs"));
         var closeStart = source.IndexOf("public async Task<bool> PrepareToCloseAsync()", StringComparison.Ordinal);
-        Assert.IsTrue(closeStart >= 0, "The editor close preparation route is missing.");
+        Assert.IsGreaterThanOrEqualTo(0, closeStart, "The editor close preparation route is missing.");
         var closeEnd = source.IndexOf("public void CancelClosePreparation()", closeStart, StringComparison.Ordinal);
-        Assert.IsTrue(closeEnd > closeStart, "The editor close preparation route could not be isolated.");
+        Assert.IsGreaterThan(closeStart, closeEnd, "The editor close preparation route could not be isolated.");
         var closeRoute = source[closeStart..closeEnd];
         var commitIndex = closeRoute.IndexOf("CommitProjectName();", StringComparison.Ordinal);
         var saveIndex = closeRoute.IndexOf("return await SaveAsync();", StringComparison.Ordinal);
@@ -98,7 +100,7 @@ public sealed class Task13AcceptanceTests
 
         foreach (var requiredLabel in new[] { "Add text", "Default", "Title", "Subtitle", "Minimal label" })
         {
-            Assert.IsTrue(buttonLabels.Contains(requiredLabel), $"The Text panel is missing the '{requiredLabel}' action.");
+            Assert.Contains(requiredLabel, buttonLabels, $"The Text panel is missing the '{requiredLabel}' action.");
         }
     }
 
@@ -164,15 +166,12 @@ public sealed class Task13AcceptanceTests
     {
         var supportedExtensions = new[] { ".mp4", ".png", ".jpg", ".jpeg", ".mp3", ".wav" };
 
-        CollectionAssert.AreEquivalent(
-            new[] { ".mp4", ".png", ".jpg", ".jpeg" },
-            FilePickerHelper.GetMediaExtensions(MediaImportScope.Visual).ToArray());
-        CollectionAssert.AreEquivalent(
-            new[] { ".mp3", ".wav" },
-            FilePickerHelper.GetMediaExtensions(MediaImportScope.Audio).ToArray());
-        CollectionAssert.AreEquivalent(
-            supportedExtensions,
-            FilePickerHelper.GetMediaExtensions(MediaImportScope.All).ToArray());
+        Assert.AreSequenceEqual(
+            expected, FilePickerHelper.GetMediaExtensions(MediaImportScope.Visual).ToArray(), Microsoft.VisualStudio.TestTools.UnitTesting.SequenceOrder.InAnyOrder);
+        Assert.AreSequenceEqual(
+            expectedArray, FilePickerHelper.GetMediaExtensions(MediaImportScope.Audio).ToArray(), Microsoft.VisualStudio.TestTools.UnitTesting.SequenceOrder.InAnyOrder);
+        Assert.AreSequenceEqual(
+            supportedExtensions, FilePickerHelper.GetMediaExtensions(MediaImportScope.All).ToArray(), Microsoft.VisualStudio.TestTools.UnitTesting.SequenceOrder.InAnyOrder);
         Assert.IsTrue(MediaImportScope.Audio.Allows("voice.WAV"));
         Assert.IsFalse(MediaImportScope.Audio.Allows("clip.mp4"));
         Assert.IsTrue(MediaImportScope.Visual.CanAcceptDrop(true, [".mp4"]));
@@ -206,11 +205,27 @@ public sealed class Task13AcceptanceTests
     {
         var source = File.ReadAllText(Path.Combine(FindRepositoryRoot(), "src", "CutFlow", "Views", "HomeView.xaml.cs"));
 
-        StringAssert.Contains(source, "private bool IsProjectOperationActive");
+        Assert.Contains("private bool IsProjectOperationActive", source);
         Assert.AreEqual(
             6,
             source.Split("RunProjectOpenGateAsync", StringSplitOptions.None).Length - 1,
             "Create, Open, Rename, Duplicate, and Delete must all use the shared atomic gate.");
+    }
+
+    [TestMethod]
+    public void HomeProjectCard_ActionsUseASeparateFortyPixelTarget()
+    {
+        var homeView = XDocument.Load(Path.Combine(FindRepositoryRoot(), "src", "CutFlow", "Views", "HomeView.xaml"));
+        var buttons = homeView.Descendants().Where(element => element.Name.LocalName == "Button").ToArray();
+        var openButton = buttons.Single(element => (string?)element.Attribute("Click") == "ProjectOpen_Click");
+        var actionsButton = buttons.Single(element =>
+            element.Descendants().Any(descendant =>
+                descendant.Name.LocalName == "ToolTip" &&
+                (string?)descendant.Attribute("Content") == "Project actions"));
+
+        Assert.AreEqual("40", (string?)actionsButton.Attribute("Width"));
+        Assert.AreEqual("40", (string?)actionsButton.Attribute("Height"));
+        Assert.DoesNotContain(openButton, actionsButton.Ancestors());
     }
 
     [TestMethod]
@@ -253,7 +268,7 @@ public sealed class Task13AcceptanceTests
 
         Assert.HasCount(0, plan.Visuals);
         Assert.AreEqual(0, plan.TargetDurationMilliseconds);
-        Assert.IsTrue(plan.Errors.Any(error => error.Contains("24 hours", StringComparison.Ordinal)));
+        Assert.Contains(error => error.Contains("24 hours", StringComparison.Ordinal), plan.Errors);
     }
 
     [TestMethod]

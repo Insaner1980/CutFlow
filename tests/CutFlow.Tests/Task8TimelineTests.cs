@@ -18,8 +18,8 @@ public sealed class Task8TimelineTests
 
         var bounds = TimelineLayoutProjection.GetVideoBounds(project);
 
-        CollectionAssert.AreEqual(new long[] { 0, 1_000, 3_000 }, bounds.Select(bound => bound.StartMilliseconds).ToArray());
-        CollectionAssert.AreEqual(new long[] { 1_000, 2_000, 750 }, bounds.Select(bound => bound.DurationMilliseconds).ToArray());
+        Assert.AreSequenceEqual(new long[] { 0, 1_000, 3_000 }, bounds.Select(bound => bound.StartMilliseconds).ToArray());
+        Assert.AreSequenceEqual(new long[] { 1_000, 2_000, 750 }, bounds.Select(bound => bound.DurationMilliseconds).ToArray());
         Assert.AreEqual(3_750L, bounds[^1].EndMilliseconds);
     }
 
@@ -50,17 +50,16 @@ public sealed class Task8TimelineTests
             if (index + 1 < cards.Length)
             {
                 Assert.AreEqual(cards[index].HitRight, cards[index + 1].HitLeft, 0.001);
-                Assert.IsTrue(cards[index + 1].VisualLeft > cards[index].VisualLeft);
-                Assert.IsTrue(cards[index].VisualLeft + cards[index].VisualWidth > cards[index + 1].VisualLeft);
+                Assert.IsGreaterThan(cards[index].VisualLeft, cards[index + 1].VisualLeft);
+                Assert.IsGreaterThan(cards[index + 1].VisualLeft, cards[index].VisualLeft + cards[index].VisualWidth);
             }
         }
 
         Assert.AreEqual(5_000L, bounds[^1].EndMilliseconds);
         Assert.AreEqual(100d, scale.TimeToPixels(bounds[^1].EndMilliseconds), 0.001);
         Assert.AreEqual(5_000L, scale.PixelsToTime(100));
-        CollectionAssert.AreEqual(
-            new long[] { 0, 5_000 },
-            scale.GetVisibleRulerTicks(0, 100, bounds[^1].EndMilliseconds)
+        Assert.AreSequenceEqual(
+            new long[] { 0, 5_000 }, scale.GetVisibleRulerTicks(0, 100, bounds[^1].EndMilliseconds)
                 .Select(tick => tick.Milliseconds)
                 .ToArray());
     }
@@ -137,7 +136,7 @@ public sealed class Task8TimelineTests
 
         var ticks = scale.GetVisibleRulerTicks(horizontalOffset: 1_000, viewportWidth: 500, durationMilliseconds: 30_000);
 
-        Assert.IsTrue(ticks.Count <= 8);
+        Assert.IsLessThanOrEqualTo(8, ticks.Count);
         Assert.AreEqual(9_000L, ticks[0].Milliseconds);
         Assert.AreEqual(16_000L, ticks[^1].Milliseconds);
     }
@@ -527,7 +526,7 @@ public sealed class Task8TimelineTests
         Assert.IsFalse(viewModel.ReorderVideoItem(project.VideoItems[1].Id, 1));
 
         Assert.AreSame(originalProject, viewModel.Project);
-        CollectionAssert.AreEqual(originalItems, viewModel.Project.VideoItems
+        Assert.AreSequenceEqual(originalItems, viewModel.Project.VideoItems
             .Select(item => (item.Id, item.AssetId, item.SourceInMilliseconds, item.SourceOutMilliseconds, item.DurationMilliseconds))
             .ToArray());
         Assert.AreEqual(0L, viewModel.Revision);

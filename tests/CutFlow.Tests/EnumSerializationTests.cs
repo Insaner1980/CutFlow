@@ -6,7 +6,7 @@ using Microsoft.VisualStudio.TestTools.UnitTesting;
 namespace CutFlow.Tests;
 
 [TestClass]
-public sealed class EnumSerializationTests
+public sealed partial class EnumSerializationTests
 {
     [TestMethod]
     public void ModelJsonEnums_RoundTripEveryValueAsItsCanonicalString()
@@ -59,10 +59,10 @@ public sealed class EnumSerializationTests
         var projectDirectory = Directory.CreateDirectory(Path.Combine(directory.Path, "Projects", id.ToString("D")));
         await File.WriteAllTextAsync(
             Path.Combine(projectDirectory.FullName, "project.json"),
-            $$"""{ "schemaVersion": 1, "id": "{{id}}", {{enumProperty}} }""");
+            $$"""{ "schemaVersion": 1, "id": "{{id}}", {{enumProperty}} }""", TestContext.CancellationToken);
 
         await Assert.ThrowsExactlyAsync<InvalidDataException>(
-            () => new ProjectService(directory.Path).LoadAsync(id));
+            () => new ProjectService(directory.Path).LoadAsync(id, TestContext.CancellationToken));
     }
 
     private static void AssertRejected<TEnum>(string json)
@@ -86,7 +86,7 @@ public sealed class EnumSerializationTests
         where TEnum : struct, Enum =>
         Assert.ThrowsExactly<JsonException>(() => JsonSerializer.Serialize(value));
 
-    private sealed class TemporaryDirectory : IDisposable
+    private sealed partial class TemporaryDirectory : IDisposable
     {
         public TemporaryDirectory()
         {
@@ -104,4 +104,6 @@ public sealed class EnumSerializationTests
             }
         }
     }
+
+    public TestContext TestContext { get; set; }
 }

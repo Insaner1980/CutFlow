@@ -49,8 +49,8 @@ public sealed class PointerCaptureLifecycleTests
         var cancel = render.IndexOf("CancelPointerInteraction();", StringComparison.Ordinal);
         var clear = render.IndexOf("VideoCanvas.Children.Clear();", StringComparison.Ordinal);
 
-        Assert.IsTrue(cancel >= 0, "A rerender must cancel any drag retained by an outgoing card.");
-        Assert.IsTrue(clear > cancel, "Pointer capture must be released before old card visuals are removed.");
+        Assert.IsGreaterThanOrEqualTo(0, cancel, "A rerender must cancel any drag retained by an outgoing card.");
+        Assert.IsGreaterThan(cancel, clear, "Pointer capture must be released before old card visuals are removed.");
         Assert.DoesNotContain("DataContext", render);
     }
 
@@ -110,8 +110,8 @@ public sealed class PointerCaptureLifecycleTests
     {
         var capture = method.IndexOf(captureMarker, StringComparison.Ordinal);
         var retained = method.IndexOf(retainedMarker, StringComparison.Ordinal);
-        Assert.IsTrue(capture >= 0, $"Missing capture gate '{captureMarker}'.");
-        Assert.IsTrue(retained > capture, "Pointer state must be retained only after capture succeeds.");
+        Assert.IsGreaterThanOrEqualTo(0, capture, $"Missing capture gate '{captureMarker}'.");
+        Assert.IsGreaterThan(capture, retained, "Pointer state must be retained only after capture succeeds.");
     }
 
     private static string GetMethod(string source, string startMarker, string endMarker)

@@ -3,7 +3,7 @@ using CutFlow.Services;
 
 namespace CutFlow.ViewModels;
 
-public sealed class MainViewModel : ViewModelBase
+public sealed partial class MainViewModel : ViewModelBase
 {
     private readonly ProjectService _projectService;
     private readonly MediaImportService _mediaImportService;
@@ -44,58 +44,54 @@ public sealed class MainViewModel : ViewModelBase
         _isShowingHome = true;
         try
         {
-            var editor = Editor;
-            if (editor is not null && editor.SaveStatus != EditorViewModel.SavedStatus)
+            if (!await SaveEditorBeforeHomeAsync(cancellationToken))
             {
-                try
-                {
-                    while (true)
-                    {
-                        var revision = editor.Revision;
-                        await _projectService.SaveAsync(editor.Project, cancellationToken);
-                        if (!_canContinue())
-                        {
-                            return false;
-                        }
-
-                        if (editor.TryMarkSaved(revision))
-                        {
-                            break;
-                        }
-                    }
-                }
-                catch (Exception exception) when (exception is IOException or UnauthorizedAccessException or InvalidDataException)
-                {
-                    if (!_canContinue())
-                    {
-                        return false;
-                    }
-
-                    editor.MarkSaveFailed();
-                    Home.ReportError(exception.Message);
-                    return false;
-                }
+                return false;
             }
 
             SetCurrentView(null, null);
-
-            try
-            {
-                await Home.LoadAsync(cancellationToken);
-            }
-            catch (Exception exception) when (exception is IOException or UnauthorizedAccessException or InvalidDataException)
-            {
-                if (_canContinue())
-                {
-                    Home.ReportError(exception.Message);
-                }
-            }
-
+            await LoadHomeAsync(cancellationToken);
             return _canContinue();
         }
         finally
         {
             _isShowingHome = false;
+        }
+    }
+
+    private async Task<bool> SaveEditorBeforeHomeAsync(CancellationToken cancellationToken)
+    {
+        var editor = Editor;
+        if (editor is null || editor.SaveStatus == EditorViewModel.SavedStatus) return true;
+
+        try
+        {
+            while (true)
+            {
+                var revision = editor.Revision;
+                await _projectService.SaveAsync(editor.Project, cancellationToken);
+                if (!_canContinue()) return false;
+                if (editor.TryMarkSaved(revision)) return true;
+            }
+        }
+        catch (Exception exception) when (exception is IOException or UnauthorizedAccessException or InvalidDataException)
+        {
+            if (!_canContinue()) return false;
+            editor.MarkSaveFailed();
+            Home.ReportError(exception.Message);
+            return false;
+        }
+    }
+
+    private async Task LoadHomeAsync(CancellationToken cancellationToken)
+    {
+        try
+        {
+            await Home.LoadAsync(cancellationToken);
+        }
+        catch (Exception exception) when (exception is IOException or UnauthorizedAccessException or InvalidDataException)
+        {
+            if (_canContinue()) Home.ReportError(exception.Message);
         }
     }
 

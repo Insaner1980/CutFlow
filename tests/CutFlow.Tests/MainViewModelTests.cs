@@ -7,21 +7,21 @@ using Microsoft.VisualStudio.TestTools.UnitTesting;
 namespace CutFlow.Tests;
 
 [TestClass]
-public sealed class MainViewModelTests
+public sealed partial class MainViewModelTests
 {
     [TestMethod]
     public async Task OpenEditorAsync_RevalidatesMissingMediaWithoutRemovingReferences()
     {
         using var directory = new TemporaryDirectory();
         var sourcePath = Path.Combine(directory.Path, "present.png");
-        await File.WriteAllTextAsync(sourcePath, "fixture");
+        await File.WriteAllTextAsync(sourcePath, "fixture", TestContext.CancellationToken);
         var project = ProjectDocument.CreateNew("Missing check", DateTimeOffset.UnixEpoch);
         var present = new ProjectAsset { Id = Guid.NewGuid(), SourcePath = sourcePath, IsMissing = true };
         var missing = new ProjectAsset { Id = Guid.NewGuid(), SourcePath = Path.Combine(directory.Path, "missing.png") };
         project.Assets.AddRange([present, missing]);
         var viewModel = new MainViewModel(new ProjectService(directory.Path));
 
-        await viewModel.OpenEditorAsync(project);
+        await viewModel.OpenEditorAsync(project, TestContext.CancellationToken);
 
         Assert.HasCount(2, viewModel.Editor!.Project.Assets);
         Assert.IsFalse(present.IsMissing);
@@ -33,9 +33,9 @@ public sealed class MainViewModelTests
     {
         using var directory = new TemporaryDirectory();
         var service = new ProjectService(directory.Path);
-        var project = await service.CreateAsync("Persisted edit");
+        var project = await service.CreateAsync("Persisted edit", TestContext.CancellationToken);
         var viewModel = new MainViewModel(service);
-        await viewModel.OpenEditorAsync(project);
+        await viewModel.OpenEditorAsync(project, TestContext.CancellationToken);
         var textId = Guid.NewGuid();
         viewModel.Editor!.CommitEdit(document =>
         {
@@ -49,11 +49,11 @@ public sealed class MainViewModelTests
             });
         });
 
-        var navigated = await viewModel.ShowHomeAsync();
+        var navigated = await viewModel.ShowHomeAsync(TestContext.CancellationToken);
 
         Assert.IsTrue(navigated);
         Assert.IsFalse(viewModel.IsEditorOpen);
-        var persisted = await service.LoadAsync(project.Id);
+        var persisted = await service.LoadAsync(project.Id, TestContext.CancellationToken);
         Assert.AreEqual(AspectRatioPreset.Portrait9By16, persisted.Settings.AspectRatio);
         Assert.AreEqual(textId, persisted.TextItems.Single().Id);
     }
@@ -63,13 +63,13 @@ public sealed class MainViewModelTests
     {
         using var directory = new TemporaryDirectory();
         var service = new ProjectService(directory.Path);
-        var project = await service.CreateAsync("Invalid edit");
+        var project = await service.CreateAsync("Invalid edit", TestContext.CancellationToken);
         var viewModel = new MainViewModel(service);
-        await viewModel.OpenEditorAsync(project);
+        await viewModel.OpenEditorAsync(project, TestContext.CancellationToken);
         var editor = viewModel.Editor!;
         editor.CommitEdit(document => document.SchemaVersion = 99);
 
-        var navigated = await viewModel.ShowHomeAsync();
+        var navigated = await viewModel.ShowHomeAsync(TestContext.CancellationToken);
 
         Assert.IsFalse(navigated);
         Assert.IsTrue(viewModel.IsEditorOpen);
@@ -82,7 +82,7 @@ public sealed class MainViewModelTests
     {
         using var directory = new TemporaryDirectory();
         var initialService = new ProjectService(directory.Path);
-        var project = await initialService.CreateAsync("Initial");
+        var project = await initialService.CreateAsync("Initial", TestContext.CancellationToken);
         var firstRevisionSerialized = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
         var releaseFirstSave = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
         var serializationCount = 0;
@@ -99,12 +99,12 @@ public sealed class MainViewModelTests
             return json;
         });
         var viewModel = new MainViewModel(service);
-        await viewModel.OpenEditorAsync(project);
+        await viewModel.OpenEditorAsync(project, TestContext.CancellationToken);
         var editor = viewModel.Editor!;
         editor.RenameProject("First revision");
 
-        var navigationTask = Task.Run(() => viewModel.ShowHomeAsync());
-        await firstRevisionSerialized.Task.WaitAsync(TimeSpan.FromSeconds(5));
+        var navigationTask = Task.Run(() => viewModel.ShowHomeAsync(TestContext.CancellationToken));
+        await firstRevisionSerialized.Task.WaitAsync(TimeSpan.FromSeconds(5), TestContext.CancellationToken);
         editor.RenameProject("Latest revision");
         releaseFirstSave.TrySetResult();
 
@@ -113,7 +113,7 @@ public sealed class MainViewModelTests
         Assert.IsTrue(navigated);
         Assert.IsFalse(viewModel.IsEditorOpen);
         Assert.AreEqual(2, serializationCount);
-        Assert.AreEqual("Latest revision", (await service.LoadAsync(project.Id)).Name);
+        Assert.AreEqual("Latest revision", (await service.LoadAsync(project.Id, TestContext.CancellationToken)).Name);
     }
 
     [TestMethod]
@@ -121,9 +121,9 @@ public sealed class MainViewModelTests
     {
         using var directory = new TemporaryDirectory();
         var service = new ProjectService(directory.Path);
-        var project = await service.CreateAsync("Canceled navigation");
+        var project = await service.CreateAsync("Canceled navigation", TestContext.CancellationToken);
         var viewModel = new MainViewModel(service);
-        await viewModel.OpenEditorAsync(project);
+        await viewModel.OpenEditorAsync(project, TestContext.CancellationToken);
         var editor = viewModel.Editor!;
         editor.RenameProject("Unsaved revision");
         using var cancellation = new CancellationTokenSource();
@@ -133,8 +133,8 @@ public sealed class MainViewModelTests
 
         Assert.AreSame(editor, viewModel.Editor);
         Assert.AreEqual(EditorViewModel.UnsavedStatus, editor.SaveStatus);
-        Assert.IsTrue(await viewModel.ShowHomeAsync());
-        Assert.AreEqual("Unsaved revision", (await service.LoadAsync(project.Id)).Name);
+        Assert.IsTrue(await viewModel.ShowHomeAsync(TestContext.CancellationToken));
+        Assert.AreEqual("Unsaved revision", (await service.LoadAsync(project.Id, TestContext.CancellationToken)).Name);
     }
 
     [TestMethod]
@@ -142,19 +142,19 @@ public sealed class MainViewModelTests
     {
         using var directory = new TemporaryDirectory();
         var initialService = new ProjectService(directory.Path);
-        var project = await initialService.CreateAsync("Persisted revision");
+        var project = await initialService.CreateAsync("Persisted revision", TestContext.CancellationToken);
         var projectPath = Path.Combine(directory.Path, "Projects", project.Id.ToString("D"), "project.json");
-        var originalJson = await File.ReadAllTextAsync(projectPath);
+        var originalJson = await File.ReadAllTextAsync(projectPath, TestContext.CancellationToken);
         using var cancellation = new CancellationTokenSource();
         var service = new ProjectService(
             directory.Path,
             writeAndFlushAsync: async (path, json, _) =>
             {
-                await File.WriteAllTextAsync(path, json);
+                await File.WriteAllTextAsync(path, json, TestContext.CancellationToken);
                 cancellation.Cancel();
             });
         var viewModel = new MainViewModel(service);
-        await viewModel.OpenEditorAsync(project);
+        await viewModel.OpenEditorAsync(project, TestContext.CancellationToken);
         var editor = viewModel.Editor!;
         editor.RenameProject("Canceled revision");
 
@@ -162,7 +162,7 @@ public sealed class MainViewModelTests
 
         Assert.AreSame(editor, viewModel.Editor);
         Assert.AreEqual(EditorViewModel.UnsavedStatus, editor.SaveStatus);
-        Assert.AreEqual(originalJson, await File.ReadAllTextAsync(projectPath));
+        Assert.AreEqual(originalJson, await File.ReadAllTextAsync(projectPath, TestContext.CancellationToken));
     }
 
     [TestMethod]
@@ -170,14 +170,14 @@ public sealed class MainViewModelTests
     {
         using var directory = new TemporaryDirectory();
         var service = new ProjectService(directory.Path);
-        await service.CreateAsync("Visible home");
+        await service.CreateAsync("Visible home", TestContext.CancellationToken);
         var viewModel = new MainViewModel(service);
-        var editorProject = await service.ListAsync();
-        await viewModel.OpenEditorAsync(editorProject.Single());
+        var editorProject = await service.ListAsync(TestContext.CancellationToken);
+        await viewModel.OpenEditorAsync(editorProject.Single(), TestContext.CancellationToken);
         var editorWasClearedWhenRaised = false;
         viewModel.CurrentViewChanged += (_, _) => editorWasClearedWhenRaised = !viewModel.IsEditorOpen;
 
-        await viewModel.ShowHomeAsync();
+        await viewModel.ShowHomeAsync(TestContext.CancellationToken);
 
         Assert.IsTrue(editorWasClearedWhenRaised);
         Assert.HasCount(1, viewModel.Home.Projects);
@@ -198,8 +198,8 @@ public sealed class MainViewModelTests
                 (editor is not null && !ReferenceEquals(currentProject, editor.Project));
         };
 
-        await viewModel.OpenEditorAsync(project);
-        await viewModel.ShowHomeAsync();
+        await viewModel.OpenEditorAsync(project, TestContext.CancellationToken);
+        await viewModel.ShowHomeAsync(TestContext.CancellationToken);
 
         Assert.IsFalse(observedIncoherentState);
     }
@@ -220,7 +220,7 @@ public sealed class MainViewModelTests
             }
         };
 
-        await Assert.ThrowsExactlyAsync<InvalidOperationException>(() => viewModel.OpenEditorAsync(project));
+        await Assert.ThrowsExactlyAsync<InvalidOperationException>(() => viewModel.OpenEditorAsync(project, TestContext.CancellationToken));
 
         Assert.IsNull(viewModel.CurrentProject);
         Assert.IsNull(viewModel.Editor);
@@ -243,10 +243,10 @@ public sealed class MainViewModelTests
             }
 
             attemptReentrantNavigation = false;
-            reentrantNavigationResult = viewModel.ShowHomeAsync().GetAwaiter().GetResult();
+            reentrantNavigationResult = viewModel.ShowHomeAsync(TestContext.CancellationToken).GetAwaiter().GetResult();
         };
 
-        await viewModel.OpenEditorAsync(project);
+        await viewModel.OpenEditorAsync(project, TestContext.CancellationToken);
 
         Assert.IsFalse(reentrantNavigationResult);
         Assert.AreSame(project, viewModel.CurrentProject);
@@ -262,7 +262,7 @@ public sealed class MainViewModelTests
         var project = ProjectDocument.CreateNew("Failed editor view", DateTimeOffset.UnixEpoch);
         viewModel.CurrentViewChanged += (_, _) => throw new InvalidOperationException("View construction failed.");
 
-        await Assert.ThrowsExactlyAsync<InvalidOperationException>(() => viewModel.OpenEditorAsync(project));
+        await Assert.ThrowsExactlyAsync<InvalidOperationException>(() => viewModel.OpenEditorAsync(project, TestContext.CancellationToken));
 
         Assert.IsNull(viewModel.CurrentProject);
         Assert.IsNull(viewModel.Editor);
@@ -279,9 +279,9 @@ public sealed class MainViewModelTests
         viewModel.CurrentViewChanged += (_, _) => observedEditorStates.Add(viewModel.IsEditorOpen);
         viewModel.CurrentViewChanged += (_, _) => throw new InvalidOperationException("Later observer failed.");
 
-        await Assert.ThrowsExactlyAsync<InvalidOperationException>(() => viewModel.OpenEditorAsync(project));
+        await Assert.ThrowsExactlyAsync<InvalidOperationException>(() => viewModel.OpenEditorAsync(project, TestContext.CancellationToken));
 
-        CollectionAssert.AreEqual(new[] { true, false }, observedEditorStates);
+        Assert.AreSequenceEqual(expected, observedEditorStates);
         Assert.IsNull(viewModel.CurrentProject);
         Assert.IsNull(viewModel.Editor);
     }
@@ -293,10 +293,10 @@ public sealed class MainViewModelTests
         var viewModel = new MainViewModel(new ProjectService(directory.Path));
         var currentProject = ProjectDocument.CreateNew("Current editor", DateTimeOffset.UnixEpoch);
         var replacementProject = ProjectDocument.CreateNew("Replacement editor", DateTimeOffset.UnixEpoch);
-        await viewModel.OpenEditorAsync(currentProject);
+        await viewModel.OpenEditorAsync(currentProject, TestContext.CancellationToken);
         var currentEditor = viewModel.Editor;
 
-        await Assert.ThrowsExactlyAsync<InvalidOperationException>(() => viewModel.OpenEditorAsync(replacementProject));
+        await Assert.ThrowsExactlyAsync<InvalidOperationException>(() => viewModel.OpenEditorAsync(replacementProject, TestContext.CancellationToken));
 
         Assert.AreSame(currentProject, viewModel.CurrentProject);
         Assert.AreSame(currentEditor, viewModel.Editor);
@@ -309,13 +309,13 @@ public sealed class MainViewModelTests
         var viewModel = new MainViewModel(new ProjectService(directory.Path));
         var currentProject = ProjectDocument.CreateNew("Current editor", DateTimeOffset.UnixEpoch);
         var replacementProject = ProjectDocument.CreateNew("Replacement editor", DateTimeOffset.UnixEpoch);
-        await viewModel.OpenEditorAsync(currentProject);
+        await viewModel.OpenEditorAsync(currentProject, TestContext.CancellationToken);
         var observedProjects = new List<ProjectDocument?>();
         viewModel.CurrentViewChanged += (_, _) => observedProjects.Add(viewModel.CurrentProject);
 
-        await viewModel.ReplaceEditorAsync(replacementProject);
+        await viewModel.ReplaceEditorAsync(replacementProject, TestContext.CancellationToken);
 
-        CollectionAssert.AreEqual(new[] { replacementProject }, observedProjects);
+        Assert.AreSequenceEqual(new[] { replacementProject }, observedProjects);
         Assert.AreSame(replacementProject, viewModel.CurrentProject);
         Assert.AreSame(replacementProject, viewModel.Editor?.Project);
     }
@@ -327,7 +327,7 @@ public sealed class MainViewModelTests
         var viewModel = new MainViewModel(new ProjectService(directory.Path));
         var currentProject = ProjectDocument.CreateNew("Current editor", DateTimeOffset.UnixEpoch);
         var replacementProject = ProjectDocument.CreateNew("Canceled replacement", DateTimeOffset.UnixEpoch);
-        await viewModel.OpenEditorAsync(currentProject);
+        await viewModel.OpenEditorAsync(currentProject, TestContext.CancellationToken);
         var currentEditor = viewModel.Editor;
         using var cancellation = new CancellationTokenSource();
         cancellation.Cancel();
@@ -348,10 +348,10 @@ public sealed class MainViewModelTests
             _ => throw new InvalidOperationException("Deterministic project creation failure."));
         var viewModel = new MainViewModel(service);
         var currentProject = ProjectDocument.CreateNew("Current editor", DateTimeOffset.UnixEpoch);
-        await viewModel.OpenEditorAsync(currentProject);
+        await viewModel.OpenEditorAsync(currentProject, TestContext.CancellationToken);
         var currentEditor = viewModel.Editor;
 
-        await Assert.ThrowsExactlyAsync<InvalidOperationException>(() => viewModel.Home.CreateAsync());
+        await Assert.ThrowsExactlyAsync<InvalidOperationException>(() => viewModel.Home.CreateAsync(TestContext.CancellationToken));
 
         Assert.AreSame(currentProject, viewModel.CurrentProject);
         Assert.AreSame(currentEditor, viewModel.Editor);
@@ -363,11 +363,11 @@ public sealed class MainViewModelTests
         using var directory = new TemporaryDirectory();
         var viewModel = new MainViewModel(new ProjectService(directory.Path));
         var project = ProjectDocument.CreateNew("Retained editor view", DateTimeOffset.UnixEpoch);
-        await viewModel.OpenEditorAsync(project);
+        await viewModel.OpenEditorAsync(project, TestContext.CancellationToken);
         var editor = viewModel.Editor;
         viewModel.CurrentViewChanged += (_, _) => throw new InvalidOperationException("Home view switch failed.");
 
-        await Assert.ThrowsExactlyAsync<InvalidOperationException>(() => viewModel.ShowHomeAsync());
+        await Assert.ThrowsExactlyAsync<InvalidOperationException>(() => viewModel.ShowHomeAsync(TestContext.CancellationToken));
 
         Assert.AreSame(project, viewModel.CurrentProject);
         Assert.AreSame(editor, viewModel.Editor);
@@ -386,7 +386,7 @@ public sealed class MainViewModelTests
         var viewChanges = 0;
         viewModel.CurrentViewChanged += (_, _) => viewChanges++;
 
-        await viewModel.OpenEditorAsync(project);
+        await viewModel.OpenEditorAsync(project, TestContext.CancellationToken);
 
         Assert.IsNull(viewModel.CurrentProject);
         Assert.IsNull(viewModel.Editor);
@@ -403,14 +403,14 @@ public sealed class MainViewModelTests
         var viewModel = new MainViewModel(
             service,
             canContinue: () => !suppressAfterFirstCheck || Interlocked.Increment(ref continuationChecks) == 1);
-        var project = await service.CreateAsync("Failed close continuation");
+        var project = await service.CreateAsync("Failed close continuation", TestContext.CancellationToken);
 
-        await viewModel.OpenEditorAsync(project);
+        await viewModel.OpenEditorAsync(project, TestContext.CancellationToken);
         viewModel.Editor!.CommitEdit(document => document.SchemaVersion = 99);
         continuationChecks = 0;
         suppressAfterFirstCheck = true;
 
-        var navigated = await viewModel.ShowHomeAsync();
+        var navigated = await viewModel.ShowHomeAsync(TestContext.CancellationToken);
 
         Assert.IsFalse(navigated);
         Assert.IsTrue(viewModel.IsEditorOpen);
@@ -418,7 +418,7 @@ public sealed class MainViewModelTests
         Assert.IsNull(viewModel.Home.ErrorMessage);
     }
 
-    private sealed class TemporaryDirectory : IDisposable
+    private sealed partial class TemporaryDirectory : IDisposable
     {
         public TemporaryDirectory()
         {
@@ -436,4 +436,8 @@ public sealed class MainViewModelTests
             }
         }
     }
+
+    public TestContext TestContext { get; set; }
+
+    private static readonly bool[] expected = new[] { true, false };
 }

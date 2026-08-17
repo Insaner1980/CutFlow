@@ -6,7 +6,7 @@ namespace CutFlow.Models;
 internal sealed class StableStringEnumConverter<TEnum> : JsonConverter<TEnum>
     where TEnum : struct, Enum
 {
-    private static readonly IReadOnlyDictionary<string, TEnum> ValuesByName =
+    private static readonly Dictionary<string, TEnum> ValuesByName =
         Enum.GetNames<TEnum>().ToDictionary(
             static name => name,
             static name => Enum.Parse<TEnum>(name),

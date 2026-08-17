@@ -80,9 +80,11 @@ public readonly record struct WindowGeometry(int X, int Y, int Width, int Height
             var requested = getRequestedBounds(display);
             var coverage = GetIntersectionCoverage(requested, display.PhysicalBounds);
             var distance = GetSquaredDistance(requested, display.PhysicalBounds);
-            if (coverage > bestCoverage ||
-                coverage == bestCoverage && distance < bestDistance ||
-                coverage == bestCoverage && distance == bestDistance && IsPreferredTieBreak(display, displays[bestIndex]))
+            var coverageComparison = coverage.CompareTo(bestCoverage);
+            var distanceComparison = distance.CompareTo(bestDistance);
+            if (coverageComparison > 0 ||
+                coverageComparison == 0 && distanceComparison < 0 ||
+                coverageComparison == 0 && distanceComparison == 0 && IsPreferredTieBreak(display, displays[bestIndex]))
             {
                 bestIndex = index;
                 bestCoverage = coverage;

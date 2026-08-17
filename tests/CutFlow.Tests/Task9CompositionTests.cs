@@ -111,9 +111,9 @@ public sealed class Task9CompositionTests
 
         Assert.HasCount(2, plan.Visuals);
         Assert.IsTrue(plan.Visuals.All(visual => visual.Kind == CompositionVisualKind.Filler));
-        CollectionAssert.AreEqual(new long[] { 4_000, 2_000 }, plan.Visuals.Select(visual => visual.DurationMilliseconds).ToArray());
-        Assert.IsTrue(plan.Errors.Any(error => error.Contains("gone.mp4", StringComparison.Ordinal)));
-        Assert.IsTrue(plan.Errors.Any(error => error.Contains("Unknown visual", StringComparison.Ordinal)));
+        Assert.AreSequenceEqual(new long[] { 4_000, 2_000 }, plan.Visuals.Select(visual => visual.DurationMilliseconds).ToArray());
+        Assert.Contains(error => error.Contains("gone.mp4", StringComparison.Ordinal), plan.Errors);
+        Assert.Contains(error => error.Contains("Unknown visual", StringComparison.Ordinal), plan.Errors);
     }
 
     [TestMethod]
@@ -135,7 +135,7 @@ public sealed class Task9CompositionTests
         Assert.IsFalse(error.Contains('\r'));
         Assert.IsFalse(error.Contains('\n'));
         Assert.IsLessThanOrEqualTo(200, error.Length);
-        StringAssert.Contains(error, "replaced with black video");
+        Assert.Contains("replaced with black video", error);
     }
 
     [TestMethod]
@@ -151,9 +151,8 @@ public sealed class Task9CompositionTests
             "Fourth failure."
         ]);
 
-        CollectionAssert.AreEqual(
-            new[] { "First failure.", "Second failure.", "Third failure." },
-            errors.ToArray());
+        Assert.AreSequenceEqual(
+            expected, errors.ToArray());
     }
 
     [TestMethod]
@@ -209,15 +208,12 @@ public sealed class Task9CompositionTests
 
         var plan = CompositionPlan.Create(project);
 
-        CollectionAssert.AreEqual(
-            new[] { CompositionVisualKind.Image, CompositionVisualKind.Filler, CompositionVisualKind.Image },
-            plan.Visuals.Select(visual => visual.Kind).ToArray());
-        CollectionAssert.AreEqual(
-            new long[] { 500, 750, 1_000 },
-            plan.Visuals.Select(visual => visual.DurationMilliseconds).ToArray());
-        CollectionAssert.AreEqual(
-            new long[] { 0, 500, 1_250 },
-            boundsBeforeBuild.Select(bound => bound.StartMilliseconds).ToArray());
+        Assert.AreSequenceEqual(
+            new[] { CompositionVisualKind.Image, CompositionVisualKind.Filler, CompositionVisualKind.Image }, plan.Visuals.Select(visual => visual.Kind).ToArray());
+        Assert.AreSequenceEqual(
+            new long[] { 500, 750, 1_000 }, plan.Visuals.Select(visual => visual.DurationMilliseconds).ToArray());
+        Assert.AreSequenceEqual(
+            new long[] { 0, 500, 1_250 }, boundsBeforeBuild.Select(bound => bound.StartMilliseconds).ToArray());
         Assert.AreEqual(2_250L, durationBeforeBuild);
         Assert.AreEqual(durationBeforeBuild, plan.TargetDurationMilliseconds);
         Assert.AreEqual(
@@ -290,15 +286,15 @@ public sealed class Task9CompositionTests
         Assert.AreEqual(2_500L, plan.TargetDurationMilliseconds);
         Assert.HasCount(1, plan.Visuals);
         Assert.AreEqual(2_500L, plan.Visuals[0].DurationMilliseconds);
-        Assert.IsTrue(plan.Errors.Any(error => error.Contains("lost.wav", StringComparison.Ordinal)));
+        Assert.Contains(error => error.Contains("lost.wav", StringComparison.Ordinal), plan.Errors);
     }
 
     [TestMethod]
     public void PreviewRebuildGate_NewerLeaseCancelsAndObsoletesOlderLease()
     {
         using var gate = new PreviewRebuildGate();
-        using var first = gate.Begin();
-        using var second = gate.Begin();
+        using var first = gate.Begin(TestContext.CancellationToken);
+        using var second = gate.Begin(TestContext.CancellationToken);
         var committedVersion = 0L;
 
         Assert.IsTrue(first.Token.IsCancellationRequested);
@@ -314,7 +310,7 @@ public sealed class Task9CompositionTests
     public void PreviewRebuildGate_DisposeCancelsCurrentAndIsIdempotent()
     {
         var gate = new PreviewRebuildGate();
-        using var lease = gate.Begin();
+        using var lease = gate.Begin(TestContext.CancellationToken);
 
         gate.Dispose();
         gate.Dispose();
@@ -335,9 +331,8 @@ public sealed class Task9CompositionTests
             () => calls.Add("dispose-source"),
             () => calls.Add("dispose-player"));
 
-        CollectionAssert.AreEqual(
-            new[] { "pause", "clear-source", "detach-element", "dispose-source", "dispose-player" },
-            calls);
+        Assert.AreSequenceEqual(
+            expectedArray, calls);
     }
 
     [TestMethod]
@@ -356,9 +351,8 @@ public sealed class Task9CompositionTests
             () => calls.Add("dispose-source"),
             () => calls.Add("dispose-player")));
 
-        CollectionAssert.AreEqual(
-            new[] { "pause", "clear-source", "detach-element", "dispose-source", "dispose-player" },
-            calls);
+        Assert.AreSequenceEqual(
+            expectedArray, calls);
     }
 
     [TestMethod]
@@ -395,7 +389,7 @@ public sealed class Task9CompositionTests
 
         Assert.HasCount(1, result.Composition.Clips);
         Assert.AreEqual(1_750d, result.Composition.Duration.TotalMilliseconds, 1);
-        Assert.IsTrue(result.Errors.Any(error => error.Contains("missing.mp4", StringComparison.Ordinal)));
+        Assert.Contains(error => error.Contains("missing.mp4", StringComparison.Ordinal), result.Errors);
     }
 
     [TestMethod]
@@ -405,8 +399,8 @@ public sealed class Task9CompositionTests
         Directory.CreateDirectory(fixtureDirectory);
         var brokenImagePath = Path.Combine(fixtureDirectory, "broken.jpg");
         var brokenVideoPath = Path.Combine(fixtureDirectory, "broken.mp4");
-        await File.WriteAllBytesAsync(brokenImagePath, [0x00, 0x01, 0x02, 0x03]);
-        await File.WriteAllBytesAsync(brokenVideoPath, [0x00, 0x01, 0x02, 0x03]);
+        await File.WriteAllBytesAsync(brokenImagePath, [0x00, 0x01, 0x02, 0x03], TestContext.CancellationToken);
+        await File.WriteAllBytesAsync(brokenVideoPath, [0x00, 0x01, 0x02, 0x03], TestContext.CancellationToken);
 
         var mediaRoot = FindMediaRoot();
         var project = ProjectDocument.CreateNew("Failed visuals", DateTimeOffset.UnixEpoch);
@@ -449,24 +443,20 @@ public sealed class Task9CompositionTests
         {
             var result = await new CompositionService().BuildPreviewAsync(project, CancellationToken.None);
 
-            CollectionAssert.AreEqual(
-                new long[] { 400, 600, 800, 1_000 },
-                result.Composition.Clips.Select(clip => (long)Math.Round(clip.TrimmedDuration.TotalMilliseconds)).ToArray());
+            Assert.AreSequenceEqual(
+                new long[] { 400, 600, 800, 1_000 }, result.Composition.Clips.Select(clip => (long)Math.Round(clip.TrimmedDuration.TotalMilliseconds)).ToArray());
             Assert.AreEqual(2_800d, result.Composition.Duration.TotalMilliseconds, 2);
-            CollectionAssert.AreEqual(
-                new long[] { 0, 400, 1_000, 1_800 },
-                boundsBeforeBuild.Select(bound => bound.StartMilliseconds).ToArray());
-            CollectionAssert.AreEqual(
-                boundsBeforeBuild.ToArray(),
-                TimelineLayoutProjection.GetVideoBounds(project).ToArray());
+            Assert.AreSequenceEqual(
+                new long[] { 0, 400, 1_000, 1_800 }, boundsBeforeBuild.Select(bound => bound.StartMilliseconds).ToArray());
+            Assert.AreSequenceEqual(
+                boundsBeforeBuild.ToArray(), TimelineLayoutProjection.GetVideoBounds(project).ToArray());
             Assert.AreEqual(durationBeforeBuild, TimelineEditingService.CalculateProjectDuration(project));
-            CollectionAssert.AreEquivalent(
-                new[]
-                {
-                    "'broken.jpg' could not be loaded and was replaced with black video.",
-                    "'broken.mp4' could not be loaded and was replaced with black video."
-                },
-                result.Errors.ToArray());
+            string[] expectedErrors =
+            [
+                "'broken.jpg' could not be loaded and was replaced with black video.",
+                "'broken.mp4' could not be loaded and was replaced with black video."
+            ];
+            Assert.AreSequenceEqual(expectedErrors, result.Errors.ToArray(), Microsoft.VisualStudio.TestTools.UnitTesting.SequenceOrder.InAnyOrder);
         }
         finally
         {
@@ -616,9 +606,8 @@ public sealed class Task9CompositionTests
 
         var result = await new CompositionService().BuildAsync(project, null, CancellationToken.None);
 
-        CollectionAssert.AreEqual(
-            new long[] { 2_000, 750 },
-            result.Composition.Clips.Select(clip => (long)Math.Round(clip.TrimmedDuration.TotalMilliseconds)).ToArray());
+        Assert.AreSequenceEqual(
+            new long[] { 2_000, 750 }, result.Composition.Clips.Select(clip => (long)Math.Round(clip.TrimmedDuration.TotalMilliseconds)).ToArray());
         Assert.AreEqual(2_750d, result.Composition.Duration.TotalMilliseconds, 2);
         Assert.AreEqual(
             "'valid-video.mp4' could not be loaded and was replaced with black video.",
@@ -654,19 +643,16 @@ public sealed class Task9CompositionTests
         var plan = CompositionPlan.Create(project);
         var result = await new CompositionService().BuildPreviewAsync(project, CancellationToken.None);
 
-        CollectionAssert.AreEqual(
-            new[] { first.Id, second.Id },
-            plan.AudioTracks.Select(track => track.ItemId).ToArray());
+        Assert.AreSequenceEqual(
+            new[] { first.Id, second.Id }, plan.AudioTracks.Select(track => track.ItemId).ToArray());
         Assert.AreEqual(1_600L, plan.TargetDurationMilliseconds);
         Assert.AreEqual(1_600L, TimelineEditingService.CalculateProjectDuration(project));
         Assert.AreEqual(1_600d, result.Composition.Duration.TotalMilliseconds, 2);
         Assert.HasCount(2, result.Composition.BackgroundAudioTracks);
-        CollectionAssert.AreEqual(
-            new double[] { 200, 600 },
-            result.Composition.BackgroundAudioTracks.Select(track => track.Delay.TotalMilliseconds).ToArray());
-        CollectionAssert.AreEqual(
-            new double[] { 0.8, 0.7 },
-            result.Composition.BackgroundAudioTracks.Select(track => track.Volume).ToArray());
+        double[] expectedDelays = [200, 600];
+        double[] expectedVolumes = [0.8, 0.7];
+        Assert.AreSequenceEqual(expectedDelays, result.Composition.BackgroundAudioTracks.Select(track => track.Delay.TotalMilliseconds).ToArray());
+        Assert.AreSequenceEqual(expectedVolumes, result.Composition.BackgroundAudioTracks.Select(track => track.Volume).ToArray());
         Assert.HasCount(0, result.Errors);
     }
 
@@ -743,7 +729,7 @@ public sealed class Task9CompositionTests
             var result = await new CompositionService().BuildAsync(project, null, CancellationToken.None);
 
             Assert.HasCount(0, result.Composition.BackgroundAudioTracks);
-            Assert.IsTrue(result.Errors.Any(error => error.Contains("one-second.wav", StringComparison.Ordinal)));
+            Assert.Contains(error => error.Contains("one-second.wav", StringComparison.Ordinal), result.Errors);
         }
         finally
         {
@@ -795,4 +781,9 @@ public sealed class Task9CompositionTests
         writer.Write(dataLength);
         writer.Write(new byte[dataLength]);
     }
+
+    public TestContext TestContext { get; set; }
+
+    private static readonly string[] expected = new[] { "First failure.", "Second failure.", "Third failure." };
+    private static readonly string[] expectedArray = new[] { "pause", "clear-source", "detach-element", "dispose-source", "dispose-player" };
 }

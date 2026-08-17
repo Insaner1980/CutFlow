@@ -1,3 +1,4 @@
+using System.Diagnostics.CodeAnalysis;
 using CutFlow.Models;
 using Windows.Graphics.Imaging;
 using Windows.Media.Editing;
@@ -9,6 +10,8 @@ public sealed class MediaImportService
 {
     public const long DefaultImageDurationMilliseconds = 5_000;
 
+    [SuppressMessage("Performance", "CA1822:Mark members as static", Justification = "The instance method preserves the injected service API.")]
+    [SuppressMessage("Major Code Smell", "S2325:Methods and properties that don't access instance data should be static", Justification = "The instance method preserves the injected service API.")]
     public async Task<IReadOnlyList<ImportResult>> ImportAsync(
         IReadOnlyList<StorageFile> files,
         ProjectDocument project,
@@ -28,67 +31,51 @@ public sealed class MediaImportService
         foreach (var file in files)
         {
             cancellationToken.ThrowIfCancellationRequested();
-            var displayName = file?.Name ?? "Unknown file";
-            if (file is null)
-            {
-                results.Add(ImportResult.Failure(displayName, "The dropped item is not a file."));
-                continue;
-            }
-
-            try
-            {
-                if (!TryResolveLocalSourcePath(file.Path, out var normalizedPath, out var pathError))
-                {
-                    results.Add(ImportResult.Failure(displayName, pathError!));
-                    continue;
-                }
-
-                if (IsPathWithinDirectory(normalizedPath, managedProjectsRootPath))
-                {
-                    results.Add(ImportResult.Failure(
-                        displayName,
-                        $"Choose source media outside {AppInfo.ProductName}'s managed project folders."));
-                    continue;
-                }
-
-                if (knownPaths.Contains(normalizedPath))
-                {
-                    results.Add(ImportResult.Duplicate(displayName));
-                    continue;
-                }
-
-                var metadata = await ReadMetadataAsync(file, normalizedPath, cancellationToken);
-                if (!TryResolveLocalSourcePath(file.Path, out var currentPath, out pathError) ||
-                    !string.Equals(currentPath, normalizedPath, StringComparison.OrdinalIgnoreCase))
-                {
-                    results.Add(ImportResult.Failure(displayName, pathError ?? "The file path changed during import. Choose the file again."));
-                    continue;
-                }
-
-                if (!MatchesSnapshot(normalizedPath, metadata))
-                {
-                    results.Add(ImportResult.Failure(displayName, "The file changed during import. Choose the file again."));
-                    continue;
-                }
-
-                results.Add(ImportResult.Success(CreateAsset(metadata)));
-                knownPaths.Add(normalizedPath);
-            }
-            catch (OperationCanceledException)
-            {
-                throw;
-            }
-            catch (Exception exception) when (IsExpectedMediaFailure(exception))
-            {
-                results.Add(ImportResult.Failure(
-                    displayName,
-                    $"Windows could not read or decode this file. {ReadableReason(exception)}"));
-            }
+            results.Add(await ImportFileAsync(file, managedProjectsRootPath, knownPaths, cancellationToken));
         }
 
         return results;
     }
 
+    private static async Task<ImportResult> ImportFileAsync(
+        StorageFile? file,
+        string managedProjectsRootPath,
+        HashSet<string> knownPaths,
+        CancellationToken cancellationToken)
+    {
+        var displayName = file?.Name ?? "Unknown file";
+        if (file is null) return ImportResult.Failure(displayName, "The dropped item is not a file.");
+
+        try
+        {
+            if (!TryResolveLocalSourcePath(file.Path, out var normalizedPath, out var pathError))
+                return ImportResult.Failure(displayName, pathError!);
+            if (IsPathWithinDirectory(normalizedPath, managedProjectsRootPath))
+                return ImportResult.Failure(displayName, $"Choose source media outside {AppInfo.ProductName}'s managed project folders.");
+            if (knownPaths.Contains(normalizedPath)) return ImportResult.Duplicate(displayName);
+
+            var metadata = await ReadMetadataAsync(file, normalizedPath, cancellationToken);
+            if (!TryResolveLocalSourcePath(file.Path, out var currentPath, out pathError) ||
+                !string.Equals(currentPath, normalizedPath, StringComparison.OrdinalIgnoreCase))
+                return ImportResult.Failure(displayName, pathError ?? "The file path changed during import. Choose the file again.");
+            if (!MatchesSnapshot(normalizedPath, metadata))
+                return ImportResult.Failure(displayName, "The file changed during import. Choose the file again.");
+
+            knownPaths.Add(normalizedPath);
+            return ImportResult.Success(CreateAsset(metadata));
+        }
+        catch (OperationCanceledException)
+        {
+            throw;
+        }
+        catch (Exception exception) when (IsExpectedMediaFailure(exception))
+        {
+            return ImportResult.Failure(displayName, $"Windows could not read or decode this file. {ReadableReason(exception)}");
+        }
+    }
+
+    [SuppressMessage("Performance", "CA1822:Mark members as static", Justification = "The instance method preserves the injected service API.")]
+    [SuppressMessage("Major Code Smell", "S2325:Methods and properties that don't access instance data should be static", Justification = "The instance method preserves the injected service API.")]
     public async Task<ImportResult> RelinkAsync(
         StorageFile replacement,
         ProjectAsset asset,
@@ -151,6 +138,8 @@ public sealed class MediaImportService
         }
     }
 
+    [SuppressMessage("Performance", "CA1822:Mark members as static", Justification = "The instance method preserves the injected service API.")]
+    [SuppressMessage("Major Code Smell", "S2325:Methods and properties that don't access instance data should be static", Justification = "The instance method preserves the injected service API.")]
     public Task<int> RefreshMissingAsync(ProjectDocument project, CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(project);

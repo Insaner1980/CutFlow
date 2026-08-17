@@ -12,7 +12,7 @@ using Windows.System;
 namespace CutFlow.Tests;
 
 [TestClass]
-public sealed class Task10TextTests
+public sealed partial class Task10TextTests
 {
     [TestMethod]
     [DataRow(TextPreset.Default, "Text", 64d, 0.5d, 0.5d)]
@@ -36,7 +36,7 @@ public sealed class Task10TextTests
         Assert.AreEqual(expectedX, item.NormalizedX, 0.0001);
         Assert.AreEqual(expectedY, item.NormalizedY, 0.0001);
         Assert.IsFalse(string.IsNullOrWhiteSpace(item.FontFamily));
-        Assert.IsTrue(item.FontWeight > 0);
+        Assert.IsGreaterThan(0, item.FontWeight);
         Assert.IsTrue(item.TextColor.StartsWith('#'));
         Assert.AreEqual(EditorSelectionKind.TextItem, viewModel.Selection.Kind);
         Assert.AreEqual(item.Id, viewModel.Selection.ItemId);
@@ -51,10 +51,10 @@ public sealed class Task10TextTests
         var projectDirectory = Directory.CreateDirectory(Path.Combine(directory.Path, "Projects", id.ToString("D")));
         await File.WriteAllTextAsync(Path.Combine(projectDirectory.FullName, "project.json"), $$"""
             { "schemaVersion": 1, "id": "{{id}}", "name": "Old text", "createdAt": "2026-08-04T12:00:00+00:00", "modifiedAt": "2026-08-04T12:00:00+00:00", "textItems": [{ "id": "{{textId}}", "startMilliseconds": 0, "durationMilliseconds": 3000, "text": "Old", "fontFamily": "", "fontSize": 0, "fontWeight": 0, "textColor": "bad", "backgroundColor": "bad", "normalizedX": 4, "normalizedY": -2 }] }
-            """);
+            """, TestContext.CancellationToken);
         var service = new Services.ProjectService(directory.Path);
 
-        var loaded = await service.LoadAsync(id);
+        var loaded = await service.LoadAsync(id, TestContext.CancellationToken);
         var item = loaded.TextItems.Single();
 
         Assert.AreEqual(TextTimelineItem.DefaultFontFamily, item.FontFamily);
@@ -73,8 +73,8 @@ public sealed class Task10TextTests
         item.Alignment = TextHorizontalAlignment.Right;
         item.NormalizedX = 0.25;
         item.NormalizedY = 0.75;
-        await service.SaveAsync(loaded);
-        var roundTrip = (await service.LoadAsync(id)).TextItems.Single();
+        await service.SaveAsync(loaded, TestContext.CancellationToken);
+        var roundTrip = (await service.LoadAsync(id, TestContext.CancellationToken)).TextItems.Single();
 
         Assert.AreEqual("Arial", roundTrip.FontFamily);
         Assert.AreEqual(71d, roundTrip.FontSize);
@@ -102,9 +102,9 @@ public sealed class Task10TextTests
                 { "id": "{{Guid.NewGuid()}}", "normalizedX": -1e309, "normalizedY": 1e-999 }
               ]
             }
-            """);
+            """, TestContext.CancellationToken);
 
-        var items = (await new Services.ProjectService(directory.Path).LoadAsync(id)).TextItems;
+        var items = (await new Services.ProjectService(directory.Path).LoadAsync(id, TestContext.CancellationToken)).TextItems;
 
         Assert.AreEqual(0L, BitConverter.DoubleToInt64Bits(items[0].NormalizedX));
         Assert.AreEqual(0d, items[0].NormalizedY);
@@ -136,9 +136,9 @@ public sealed class Task10TextTests
                 }
               ]
             }
-            """);
+            """, TestContext.CancellationToken);
 
-        var loaded = await new Services.ProjectService(directory.Path).LoadAsync(id);
+        var loaded = await new Services.ProjectService(directory.Path).LoadAsync(id, TestContext.CancellationToken);
         var item = loaded.TextItems.Single();
 
         Assert.AreEqual("#FFABCDEF", loaded.Settings.BackgroundColor);
@@ -253,9 +253,9 @@ public sealed class Task10TextTests
         var clampedPositionHash = Services.TextOverlayRenderer.CalculateStyleHash(project, item);
         item.NormalizedX = 1;
         Assert.AreEqual(clampedPositionHash, Services.TextOverlayRenderer.CalculateStyleHash(project, item));
-        StringAssert.Matches(
-            Services.TextOverlayRenderer.GetCacheFileName(project, item),
-            new System.Text.RegularExpressions.Regex($"^{item.Id:D}-[0-9a-f]{{16}}\\.png$"));
+        Assert.MatchesRegex(
+            new System.Text.RegularExpressions.Regex($"^{item.Id:D}-[0-9a-f]{{16}}\\.png$"),
+            Services.TextOverlayRenderer.GetCacheFileName(project, item));
     }
 
     [TestMethod]
@@ -290,7 +290,7 @@ public sealed class Task10TextTests
         var externalPath = Path.Combine(
             externalDirectory.FullName,
             Services.TextOverlayRenderer.GetCacheFileName(project, item));
-        await File.WriteAllTextAsync(externalPath, "preserve external overlay");
+        await File.WriteAllTextAsync(externalPath, "preserve external overlay", TestContext.CancellationToken);
         var renderCalled = false;
         var renderer = new Services.TextOverlayRenderer(projectRoot.FullName);
 
@@ -305,7 +305,7 @@ public sealed class Task10TextTests
             CancellationToken.None));
 
         Assert.IsFalse(renderCalled);
-        Assert.AreEqual("preserve external overlay", await File.ReadAllTextAsync(externalPath));
+        Assert.AreEqual("preserve external overlay", await File.ReadAllTextAsync(externalPath, TestContext.CancellationToken));
     }
 
     [TestMethod]
@@ -358,7 +358,7 @@ public sealed class Task10TextTests
         var renderer = new Services.TextOverlayRenderer(directory.Path);
         var cachePath = renderer.GetCachePath(project, item);
         Directory.CreateDirectory(Path.GetDirectoryName(cachePath)!);
-        await WriteTransparentPngAsync(cachePath, 1, 1);
+        await WriteTransparentPngAsync(cachePath, 1, 1, TestContext.CancellationToken);
         var renderCount = 0;
 
         var result = await renderer.GetOrRenderAsync(
@@ -388,7 +388,7 @@ public sealed class Task10TextTests
         var renderer = new Services.TextOverlayRenderer(directory.Path);
         var cachePath = renderer.GetCachePath(project, item);
         Directory.CreateDirectory(Path.GetDirectoryName(cachePath)!);
-        await WriteTransparentPngAsync(cachePath, 2, 2);
+        await WriteTransparentPngAsync(cachePath, 2, 2, TestContext.CancellationToken);
         var renderCount = 0;
 
         var result = await renderer.GetOrRenderAsync(
@@ -421,11 +421,11 @@ public sealed class Task10TextTests
         var renderer = new Services.TextOverlayRenderer(directory.Path);
         var cachePath = renderer.GetCachePath(project, item);
         Directory.CreateDirectory(Path.GetDirectoryName(cachePath)!);
-        await WriteTransparentPngAsync(cachePath, 2, 2);
+        await WriteTransparentPngAsync(cachePath, 2, 2, TestContext.CancellationToken);
         CorruptPng(cachePath, corruption);
         if (corruption is PngCorruption.IhdrCrc or PngCorruption.IdatCrc or PngCorruption.IendCrc)
         {
-            Assert.AreEqual(16, (await ReadPngPixelsAsync(cachePath)).Length, "WIC should still decode the CRC-corrupt fixture.");
+            Assert.HasCount(16, await ReadPngPixelsAsync(cachePath), "WIC should still decode the CRC-corrupt fixture.");
         }
 
         var renderCount = 0;
@@ -462,7 +462,7 @@ public sealed class Task10TextTests
         var renderer = new Services.TextOverlayRenderer(directory.Path);
         var cachePath = renderer.GetCachePath(project, item);
         Directory.CreateDirectory(Path.GetDirectoryName(cachePath)!);
-        await WriteTransparentPngAsync(cachePath, 2, 2);
+        await WriteTransparentPngAsync(cachePath, 2, 2, TestContext.CancellationToken);
         ApplyPngStructureViolation(cachePath, violation);
         var renderCount = 0;
 
@@ -491,7 +491,7 @@ public sealed class Task10TextTests
         var renderer = new Services.TextOverlayRenderer(directory.Path);
         var cachePath = renderer.GetCachePath(project, item);
         Directory.CreateDirectory(Path.GetDirectoryName(cachePath)!);
-        await WriteTransparentPngAsync(cachePath, 2, 2);
+        await WriteTransparentPngAsync(cachePath, 2, 2, TestContext.CancellationToken);
         InsertPngChunk(cachePath, "vpAg"u8, [], "IDAT"u8);
         var renderCount = 0;
 
@@ -524,7 +524,7 @@ public sealed class Task10TextTests
         var renderer = new Services.TextOverlayRenderer(directory.Path);
         var cachePath = renderer.GetCachePath(project, item);
         Directory.CreateDirectory(Path.GetDirectoryName(cachePath)!);
-        await WriteTransparentPngAsync(cachePath, 2, 2);
+        await WriteTransparentPngAsync(cachePath, 2, 2, TestContext.CancellationToken);
         SetIhdrByte(cachePath, ihdrDataOffset, checked((byte)unsupportedValue));
         var renderCount = 0;
 
@@ -595,8 +595,8 @@ public sealed class Task10TextTests
             releaseFirst.TrySetResult(true);
         }
 
-        CollectionAssert.AreEqual(new[] { paths[0], paths[0] }, paths);
-        Assert.AreEqual(4, (await ReadPngPixelsAsync(paths[0])).Length);
+        Assert.AreSequenceEqual(new[] { paths[0], paths[0] }, paths);
+        Assert.HasCount(4, await ReadPngPixelsAsync(paths[0]));
     }
 
     [TestMethod]
@@ -690,13 +690,13 @@ public sealed class Task10TextTests
         for (var index = 0; index < 256; index++)
         {
             var path = Path.Combine(cacheDirectory, $"old-{index:D3}.png");
-            await File.WriteAllBytesAsync(path, [0]);
+            await File.WriteAllBytesAsync(path, [0], TestContext.CancellationToken);
             File.SetLastWriteTimeUtc(path, sharedTimestamp);
         }
         var temporaryPath = Path.Combine(cacheDirectory, "render-in-progress.png.tmp");
         var nonPngPath = Path.Combine(cacheDirectory, "notes.txt");
-        await File.WriteAllTextAsync(temporaryPath, "temporary");
-        await File.WriteAllTextAsync(nonPngPath, "unrelated");
+        await File.WriteAllTextAsync(temporaryPath, "temporary", TestContext.CancellationToken);
+        await File.WriteAllTextAsync(nonPngPath, "unrelated", TestContext.CancellationToken);
 
         var currentPath = await renderer.GetOrRenderAsync(
             project,
@@ -704,7 +704,7 @@ public sealed class Task10TextTests
             (path, cancellationToken) => WriteTransparentPngAsync(path, 1, 1, cancellationToken),
             CancellationToken.None);
 
-        Assert.AreEqual(256, Directory.GetFiles(cacheDirectory, "*.png").Length);
+        Assert.HasCount(256, Directory.GetFiles(cacheDirectory, "*.png"));
         Assert.IsTrue(File.Exists(currentPath));
         Assert.IsTrue(File.Exists(Path.Combine(cacheDirectory, "old-000.png")));
         Assert.IsFalse(File.Exists(Path.Combine(cacheDirectory, "old-255.png")));
@@ -729,7 +729,7 @@ public sealed class Task10TextTests
         for (var index = 0; index < 256; index++)
         {
             var path = Path.Combine(cacheDirectory, $"old-{index:D3}.png");
-            await File.WriteAllBytesAsync(path, [0]);
+            await File.WriteAllBytesAsync(path, [0], TestContext.CancellationToken);
             File.SetLastWriteTimeUtc(path, firstTimestamp.AddMinutes(index));
         }
 
@@ -742,7 +742,7 @@ public sealed class Task10TextTests
                 (path, cancellationToken) => WriteTransparentPngAsync(path, 1, 1, cancellationToken),
                 CancellationToken.None);
 
-            Assert.AreEqual(256, Directory.GetFiles(cacheDirectory, "*.png").Length);
+            Assert.HasCount(256, Directory.GetFiles(cacheDirectory, "*.png"));
             Assert.IsTrue(File.Exists(oldestPath));
             Assert.IsFalse(File.Exists(nextOldestPath));
             Assert.IsTrue(File.Exists(currentPath));
@@ -755,7 +755,7 @@ public sealed class Task10TextTests
         using var directory = new TemporaryDirectory();
         var temporaryPath = Path.Combine(directory.Path, "overlay.tmp");
         var cachePath = Path.Combine(directory.Path, "overlay.png");
-        await File.WriteAllTextAsync(temporaryPath, "rendered bytes");
+        await File.WriteAllTextAsync(temporaryPath, "rendered bytes", TestContext.CancellationToken);
         using var cancellation = new CancellationTokenSource();
         cancellation.Cancel();
 
@@ -830,7 +830,7 @@ public sealed class Task10TextTests
         Assert.IsFalse(viewModel.CanUndo);
     }
 
-    private sealed class TemporaryDirectory : IDisposable
+    private sealed partial class TemporaryDirectory : IDisposable
     {
         public TemporaryDirectory()
         {
@@ -895,9 +895,9 @@ public sealed class Task10TextTests
         var bytes = File.ReadAllBytes(path);
         ReadOnlySpan<byte> marker = "IDAT"u8;
         var markerIndex = bytes.AsSpan().IndexOf(marker);
-        Assert.IsTrue(markerIndex >= 8, "The generated PNG did not contain an IDAT chunk.");
+        Assert.IsGreaterThanOrEqualTo(8, markerIndex, "The generated PNG did not contain an IDAT chunk.");
         var dataIndex = markerIndex + marker.Length;
-        Assert.IsTrue(dataIndex < bytes.Length - 4, "The generated PNG IDAT chunk had no payload.");
+        Assert.IsLessThan(bytes.Length - 4, dataIndex, "The generated PNG IDAT chunk had no payload.");
         File.WriteAllBytes(path, bytes[..(dataIndex + 1)]);
     }
 
@@ -929,7 +929,7 @@ public sealed class Task10TextTests
         {
             var dataLength = BinaryPrimitives.ReadUInt32BigEndian(bytes.AsSpan(offset, 4));
             var chunkEnd = (long)offset + 12 + dataLength;
-            Assert.IsTrue(chunkEnd <= bytes.Length, "The generated PNG contained an invalid chunk boundary.");
+            Assert.IsLessThanOrEqualTo(bytes.Length, chunkEnd, "The generated PNG contained an invalid chunk boundary.");
             if (bytes.AsSpan(offset + 4, 4).SequenceEqual(expectedType))
             {
                 bytes[offset + 8 + (int)dataLength] ^= 0x01;
@@ -996,7 +996,7 @@ public sealed class Task10TextTests
         var bytes = File.ReadAllBytes(path);
         var offset = FindPngChunkOffset(bytes, "IDAT"u8);
         var dataLength = checked((int)BinaryPrimitives.ReadUInt32BigEndian(bytes.AsSpan(offset, 4)));
-        Assert.IsTrue(dataLength > 1, "The generated PNG IDAT chunk could not be split.");
+        Assert.IsGreaterThan(1, dataLength, "The generated PNG IDAT chunk could not be split.");
         var split = dataLength / 2;
         var data = bytes.AsSpan(offset + 8, dataLength);
         var firstIdat = CreatePngChunk("IDAT"u8, data[..split]);
@@ -1016,7 +1016,7 @@ public sealed class Task10TextTests
         {
             var dataLength = BinaryPrimitives.ReadUInt32BigEndian(bytes.Slice(offset, 4));
             var chunkEnd = (long)offset + 12 + dataLength;
-            Assert.IsTrue(chunkEnd <= bytes.Length, "The generated PNG contained an invalid chunk boundary.");
+            Assert.IsLessThanOrEqualTo(bytes.Length, chunkEnd, "The generated PNG contained an invalid chunk boundary.");
             if (bytes.Slice(offset + 4, 4).SequenceEqual(expectedType))
             {
                 return offset;
@@ -1031,7 +1031,7 @@ public sealed class Task10TextTests
 
     private static byte[] CreatePngChunk(ReadOnlySpan<byte> chunkType, ReadOnlySpan<byte> chunkData)
     {
-        Assert.AreEqual(4, chunkType.Length);
+        Assert.HasCount(4, chunkType);
         var chunk = new byte[checked(chunkData.Length + 12)];
         BinaryPrimitives.WriteUInt32BigEndian(chunk, (uint)chunkData.Length);
         chunkType.CopyTo(chunk.AsSpan(4));
@@ -1092,4 +1092,6 @@ public sealed class Task10TextTests
         NonConsecutiveIdat,
         DuplicatePlte
     }
+
+    public TestContext TestContext { get; set; }
 }

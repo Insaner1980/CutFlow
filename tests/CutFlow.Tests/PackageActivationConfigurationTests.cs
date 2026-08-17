@@ -91,13 +91,13 @@ public sealed class PackageActivationConfigurationTests
         var conflictGuard = script.IndexOf("if ($conflictingPackages.Count -gt 0)", StringComparison.Ordinal);
         var registration = script.IndexOf("Add-AppxPackage -Register $manifestPath", StringComparison.Ordinal);
 
-        Assert.IsTrue(conflictGuard >= 0);
-        Assert.IsTrue(registration > conflictGuard);
-        StringAssert.Contains(script, "InstallLocation");
-        StringAssert.Contains(script, "Refusing to register the CutFlow development layout");
-        StringAssert.Contains(script, "StringComparison]::OrdinalIgnoreCase");
-        StringAssert.Contains(readme, ".\\scripts\\Register-CutFlowDevelopment.ps1 -Configuration Release");
-        StringAssert.Contains(readme, "not a signed installer or Microsoft Store package");
+        Assert.IsGreaterThanOrEqualTo(0, conflictGuard);
+        Assert.IsGreaterThan(conflictGuard, registration);
+        Assert.Contains("InstallLocation", script);
+        Assert.Contains("Refusing to register the CutFlow development layout", script);
+        Assert.Contains("StringComparison]::OrdinalIgnoreCase", script);
+        Assert.Contains(".\\scripts\\Register-CutFlowDevelopment.ps1 -Configuration Release", readme);
+        Assert.Contains("not a signed installer or Microsoft Store package", readme);
     }
 
     private static XDocument LoadPackageManifest() =>

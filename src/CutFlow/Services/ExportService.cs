@@ -22,7 +22,7 @@ public sealed class ExportService
     private readonly CompositionService _compositionService;
     private readonly TextOverlayRenderer? _textOverlayRenderer;
     private readonly ExportRenderAsync _renderAsync;
-    private readonly Func<StorageFile, Task> _cleanupAsync;
+    private readonly Func<string, Task> _cleanupAsync;
     private readonly SimpleLogService? _logService;
 
     public ExportService(
@@ -41,7 +41,7 @@ public sealed class ExportService
         CompositionService compositionService,
         TextOverlayRenderer? textOverlayRenderer,
         ExportRenderAsync renderAsync,
-        Func<StorageFile, Task>? cleanupAsync = null,
+        Func<string, Task>? cleanupAsync = null,
         SimpleLogService? logService = null)
     {
         _compositionService = compositionService ?? throw new ArgumentNullException(nameof(compositionService));
@@ -143,20 +143,16 @@ public sealed class ExportService
             ?? throw new InvalidOperationException("The export destination folder is unavailable.");
         var folder = await StorageFolder.GetFolderFromPathAsync(directoryPath);
         cancellationToken.ThrowIfCancellationRequested();
-        StorageFile? staging = null;
+        string? stagingPath = null;
         try
         {
-            string stagingFileName;
-            do
-            {
-                stagingFileName = CreateStagingFileName(destinationPath, Guid.NewGuid());
-            }
-            while (IsSourceMediaPath(
+            var stagingFileName = CreateSafeStagingFileName(
                 project,
                 sourceGuardProject,
-                Path.Combine(directoryPath, stagingFileName)));
-
-            staging = await folder.CreateFileAsync(stagingFileName, CreationCollisionOption.FailIfExists);
+                destinationPath,
+                directoryPath);
+            var staging = await folder.CreateFileAsync(stagingFileName, CreationCollisionOption.FailIfExists);
+            stagingPath = Path.GetFullPath(staging.Path);
             cancellationToken.ThrowIfCancellationRequested();
             var finalValidation = await ExportPreflight.ValidateAsync(
                 project,
@@ -185,34 +181,60 @@ public sealed class ExportService
                 return SourceMediaConflict(destinationPath);
             }
 
-            await CommitAsync(staging.Path, destinationPath);
-            staging = null;
+            await CommitAsync(stagingPath, destinationPath);
+            stagingPath = null;
             progress.Report(100);
             return new ExportResult(ExportResultStatus.Success, destinationPath, string.Empty);
         }
         finally
         {
-            if (staging is not null)
+            if (stagingPath is not null)
             {
-                try
-                {
-                    await _cleanupAsync(staging);
-                }
-                catch (Exception exception) when (exception is not OutOfMemoryException)
-                {
-                    // Secondary cleanup must not replace the primary export failure or cancellation.
-                    if (_logService is not null)
-                    {
-                        _ = _logService.TryWriteAsync(
-                            $"Export staging cleanup failed: {exception.GetType().Name}");
-                    }
-                }
+                await CleanupStagingAsync(stagingPath);
             }
         }
     }
 
-    private static async Task DeleteStagingAsync(StorageFile staging) =>
-        await staging.DeleteAsync(StorageDeleteOption.PermanentDelete);
+    private static string CreateSafeStagingFileName(
+        ProjectDocument project,
+        ProjectDocument sourceGuardProject,
+        string destinationPath,
+        string directoryPath)
+    {
+        string stagingFileName;
+        do
+        {
+            stagingFileName = CreateStagingFileName(destinationPath, Guid.NewGuid());
+        }
+        while (IsSourceMediaPath(
+            project,
+            sourceGuardProject,
+            Path.Combine(directoryPath, stagingFileName)));
+
+        return stagingFileName;
+    }
+
+    private async Task CleanupStagingAsync(string stagingPath)
+    {
+        try
+        {
+            await _cleanupAsync(stagingPath);
+        }
+        catch (Exception exception) when (
+            exception is IOException or UnauthorizedAccessException or ArgumentException or NotSupportedException or System.Security.SecurityException)
+        {
+            // Secondary cleanup must not replace the primary export failure or cancellation.
+            if (_logService is not null)
+            {
+                _ = _logService.TryWriteAsync(
+                    $"Export staging cleanup failed: {exception.GetType().Name}; HRESULT=0x{exception.HResult:X8}",
+                    CancellationToken.None);
+            }
+        }
+    }
+
+    private static Task DeleteStagingAsync(string stagingPath) =>
+        Task.Run(() => File.Delete(stagingPath));
 
     internal static string CreateStagingFileName(string destinationPath, Guid operationId)
     {
@@ -257,32 +279,24 @@ public sealed class ExportService
         IsSourceMediaPath(project, destinationPath) ||
         (!ReferenceEquals(project, sourceGuardProject) && IsSourceMediaPath(sourceGuardProject, destinationPath));
 
-    private static bool IsSourceMediaPath(ProjectDocument project, string destinationPath)
+    private static bool IsSourceMediaPath(ProjectDocument project, string destinationPath) =>
+        project.Assets
+            .Select(asset => asset.SourcePath)
+            .Any(sourcePath => IsSameFullPath(sourcePath, destinationPath));
+
+    private static bool IsSameFullPath(string? sourcePath, string destinationPath)
     {
-        foreach (var asset in project.Assets)
+        if (string.IsNullOrWhiteSpace(sourcePath)) return false;
+
+        try
         {
-            if (string.IsNullOrWhiteSpace(asset.SourcePath))
-            {
-                continue;
-            }
-
-            try
-            {
-                if (string.Equals(
-                    Path.GetFullPath(asset.SourcePath),
-                    destinationPath,
-                    StringComparison.OrdinalIgnoreCase))
-                {
-                    return true;
-                }
-            }
-            catch (Exception exception) when (exception is ArgumentException or NotSupportedException or PathTooLongException)
-            {
-                // Invalid source paths are reported by preflight as missing media.
-            }
+            return string.Equals(Path.GetFullPath(sourcePath), destinationPath, StringComparison.OrdinalIgnoreCase);
         }
-
-        return false;
+        catch (Exception exception) when (exception is ArgumentException or NotSupportedException or PathTooLongException)
+        {
+            // Invalid source paths are reported by preflight as missing media.
+            return false;
+        }
     }
 
     private static async Task<TranscodeFailureReason> RenderNativeAsync(
@@ -373,19 +387,35 @@ public static class ExportPreflight
             return new ExportPreflightResult(false, "Add at least one visual item to V1 before exporting.", []);
         }
 
-        var assets = project.Assets.ToDictionary(asset => asset.Id);
-        var missingAssets = new List<(Guid Id, ProjectAsset? Asset, string Name)>();
-        var referencedVideoAssetIds = project.Settings.VideoTrackVisible
+        var missingAssets = FindMissingAssets(project, refreshMissingFlags, sourceIsCurrent, cancellationToken);
+        var missing = FormatMissingAssets(missingAssets);
+        return missing.Count == 0
+            ? new ExportPreflightResult(true, string.Empty, [])
+            : new ExportPreflightResult(false, MissingMediaMessage(missing), missing);
+    }
+
+    private static IEnumerable<Guid> ReferencedAssetIds(ProjectDocument project)
+    {
+        var videoAssetIds = project.Settings.VideoTrackVisible
             ? project.VideoItems
                 .Where(item => item.DurationMilliseconds > 0)
                 .Select(item => item.AssetId)
             : Enumerable.Empty<Guid>();
-        var referencedAssetIds = referencedVideoAssetIds
-            .Concat(project.AudioItems
-                .Where(item => item.DurationMilliseconds > 0)
-                .Select(item => item.AssetId));
+        return videoAssetIds.Concat(project.AudioItems
+            .Where(item => item.DurationMilliseconds > 0)
+            .Select(item => item.AssetId));
+    }
+
+    private static List<(Guid Id, ProjectAsset? Asset, string Name)> FindMissingAssets(
+        ProjectDocument project,
+        bool refreshMissingFlags,
+        Func<ProjectAsset, bool> sourceIsCurrent,
+        CancellationToken cancellationToken)
+    {
+        var assets = project.Assets.ToDictionary(asset => asset.Id);
+        var missingAssets = new List<(Guid Id, ProjectAsset? Asset, string Name)>();
         var seenAssetIds = new HashSet<Guid>();
-        foreach (var assetId in referencedAssetIds)
+        foreach (var assetId in ReferencedAssetIds(project))
         {
             cancellationToken.ThrowIfCancellationRequested();
             if (!seenAssetIds.Add(assetId)) continue;
@@ -401,6 +431,11 @@ public static class ExportPreflight
             missingAssets.Add((assetId, asset, MissingAssetName(asset, assetId)));
         }
 
+        return missingAssets;
+    }
+
+    private static List<string> FormatMissingAssets(List<(Guid Id, ProjectAsset? Asset, string Name)> missingAssets)
+    {
         var sharedNames = missingAssets
             .GroupBy(item => item.Name, StringComparer.OrdinalIgnoreCase)
             .Where(group => group.Count() > 1)
@@ -416,9 +451,7 @@ public static class ExportPreflight
             if (missingNames.Add(name)) missing.Add(name);
         }
 
-        return missing.Count == 0
-            ? new ExportPreflightResult(true, string.Empty, [])
-            : new ExportPreflightResult(false, MissingMediaMessage(missing), missing);
+        return missing;
     }
 
     private static string MissingAssetName(ProjectAsset? asset, Guid assetId)
@@ -442,7 +475,7 @@ public static class ExportPreflight
         return TruncateMiddle(NormalizeDisplayText(asset.SourcePath), MaximumMissingAssetPathLength);
     }
 
-    private static string MissingMediaMessage(IReadOnlyList<string> missing)
+    private static string MissingMediaMessage(List<string> missing)
     {
         var visible = string.Join(", ", missing.Take(MaximumReportedMissingAssets));
         if (missing.Count > MaximumReportedMissingAssets)
@@ -565,6 +598,15 @@ public static class ExportFailureMapper
         TranscodeFailureReason.Unknown => "The encoder reported an unknown transcoding error.",
         TranscodeFailureReason.InvalidProfile => "The selected encoding profile is invalid.",
         TranscodeFailureReason.CodecNotFound => "The required H.264/AAC codec is unavailable.",
-        _ => $"The encoder reported an unsupported failure reason ({reason})."
+        _ => "The encoder reported an unrecognized transcoding error."
+    };
+
+    internal static string? GetExceptionMessage(Exception exception) => exception switch
+    {
+        UnauthorizedAccessException => $"{AppInfo.ProductName} could not write to that location. Choose another folder and try again.",
+        IOException => "The output file could not be created. Check the destination and available disk space, then try again.",
+        ArgumentException or NotSupportedException => "The output path is invalid. Choose another filename or folder.",
+        System.Runtime.InteropServices.COMException => "Windows could not encode the project. Check the source files and try another output location.",
+        _ => null
     };
 }

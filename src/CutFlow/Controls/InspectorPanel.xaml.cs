@@ -5,6 +5,7 @@ using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Controls;
 using Microsoft.UI.Xaml.Controls.Primitives;
 using Microsoft.UI.Xaml.Input;
+using Microsoft.UI.Xaml.Media;
 using Microsoft.UI.Input;
 using Windows.System;
 using Windows.UI.Core;
@@ -13,6 +14,8 @@ namespace CutFlow.Controls;
 
 public sealed partial class InspectorPanel : UserControl
 {
+    private const string UnknownValue = "Unknown";
+
     private ProjectDocument? _project;
     private EditorSelection _selection = EditorSelection.None;
     private bool _updating;
@@ -42,104 +45,174 @@ public sealed partial class InspectorPanel : UserControl
 
     public void FocusTextContent() => TextContentBox.Focus(FocusState.Programmatic);
 
-    private void Refresh()
+    internal InspectorFocusSnapshot? CaptureFocus()
     {
-        if (_project is null)
+        if (XamlRoot is null || FocusManager.GetFocusedElement(XamlRoot) is not DependencyObject focusedElement)
         {
-            return;
+            return null;
         }
 
+        for (var current = focusedElement; current is not null && !ReferenceEquals(current, this); current = VisualTreeHelper.GetParent(current))
+        {
+            if (current is not Control control || string.IsNullOrEmpty(control.Name) ||
+                !ReferenceEquals(FindName(control.Name), control))
+            {
+                continue;
+            }
+
+            return control is TextBox textBox
+                ? new InspectorFocusSnapshot(control.Name, textBox.Text, textBox.SelectionStart, textBox.SelectionLength)
+                : new InspectorFocusSnapshot(control.Name);
+        }
+
+        return null;
+    }
+
+    internal bool RestoreFocus(InspectorFocusSnapshot snapshot)
+    {
+        if (FindName(snapshot.ControlName) is not Control control)
+        {
+            return false;
+        }
+
+        if (snapshot.Text is null || control is not TextBox textBox)
+        {
+            return control.Focus(FocusState.Programmatic);
+        }
+
+        textBox.Text = snapshot.Text;
+        if (!textBox.Focus(FocusState.Programmatic)) return false;
+
+        var selectionStart = Math.Clamp(snapshot.SelectionStart, 0, textBox.Text.Length);
+        var selectionLength = Math.Clamp(snapshot.SelectionLength, 0, textBox.Text.Length - selectionStart);
+        textBox.Select(selectionStart, selectionLength);
+        return true;
+    }
+
+    private void Refresh()
+    {
+        if (_project is null) return;
         _updating = true;
+        HidePanels();
+        if (!TryShowVideoSelection() && !TryShowAudioSelection() && !TryShowTextSelection())
+        {
+            ShowProjectSettings();
+        }
+        _updating = false;
+    }
+
+    private void HidePanels()
+    {
         ValidationText.Visibility = Visibility.Collapsed;
         ProjectPanel.Visibility = Visibility.Collapsed;
         VideoPanel.Visibility = Visibility.Collapsed;
         ImagePanel.Visibility = Visibility.Collapsed;
         AudioPanel.Visibility = Visibility.Collapsed;
         TextPanel.Visibility = Visibility.Collapsed;
+    }
 
-        if (_selection is { Kind: EditorSelectionKind.VideoItem, ItemId: Guid videoId } &&
-            _project.VideoItems.FirstOrDefault(item => item.Id == videoId) is { } video)
+    private bool TryShowVideoSelection()
+    {
+        if (_selection is not { Kind: EditorSelectionKind.VideoItem, ItemId: Guid videoId } ||
+            _project!.VideoItems.FirstOrDefault(item => item.Id == videoId) is not { } video)
         {
-            var asset = _project.Assets.FirstOrDefault(candidate => candidate.Id == video.AssetId);
-            if (asset?.Kind == ProjectAssetKind.Image)
-            {
-                InspectorTitle.Text = "Image";
-                InspectorSubtitle.Text = "Timeline image properties";
-                ImagePanel.Visibility = Visibility.Visible;
-                ImageFileNameText.Text = asset.FileName;
-                ImageResolutionText.Text = FormatResolution(asset);
-                ImageDurationBox.Text = FormatSeconds(video.DurationMilliseconds);
-            }
-            else
-            {
-                InspectorTitle.Text = "Video";
-                InspectorSubtitle.Text = "Source and audio properties";
-                VideoPanel.Visibility = Visibility.Visible;
-                VideoFileNameText.Text = asset?.FileName ?? "Unknown media";
-                VideoResolutionText.Text = asset is null ? "Unknown" : FormatResolution(asset);
-                VideoSourceDurationText.Text = asset is null ? "Unknown" : FormatDuration(asset.DurationMilliseconds);
-                VideoSourceInBox.Text = FormatSeconds(video.SourceInMilliseconds);
-                VideoSourceOutBox.Text = FormatSeconds(video.SourceOutMilliseconds);
-                VideoTimelineDurationText.Text = FormatDuration(video.DurationMilliseconds);
-                VideoVolumeSlider.Value = video.Volume * 100;
-                VideoMuteBox.IsChecked = video.IsMuted;
-            }
+            return false;
         }
-        else if (_selection is { Kind: EditorSelectionKind.AudioItem, ItemId: Guid audioId } &&
-            _project.AudioItems.FirstOrDefault(item => item.Id == audioId) is { } audio)
+
+        var asset = _project.Assets.FirstOrDefault(candidate => candidate.Id == video.AssetId);
+        if (asset?.Kind == ProjectAssetKind.Image)
         {
-            var asset = _project.Assets.FirstOrDefault(candidate => candidate.Id == audio.AssetId);
-            InspectorTitle.Text = "Audio";
-            InspectorSubtitle.Text = "Timeline audio properties";
-            AudioPanel.Visibility = Visibility.Visible;
-            AudioFileNameText.Text = asset?.FileName ?? "Unknown audio";
-            AudioSourceDurationText.Text = asset is null ? "Unknown" : FormatDuration(asset.DurationMilliseconds);
-            AudioStartBox.Text = FormatSeconds(audio.StartMilliseconds);
-            AudioSourceInBox.Text = FormatSeconds(audio.SourceInMilliseconds);
-            AudioSourceOutBox.Text = FormatSeconds(audio.SourceOutMilliseconds);
-            AudioVolumeSlider.Value = audio.Volume * 100;
-            AudioMuteBox.IsChecked = audio.IsMuted;
-        }
-        else if (_selection is { Kind: EditorSelectionKind.TextItem, ItemId: Guid textId } &&
-            _project.TextItems.FirstOrDefault(item => item.Id == textId) is { } text)
-        {
-            InspectorTitle.Text = "Text";
-            InspectorSubtitle.Text = "Content and timeline properties";
-            TextPanel.Visibility = Visibility.Visible;
-            TextContentBox.Text = text.Text;
-            TextFontFamilyBox.SelectedItem = TextStyle.NormalizeFontFamily(text.FontFamily);
-            TextFontSizeBox.Text = text.FontSize.ToString("0.##", CultureInfo.CurrentCulture);
-            TextBoldButton.IsChecked = TextStyle.IsBold(text.FontWeight);
-            TextItalicButton.IsChecked = text.IsItalic;
-            TextColorBox.Text = text.TextColor;
-            TextBackgroundBox.Text = text.BackgroundColor;
-            TextBackgroundEnabledToggle.IsOn = text.BackgroundEnabled;
-            TextBackgroundBox.IsEnabled = text.BackgroundEnabled;
-            TextOpacitySlider.Value = TextStyle.ClampOpacity(text.Opacity) * 100;
-            TextOpacityValueText.Text = $"{TextOpacitySlider.Value:0}%";
-            TextHorizontalPositionBox.Value = TextStyle.ClampNormalized(text.NormalizedX);
-            TextVerticalPositionBox.Value = TextStyle.ClampNormalized(text.NormalizedY);
-            SetTextAlignmentButtons(text.Alignment);
-            TextStartBox.Text = FormatSeconds(text.StartMilliseconds);
-            TextDurationBox.Text = FormatSeconds(text.DurationMilliseconds);
+            InspectorTitle.Text = "Image";
+            InspectorSubtitle.Text = "Timeline image properties";
+            ImagePanel.Visibility = Visibility.Visible;
+            ImageFileNameText.Text = asset.FileName;
+            ImageResolutionText.Text = FormatResolution(asset);
+            ImageDurationBox.Text = FormatSeconds(video.DurationMilliseconds);
         }
         else
         {
-            InspectorTitle.Text = "Project";
-            InspectorSubtitle.Text = "Canvas settings";
-            ProjectPanel.Visibility = Visibility.Visible;
-            ProjectNameText.Text = _project.Name;
-            ResolutionText.Text = $"{_project.Settings.Width} × {_project.Settings.Height}";
-            BackgroundColorBox.Text = _project.Settings.BackgroundColor;
-            AspectRatioBox.SelectedIndex = _project.Settings.AspectRatio switch
-            {
-                AspectRatioPreset.Portrait9By16 => 1,
-                AspectRatioPreset.Square1By1 => 2,
-                _ => 0
-            };
+            InspectorTitle.Text = "Video";
+            InspectorSubtitle.Text = "Source and audio properties";
+            VideoPanel.Visibility = Visibility.Visible;
+            VideoFileNameText.Text = asset?.FileName ?? "Unknown media";
+            VideoResolutionText.Text = asset is null ? UnknownValue : FormatResolution(asset);
+            VideoSourceDurationText.Text = asset is null ? UnknownValue : FormatDuration(asset.DurationMilliseconds);
+            VideoSourceInBox.Text = FormatSeconds(video.SourceInMilliseconds);
+            VideoSourceOutBox.Text = FormatSeconds(video.SourceOutMilliseconds);
+            VideoTimelineDurationText.Text = FormatDuration(video.DurationMilliseconds);
+            VideoVolumeSlider.Value = video.Volume * 100;
+            VideoMuteBox.IsChecked = video.IsMuted;
         }
 
-        _updating = false;
+        return true;
+    }
+
+    private bool TryShowAudioSelection()
+    {
+        if (_selection is not { Kind: EditorSelectionKind.AudioItem, ItemId: Guid audioId } ||
+            _project!.AudioItems.FirstOrDefault(item => item.Id == audioId) is not { } audio)
+        {
+            return false;
+        }
+
+        var asset = _project.Assets.FirstOrDefault(candidate => candidate.Id == audio.AssetId);
+        InspectorTitle.Text = "Audio";
+        InspectorSubtitle.Text = "Timeline audio properties";
+        AudioPanel.Visibility = Visibility.Visible;
+        AudioFileNameText.Text = asset?.FileName ?? "Unknown audio";
+        AudioSourceDurationText.Text = asset is null ? UnknownValue : FormatDuration(asset.DurationMilliseconds);
+        AudioStartBox.Text = FormatSeconds(audio.StartMilliseconds);
+        AudioSourceInBox.Text = FormatSeconds(audio.SourceInMilliseconds);
+        AudioSourceOutBox.Text = FormatSeconds(audio.SourceOutMilliseconds);
+        AudioVolumeSlider.Value = audio.Volume * 100;
+        AudioMuteBox.IsChecked = audio.IsMuted;
+        return true;
+    }
+
+    private bool TryShowTextSelection()
+    {
+        if (_selection is not { Kind: EditorSelectionKind.TextItem, ItemId: Guid textId } ||
+            _project!.TextItems.FirstOrDefault(item => item.Id == textId) is not { } text)
+        {
+            return false;
+        }
+
+        InspectorTitle.Text = "Text";
+        InspectorSubtitle.Text = "Content and timeline properties";
+        TextPanel.Visibility = Visibility.Visible;
+        TextContentBox.Text = text.Text;
+        TextFontFamilyBox.SelectedItem = TextStyle.NormalizeFontFamily(text.FontFamily);
+        TextFontSizeBox.Text = text.FontSize.ToString("0.##", CultureInfo.CurrentCulture);
+        TextBoldButton.IsChecked = TextStyle.IsBold(text.FontWeight);
+        TextItalicButton.IsChecked = text.IsItalic;
+        TextColorBox.Text = text.TextColor;
+        TextBackgroundBox.Text = text.BackgroundColor;
+        TextBackgroundEnabledToggle.IsOn = text.BackgroundEnabled;
+        TextBackgroundBox.IsEnabled = text.BackgroundEnabled;
+        TextOpacitySlider.Value = TextStyle.ClampOpacity(text.Opacity) * 100;
+        TextOpacityValueText.Text = $"{TextOpacitySlider.Value:0}%";
+        TextHorizontalPositionBox.Value = TextStyle.ClampNormalized(text.NormalizedX);
+        TextVerticalPositionBox.Value = TextStyle.ClampNormalized(text.NormalizedY);
+        SetTextAlignmentButtons(text.Alignment);
+        TextStartBox.Text = FormatSeconds(text.StartMilliseconds);
+        TextDurationBox.Text = FormatSeconds(text.DurationMilliseconds);
+        return true;
+    }
+
+    private void ShowProjectSettings()
+    {
+        InspectorTitle.Text = "Project";
+        InspectorSubtitle.Text = "Canvas settings";
+        ProjectPanel.Visibility = Visibility.Visible;
+        ProjectNameText.Text = _project!.Name;
+        ResolutionText.Text = $"{_project.Settings.Width} × {_project.Settings.Height}";
+        BackgroundColorBox.Text = _project.Settings.BackgroundColor;
+        AspectRatioBox.SelectedIndex = _project.Settings.AspectRatio switch
+        {
+            AspectRatioPreset.Portrait9By16 => 1,
+            AspectRatioPreset.Square1By1 => 2,
+            _ => 0
+        };
     }
 
     private void AspectRatioBox_SelectionChanged(object sender, SelectionChangedEventArgs e)
@@ -150,7 +223,7 @@ public sealed partial class InspectorPanel : UserControl
             return;
         }
 
-        RaiseEdit(new InspectorEditCommittedEventArgs(InspectorEditKind.SetAspectRatio, aspectRatio: preset));
+        RaiseEdit(new InspectorEditCommittedEventArgs(InspectorEditKind.SetAspectRatio) { AspectRatio = preset });
     }
 
     private void EditBox_KeyDown(object sender, KeyRoutedEventArgs e)
@@ -188,47 +261,65 @@ public sealed partial class InspectorPanel : UserControl
         }
 
         ValidationText.Visibility = Visibility.Collapsed;
-        if (tag == "BackgroundColor")
+        switch (tag)
         {
-            if (!TimelineInput.IsOpaqueArgb(textBox.Text))
-            {
-                ShowValidation("Enter an opaque ARGB color in #FFRRGGBB form.");
-                return;
-            }
+            case "BackgroundColor":
+                CommitBackgroundColor(textBox.Text);
+                break;
+            case "TextContent":
+                RaiseSelectedEdit(InspectorEditKind.SetTextContent, textValue: textBox.Text);
+                break;
+            case "TextColor":
+            case "TextBackground":
+                CommitTextColor(tag, textBox.Text);
+                break;
+            case "TextFontSize":
+                CommitTextFontSize(textBox.Text);
+                break;
+            default:
+                CommitTimelineValue(tag, textBox.Text);
+                break;
+        }
+    }
 
-            RaiseEdit(new InspectorEditCommittedEventArgs(InspectorEditKind.SetBackgroundColor, textValue: textBox.Text.ToUpperInvariant()));
+    private void CommitBackgroundColor(string value)
+    {
+        if (!TimelineInput.IsOpaqueArgb(value))
+        {
+            ShowValidation("Enter an opaque ARGB color in #FFRRGGBB form.");
             return;
         }
 
-        if (tag == "TextContent")
+        RaiseEdit(new InspectorEditCommittedEventArgs(InspectorEditKind.SetBackgroundColor) { TextValue = value.ToUpperInvariant() });
+    }
+
+    private void CommitTextColor(string tag, string value)
+    {
+        if (!TextStyle.IsArgb(value))
         {
-            RaiseSelectedEdit(InspectorEditKind.SetTextContent, textValue: textBox.Text);
+            ShowValidation("Enter an ARGB color in #AARRGGBB form.");
             return;
         }
 
-        if (tag is "TextColor" or "TextBackground")
+        var kind = tag == "TextColor" ? InspectorEditKind.SetTextColor : InspectorEditKind.SetTextBackground;
+        RaiseSelectedEdit(kind, textValue: value.ToUpperInvariant());
+    }
+
+    private void CommitTextFontSize(string value)
+    {
+        if (!double.TryParse(value, NumberStyles.Float, CultureInfo.CurrentCulture, out var size) ||
+            !double.IsFinite(size) || size is < 8 or > 400)
         {
-            if (!TextStyle.IsArgb(textBox.Text))
-            {
-                ShowValidation("Enter an ARGB color in #AARRGGBB form.");
-                return;
-            }
-            RaiseSelectedEdit(tag == "TextColor" ? InspectorEditKind.SetTextColor : InspectorEditKind.SetTextBackground, textValue: textBox.Text.ToUpperInvariant());
+            ShowValidation("Enter a font size from 8 to 400.");
             return;
         }
 
-        if (tag == "TextFontSize")
-        {
-            if (!double.TryParse(textBox.Text, NumberStyles.Float, CultureInfo.CurrentCulture, out var size) || !double.IsFinite(size) || size is < 8 or > 400)
-            {
-                ShowValidation("Enter a font size from 8 to 400.");
-                return;
-            }
-            RaiseSelectedEdit(InspectorEditKind.SetTextFontSize, doubleValue: size);
-            return;
-        }
+        RaiseSelectedEdit(InspectorEditKind.SetTextFontSize, doubleValue: size);
+    }
 
-        if (!TimelineInput.TryParseSeconds(textBox.Text, out var milliseconds))
+    private void CommitTimelineValue(string tag, string value)
+    {
+        if (!TimelineInput.TryParseSeconds(value, out var milliseconds))
         {
             ShowValidation("Enter a value from 0 seconds to 24 hours.");
             return;
@@ -406,7 +497,15 @@ public sealed partial class InspectorPanel : UserControl
     {
         if (_selection.ItemId is Guid itemId)
         {
-            RaiseEdit(new InspectorEditCommittedEventArgs(kind, itemId, longValue, doubleValue, boolValue, textValue, textAlignment: textAlignment));
+            RaiseEdit(new InspectorEditCommittedEventArgs(kind)
+            {
+                ItemId = itemId,
+                LongValue = longValue,
+                DoubleValue = doubleValue,
+                BoolValue = boolValue,
+                TextValue = textValue,
+                TextAlignment = textAlignment
+            });
         }
     }
 
@@ -421,7 +520,7 @@ public sealed partial class InspectorPanel : UserControl
         ValidationText.Visibility = Visibility.Visible;
     }
 
-    private static string FormatResolution(ProjectAsset asset) => asset.Width > 0 && asset.Height > 0 ? $"{asset.Width} × {asset.Height}" : "Unknown";
+    private static string FormatResolution(ProjectAsset asset) => asset.Width > 0 && asset.Height > 0 ? $"{asset.Width} × {asset.Height}" : UnknownValue;
     private static string FormatDuration(long milliseconds) => $"{Math.Max(0, milliseconds) / 1_000d:0.###} s";
     private static string FormatSeconds(long milliseconds) => (Math.Max(0, milliseconds) / 1_000d).ToString("0.###", CultureInfo.CurrentCulture);
     private static bool IsControlDown() =>
@@ -462,24 +561,16 @@ public enum InspectorEditKind
     ResetTextStyle
 }
 
-public sealed class InspectorEditCommittedEventArgs(
-    InspectorEditKind kind,
-    Guid? itemId = null,
-    long longValue = 0,
-    double doubleValue = 0,
-    bool boolValue = false,
-    string? textValue = null,
-    AspectRatioPreset aspectRatio = AspectRatioPreset.Landscape16By9,
-    TextHorizontalAlignment textAlignment = TextHorizontalAlignment.Center) : EventArgs
+public sealed class InspectorEditCommittedEventArgs(InspectorEditKind kind) : EventArgs
 {
     public InspectorEditKind Kind { get; } = kind;
-    public Guid? ItemId { get; } = itemId;
-    public long LongValue { get; } = longValue;
-    public double DoubleValue { get; } = doubleValue;
-    public bool BoolValue { get; } = boolValue;
-    public string? TextValue { get; } = textValue;
-    public AspectRatioPreset AspectRatio { get; } = aspectRatio;
-    public TextHorizontalAlignment TextAlignment { get; } = textAlignment;
+    public Guid? ItemId { get; init; }
+    public long LongValue { get; init; }
+    public double DoubleValue { get; init; }
+    public bool BoolValue { get; init; }
+    public string? TextValue { get; init; }
+    public AspectRatioPreset AspectRatio { get; init; } = AspectRatioPreset.Landscape16By9;
+    public TextHorizontalAlignment TextAlignment { get; init; } = TextHorizontalAlignment.Center;
 }
 
 public static class InspectorCommitGesture
@@ -496,3 +587,9 @@ internal static class InspectorEditBoundary
         refreshCanonicalState();
     }
 }
+
+internal sealed record InspectorFocusSnapshot(
+    string ControlName,
+    string? Text = null,
+    int SelectionStart = 0,
+    int SelectionLength = 0);

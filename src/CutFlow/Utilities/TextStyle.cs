@@ -8,6 +8,7 @@ namespace CutFlow.Utilities;
 
 public static class TextStyle
 {
+    private static readonly System.Buffers.SearchValues<char> s_myChars = System.Buffers.SearchValues.Create("0123456789abcdefABCDEF");
     internal const double MaximumTextWidthFraction = 0.9;
     internal const double BackgroundHorizontalPadding = 18;
     internal const double BackgroundVerticalPadding = 8;
@@ -20,13 +21,15 @@ public static class TextStyle
     public static IReadOnlyList<string> SupportedFontFamilies => FontFamilies;
 
     public static bool IsArgb(string? value) =>
-        value is { Length: 9 } && value[0] == '#' && value.AsSpan(1).IndexOfAnyExcept("0123456789abcdefABCDEF") < 0;
+        value is { Length: 9 } && value[0] == '#' && value.AsSpan(1).IndexOfAnyExcept(s_myChars) < 0;
 
     public static double ClampNormalized(double value, double fallback = 0.5)
     {
-        var normalized = double.IsFinite(value)
-            ? value
-            : double.IsFinite(fallback) ? fallback : 0.5;
+        var normalized = value;
+        if (!double.IsFinite(normalized))
+        {
+            normalized = double.IsFinite(fallback) ? fallback : 0.5;
+        }
         if (normalized <= 0)
         {
             return 0;

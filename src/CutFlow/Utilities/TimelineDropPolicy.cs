@@ -41,15 +41,10 @@ internal static class TimelineDropPolicy
         var audioStart = textStart + NonNegative(textHeight);
         var contentEnd = audioStart + NonNegative(audioHeight);
 
-        return pointerY < videoStart
-            ? TimelineTrackKind.None
-            : pointerY < textStart
-                ? TimelineTrackKind.Video
-                : pointerY < audioStart
-                    ? TimelineTrackKind.Text
-                    : pointerY < contentEnd
-                        ? TimelineTrackKind.Audio
-                        : TimelineTrackKind.None;
+        if (pointerY < videoStart) return TimelineTrackKind.None;
+        if (pointerY < textStart) return TimelineTrackKind.Video;
+        if (pointerY < audioStart) return TimelineTrackKind.Text;
+        return pointerY < contentEnd ? TimelineTrackKind.Audio : TimelineTrackKind.None;
     }
 
     public static TimelineDropDecision Evaluate(
@@ -167,7 +162,7 @@ internal static class MediaAssetDragPayload
 
     public static bool TryParseAssetId(object? payload, out Guid assetId)
     {
-        assetId = default;
+        assetId = Guid.Empty;
         return payload is string text && Guid.TryParseExact(text, "D", out assetId);
     }
 }

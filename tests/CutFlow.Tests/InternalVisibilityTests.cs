@@ -9,6 +9,8 @@ namespace CutFlow.Tests;
 [TestClass]
 public sealed class InternalVisibilityTests
 {
+    private static readonly string[] expected = new[] { "CutFlow.Tests" };
+
     [TestMethod]
     public void AppAssembly_ExposesInternalsOnlyToTheIntendedTestAssembly()
     {
@@ -17,7 +19,7 @@ public sealed class InternalVisibilityTests
             .Select(attribute => attribute.AssemblyName)
             .ToArray();
 
-        CollectionAssert.AreEqual(new[] { "CutFlow.Tests" }, friendAssemblies);
+        Assert.AreSequenceEqual(expected, friendAssemblies);
     }
 
     [TestMethod]

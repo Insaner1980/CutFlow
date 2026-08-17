@@ -1,3 +1,4 @@
+using System.Diagnostics.CodeAnalysis;
 using CutFlow.Models;
 using Windows.Media.Editing;
 using Windows.Storage;
@@ -12,6 +13,7 @@ public sealed class CompositionService
         CancellationToken cancellationToken) =>
         BuildAsync(project, null, cancellationToken);
 
+    [SuppressMessage("Performance", "CA1822:Mark members as static", Justification = "The instance method preserves the service API used by composition consumers.")]
     public async Task<CompositionBuildResult> BuildAsync(
         ProjectDocument project,
         TextOverlayRenderer? textOverlayRenderer,
@@ -26,6 +28,8 @@ public sealed class CompositionService
             cancellationToken);
     }
 
+    [SuppressMessage("Performance", "CA1822:Mark members as static", Justification = "The instance overload preserves the injected composition service seam used by export.")]
+    [SuppressMessage("Major Code Smell", "S2325:Methods and properties that don't access instance data should be static", Justification = "The instance overload preserves the injected composition service seam used by export.")]
     internal async Task<CompositionBuildResult> BuildAsync(
         ProjectDocument project,
         TextOverlayRenderer? textOverlayRenderer,
@@ -39,50 +43,79 @@ public sealed class CompositionService
         var plan = CompositionPlan.Create(project);
         var composition = new MediaComposition();
         var errors = plan.Errors.ToList();
-        foreach (var visual in plan.Visuals)
+        await AddVisualsAsync(composition, plan.Visuals, errors, cancellationToken);
+        await AddAudioTracksAsync(composition, plan.AudioTracks, errors, cancellationToken);
+        await AddTextOverlaysAsync(
+            composition,
+            project,
+            plan.TextOverlays,
+            textOverlayRenderer,
+            overlayPosition,
+            errors,
+            cancellationToken);
+
+        cancellationToken.ThrowIfCancellationRequested();
+        return new CompositionBuildResult(composition, errors, project.VideoItems.Count > 0);
+    }
+
+    private static async Task AddVisualsAsync(
+        MediaComposition composition,
+        IEnumerable<CompositionVisualPlan> visuals,
+        List<string> errors,
+        CancellationToken cancellationToken)
+    {
+        foreach (var visual in visuals)
         {
             cancellationToken.ThrowIfCancellationRequested();
-            MediaClip clip;
-            if (visual.Kind == CompositionVisualKind.Filler)
-            {
-                clip = CreateBlackClip(visual.DurationMilliseconds);
-            }
-            else
-            {
-                try
-                {
-                    var file = await StorageFile.GetFileFromPathAsync(visual.SourcePath);
-                    cancellationToken.ThrowIfCancellationRequested();
-                    clip = visual.Kind == CompositionVisualKind.Image
-                        ? await MediaClip.CreateFromImageFileAsync(file, ToTimeSpan(visual.DurationMilliseconds))
-                        : await MediaClip.CreateFromFileAsync(file);
-                    cancellationToken.ThrowIfCancellationRequested();
-                    if (visual.Kind == CompositionVisualKind.Video)
-                    {
-                        ApplyTrim(clip, visual.SourceInMilliseconds, visual.SourceOutMilliseconds);
-                        if (Math.Abs((clip.TrimmedDuration - ToTimeSpan(visual.DurationMilliseconds)).TotalMilliseconds) > 2)
-                        {
-                            throw new InvalidDataException("The source range does not match the timeline duration.");
-                        }
-                    }
+            composition.Clips.Add(await CreateVisualClipAsync(visual, errors, cancellationToken));
+        }
+    }
 
-                    clip.Volume = visual.Volume;
-                }
-                catch (OperationCanceledException)
-                {
-                    throw;
-                }
-                catch (Exception exception) when (IsItemFailure(exception))
-                {
-                    errors.Add($"'{visual.AssetName}' could not be loaded and was replaced with black video.");
-                    clip = CreateBlackClip(visual.DurationMilliseconds);
-                }
-            }
-
-            composition.Clips.Add(clip);
+    private static async Task<MediaClip> CreateVisualClipAsync(
+        CompositionVisualPlan visual,
+        List<string> errors,
+        CancellationToken cancellationToken)
+    {
+        if (visual.Kind == CompositionVisualKind.Filler)
+        {
+            return CreateBlackClip(visual.DurationMilliseconds);
         }
 
-        foreach (var audio in plan.AudioTracks)
+        try
+        {
+            var file = await StorageFile.GetFileFromPathAsync(visual.SourcePath);
+            cancellationToken.ThrowIfCancellationRequested();
+            var clip = visual.Kind == CompositionVisualKind.Image
+                ? await MediaClip.CreateFromImageFileAsync(file, ToTimeSpan(visual.DurationMilliseconds))
+                : await MediaClip.CreateFromFileAsync(file);
+            cancellationToken.ThrowIfCancellationRequested();
+            if (visual.Kind == CompositionVisualKind.Video)
+            {
+                ApplyTrim(clip, visual.SourceInMilliseconds, visual.SourceOutMilliseconds);
+                EnsureDurationMatches(clip.TrimmedDuration, visual.DurationMilliseconds);
+            }
+
+            clip.Volume = visual.Volume;
+            return clip;
+        }
+        catch (OperationCanceledException)
+        {
+            throw;
+        }
+        catch (Exception exception) when (IsItemFailure(exception))
+        {
+            errors.Add($"'{visual.AssetName}' could not be loaded and was replaced with black video.");
+            return CreateBlackClip(visual.DurationMilliseconds);
+        }
+    }
+
+    private static async Task AddAudioTracksAsync(
+        MediaComposition composition,
+        IEnumerable<CompositionAudioPlan> audioTracks,
+        List<string> errors,
+        CancellationToken cancellationToken)
+    {
+        foreach (var audio in audioTracks)
         {
             cancellationToken.ThrowIfCancellationRequested();
             try
@@ -92,11 +125,9 @@ public sealed class CompositionService
                 var track = await BackgroundAudioTrack.CreateFromFileAsync(file);
                 cancellationToken.ThrowIfCancellationRequested();
                 ApplyTrim(track, audio.SourceInMilliseconds, audio.SourceOutMilliseconds);
-                var requestedDuration = ToTimeSpan(audio.SourceOutMilliseconds - audio.SourceInMilliseconds);
-                if (Math.Abs((track.TrimmedDuration - requestedDuration).TotalMilliseconds) > 2)
-                {
-                    throw new InvalidDataException("The source range does not match the timeline duration.");
-                }
+                EnsureDurationMatches(
+                    track.TrimmedDuration,
+                    audio.SourceOutMilliseconds - audio.SourceInMilliseconds);
 
                 track.Delay = ToTimeSpan(audio.DelayMilliseconds);
                 track.Volume = audio.Volume;
@@ -111,56 +142,69 @@ public sealed class CompositionService
                 errors.Add($"'{audio.AssetName}' could not be loaded and was omitted.");
             }
         }
+    }
 
-        if (textOverlayRenderer?.RenderHost is { } renderHost)
+    private static async Task AddTextOverlaysAsync(
+        MediaComposition composition,
+        ProjectDocument project,
+        IEnumerable<CompositionTextOverlayPlan> overlayPlans,
+        TextOverlayRenderer? textOverlayRenderer,
+        Windows.Foundation.Rect overlayPosition,
+        List<string> errors,
+        CancellationToken cancellationToken)
+    {
+        if (textOverlayRenderer?.RenderHost is not { } renderHost)
         {
-            var layer = new MediaOverlayLayer();
-            foreach (var overlayPlan in plan.TextOverlays)
-            {
-                cancellationToken.ThrowIfCancellationRequested();
-                var item = project.TextItems.First(item => item.Id == overlayPlan.ItemId);
-                try
-                {
-                    var path = await textOverlayRenderer.RenderAsync(project, item, renderHost, cancellationToken);
-                    cancellationToken.ThrowIfCancellationRequested();
-                    var file = await StorageFile.GetFileFromPathAsync(path);
-                    var overlayClip = await MediaClip.CreateFromImageFileAsync(file, ToTimeSpan(overlayPlan.DurationMilliseconds));
-                    cancellationToken.ThrowIfCancellationRequested();
-                    var overlay = new MediaOverlay(
-                        overlayClip,
-                        overlayPosition,
-                        1)
-                    {
-                        AudioEnabled = false,
-                        Delay = ToTimeSpan(overlayPlan.DelayMilliseconds)
-                    };
-                    layer.Overlays.Add(overlay);
-                }
-                catch (OperationCanceledException)
-                {
-                    throw;
-                }
-                catch (Exception exception) when (IsItemFailure(exception) || exception is InvalidOperationException)
-                {
-                    var name = string.IsNullOrWhiteSpace(item.Text) ? item.Id.ToString("D") : item.Text;
-                    errors.Add($"Text '{name}' could not be rendered and was omitted: {exception.Message}");
-                }
-            }
+            return;
+        }
 
-            if (layer.Overlays.Count > 0)
+        var layer = new MediaOverlayLayer();
+        foreach (var overlayPlan in overlayPlans)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            var item = project.TextItems.First(item => item.Id == overlayPlan.ItemId);
+            try
             {
-                composition.OverlayLayers.Add(layer);
+                var path = await textOverlayRenderer.RenderAsync(project, item, renderHost, cancellationToken);
+                cancellationToken.ThrowIfCancellationRequested();
+                var file = await StorageFile.GetFileFromPathAsync(path);
+                var overlayClip = await MediaClip.CreateFromImageFileAsync(file, ToTimeSpan(overlayPlan.DurationMilliseconds));
+                cancellationToken.ThrowIfCancellationRequested();
+                layer.Overlays.Add(new MediaOverlay(overlayClip, overlayPosition, 1)
+                {
+                    AudioEnabled = false,
+                    Delay = ToTimeSpan(overlayPlan.DelayMilliseconds)
+                });
+            }
+            catch (OperationCanceledException)
+            {
+                throw;
+            }
+            catch (Exception exception) when (IsItemFailure(exception) || exception is InvalidOperationException)
+            {
+                var name = string.IsNullOrWhiteSpace(item.Text) ? item.Id.ToString("D") : item.Text;
+                errors.Add($"Text '{name}' could not be rendered and was omitted.");
             }
         }
 
-        cancellationToken.ThrowIfCancellationRequested();
-        return new CompositionBuildResult(composition, errors, project.VideoItems.Count > 0);
+        if (layer.Overlays.Count > 0)
+        {
+            composition.OverlayLayers.Add(layer);
+        }
+    }
+
+    private static void EnsureDurationMatches(TimeSpan actualDuration, long requestedDurationMilliseconds)
+    {
+        if (Math.Abs((actualDuration - ToTimeSpan(requestedDurationMilliseconds)).TotalMilliseconds) > 2)
+        {
+            throw new InvalidDataException("The source range does not match the timeline duration.");
+        }
     }
 
     internal static Windows.Foundation.Rect CreateOverlayPosition(int outputWidth, int outputHeight)
     {
-        if (outputWidth <= 0) throw new ArgumentOutOfRangeException(nameof(outputWidth));
-        if (outputHeight <= 0) throw new ArgumentOutOfRangeException(nameof(outputHeight));
+        ArgumentOutOfRangeException.ThrowIfNegativeOrZero(outputWidth);
+        ArgumentOutOfRangeException.ThrowIfNegativeOrZero(outputHeight);
         return new Windows.Foundation.Rect(0, 0, outputWidth, outputHeight);
     }
 

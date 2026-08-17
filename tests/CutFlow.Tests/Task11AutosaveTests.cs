@@ -95,14 +95,14 @@ public sealed class Task11AutosaveTests
         var clearFailure = source.IndexOf("private void ClearProjectSaveFailure()", StringComparison.Ordinal);
         var genericMessage = source.IndexOf("private void ShowMessage(InfoBarSeverity severity", StringComparison.Ordinal);
 
-        Assert.IsTrue(savedCase >= 0);
+        Assert.IsGreaterThanOrEqualTo(0, savedCase);
         Assert.IsTrue(clearOnSuccess > savedCase && clearOnSuccess < savingCase);
-        Assert.IsTrue(showFailure >= 0);
-        Assert.IsTrue(clearFailure > showFailure);
-        StringAssert.Contains(source[showFailure..clearFailure], "_projectSaveFailureInfoBarIsCurrent = true;");
-        StringAssert.Contains(source[clearFailure..], "if (!_projectSaveFailureInfoBarIsCurrent)");
-        StringAssert.Contains(source[clearFailure..], "EditorInfoBar.IsOpen = false;");
-        StringAssert.Contains(source[genericMessage..showFailure], "_projectSaveFailureInfoBarIsCurrent = false;");
+        Assert.IsGreaterThanOrEqualTo(0, showFailure);
+        Assert.IsGreaterThan(showFailure, clearFailure);
+        Assert.Contains("_projectSaveFailureInfoBarIsCurrent = true;", source[showFailure..clearFailure]);
+        Assert.Contains("if (!_projectSaveFailureInfoBarIsCurrent)", source[clearFailure..]);
+        Assert.Contains("EditorInfoBar.IsOpen = false;", source[clearFailure..]);
+        Assert.Contains("_projectSaveFailureInfoBarIsCurrent = false;", source[genericMessage..showFailure]);
     }
 
     [TestMethod]

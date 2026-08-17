@@ -40,14 +40,15 @@ public sealed class Task11ShortcutTests
             "Views",
             "EditorView.xaml.cs"));
         var start = source.IndexOf("if (controlDown && e.Key == VirtualKey.N)", StringComparison.Ordinal);
-        var end = source.IndexOf("var isSingleActionShortcut", start, StringComparison.Ordinal);
+        var end = source.IndexOf("private bool IsEditableControlFocused", start, StringComparison.Ordinal);
         var route = source[start..end];
 
         var handled = route.IndexOf("e.Handled = true;", StringComparison.Ordinal);
-        var save = route.IndexOf("await SaveAsync()", StringComparison.Ordinal);
-        var request = route.IndexOf("NewProjectRequested?.Invoke", StringComparison.Ordinal);
-        Assert.IsTrue(handled >= 0 && save > handled && request > save);
-        StringAssert.Contains(source, "e.KeyStatus.WasKeyDown");
+        var dispatch = route.IndexOf("await HandleNewProjectShortcutAsync", StringComparison.Ordinal);
+        var save = route.IndexOf("await SaveAsync()", dispatch, StringComparison.Ordinal);
+        var request = route.IndexOf("NewProjectRequested?.Invoke", save, StringComparison.Ordinal);
+        Assert.IsTrue(handled >= 0 && dispatch > handled && save > dispatch && request > save);
+        Assert.Contains("e.KeyStatus.WasKeyDown", source);
     }
 
     [TestMethod]
@@ -87,12 +88,12 @@ public sealed class Task11ShortcutTests
             "Views",
             "EditorView.xaml.cs"));
 
-        StringAssert.Contains(timeline, "private MenuFlyout CreateContextMenu(Guid itemId, EditorSelectionKind kind)");
-        StringAssert.Contains(timeline, "menu.Opening +=");
-        StringAssert.Contains(timeline, "TimelineContextCommands.Resolve(_project, itemId, _trackLocks, _playheadMilliseconds)");
-        StringAssert.Contains(timeline, "IsTabStop = true");
-        StringAssert.Contains(editor, "DeleteTimelineItemWithGuidance(commandItemId);");
-        StringAssert.Contains(editor, "ShowTimelineSourceInExplorer(commandItemId);");
+        Assert.Contains("private MenuFlyout CreateContextMenu(Guid itemId, EditorSelectionKind kind)", timeline);
+        Assert.Contains("menu.Opening +=", timeline);
+        Assert.Contains("TimelineContextCommands.Resolve(_project, itemId, _trackLocks, _playheadMilliseconds)", timeline);
+        Assert.Contains("IsTabStop = true", timeline);
+        Assert.Contains("DeleteTimelineItemWithGuidance(commandItemId);", editor);
+        Assert.Contains("ShowTimelineSourceInExplorer(commandItemId);", editor);
     }
 
     [TestMethod]
@@ -108,7 +109,7 @@ public sealed class Task11ShortcutTests
         var end = source.IndexOf("private bool IsEditableControlFocused", start, StringComparison.Ordinal);
         var route = source[start..end];
 
-        var repeatGate = route.IndexOf("if (e.KeyStatus.WasKeyDown)", StringComparison.Ordinal);
+        var repeatGate = route.IndexOf("if (wasKeyDown)", StringComparison.Ordinal);
         var save = route.IndexOf("await SaveAsync()", repeatGate, StringComparison.Ordinal);
         var undo = route.IndexOf("UndoWithGuidance();", StringComparison.Ordinal);
         var redo = route.IndexOf("RedoWithGuidance();", StringComparison.Ordinal);
@@ -116,13 +117,13 @@ public sealed class Task11ShortcutTests
         var duplicate = route.IndexOf("DuplicateSelectionWithGuidance();", StringComparison.Ordinal);
         var delete = route.IndexOf("DeleteSelectionWithGuidance();", StringComparison.Ordinal);
 
-        Assert.IsTrue(repeatGate >= 0);
-        Assert.IsTrue(save > repeatGate);
-        Assert.IsTrue(undo > repeatGate);
-        Assert.IsTrue(redo > repeatGate);
-        Assert.IsTrue(split > repeatGate);
-        Assert.IsTrue(duplicate > repeatGate);
-        Assert.IsTrue(delete > repeatGate);
+        Assert.IsGreaterThanOrEqualTo(0, repeatGate);
+        Assert.IsGreaterThan(repeatGate, save);
+        Assert.IsGreaterThan(repeatGate, undo);
+        Assert.IsGreaterThan(repeatGate, redo);
+        Assert.IsGreaterThan(repeatGate, split);
+        Assert.IsGreaterThan(repeatGate, duplicate);
+        Assert.IsGreaterThan(repeatGate, delete);
     }
 
     [TestMethod]
@@ -135,13 +136,13 @@ public sealed class Task11ShortcutTests
             "Views",
             "EditorView.xaml.cs"));
 
-        StringAssert.Contains(source, "if (!ViewModel.CanUndo)");
-        StringAssert.Contains(source, "if (!ViewModel.CanRedo)");
-        StringAssert.Contains(source, "if (!ViewModel.SplitSelection())");
-        StringAssert.Contains(source, "if (!ViewModel.DuplicateSelection())");
-        StringAssert.Contains(source, "if (!ViewModel.DeleteSelection())");
-        StringAssert.Contains(source, "Select a V1 item to split.");
-        StringAssert.Contains(source, "Select a V1, T1, or A1 item to duplicate.");
+        Assert.Contains("if (!ViewModel.CanUndo)", source);
+        Assert.Contains("if (!ViewModel.CanRedo)", source);
+        Assert.Contains("if (!ViewModel.SplitSelection())", source);
+        Assert.Contains("if (!ViewModel.DuplicateSelection())", source);
+        Assert.Contains("if (!ViewModel.DeleteSelection())", source);
+        Assert.Contains("Select a V1 item to split.", source);
+        Assert.Contains("Select a V1, T1, or A1 item to duplicate.", source);
     }
 
     [TestMethod]
@@ -198,11 +199,11 @@ public sealed class Task11ShortcutTests
         var backEnd = source.IndexOf("private void ProjectNameBox_KeyDown", backStart, StringComparison.Ordinal);
         var backRoute = source[backStart..backEnd];
         var newProjectStart = source.IndexOf("if (controlDown && e.Key == VirtualKey.N)", StringComparison.Ordinal);
-        var newProjectEnd = source.IndexOf("var isSingleActionShortcut", newProjectStart, StringComparison.Ordinal);
+        var newProjectEnd = source.IndexOf("private static bool IsSingleActionShortcut", newProjectStart, StringComparison.Ordinal);
         var newProjectRoute = source[newProjectStart..newProjectEnd];
 
         AssertStateIsCheckedBeforeAndAfterSave(backRoute, "if (_isRendering)");
-        AssertStateIsCheckedBeforeAndAfterSave(newProjectRoute, "if (_isExporting)");
+        AssertStateIsCheckedBeforeAndAfterSave(newProjectRoute, "RejectNewProjectDuringExport()");
     }
 
     private static void AssertStateIsCheckedBeforeAndAfterSave(string route, string check)

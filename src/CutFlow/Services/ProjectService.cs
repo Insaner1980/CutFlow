@@ -9,7 +9,7 @@ using Windows.Storage;
 
 namespace CutFlow.Services;
 
-public sealed class ProjectService
+public sealed partial class ProjectService
 {
     private static readonly JsonSerializerOptions JsonOptions = new()
     {
@@ -267,9 +267,9 @@ public sealed class ProjectService
                         RejectReparsePoints(temporaryPath);
                         File.Delete(temporaryPath);
                     }
-                    catch (Exception cleanupException) when (saveException is not null)
+                    catch (Exception cleanupException)
                     {
-                        saveException.Data["TemporaryFileCleanupException"] = cleanupException;
+                        saveException!.Data["TemporaryFileCleanupException"] = cleanupException;
                     }
                 }
             }
@@ -417,9 +417,9 @@ public sealed class ProjectService
             new Win32Exception(error));
     }
 
-    [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+    [LibraryImport("kernel32.dll", SetLastError = true, StringMarshalling = StringMarshalling.Utf16)]
     [return: MarshalAs(UnmanagedType.Bool)]
-    private static extern bool CreateDirectoryW(string path, nint securityAttributes);
+    private static partial bool CreateDirectoryW(string path, nint securityAttributes);
 
     internal static void NormalizeSnapshot(ProjectDocument project)
     {
@@ -434,6 +434,17 @@ public sealed class ProjectService
 
     private static void Normalize(ProjectDocument project, string? projectsRootPath)
     {
+        NormalizeProjectSettings(project);
+        InitializeCollections(project);
+        var assetsById = NormalizeAssets(project.Assets, projectsRootPath);
+        ValidateTimelineItems(project, assetsById);
+        NormalizeVideoItems(project.VideoItems, assetsById);
+        NormalizeAudioItems(project.AudioItems, assetsById);
+        NormalizeTextItems(project.TextItems);
+    }
+
+    private static void NormalizeProjectSettings(ProjectDocument project)
+    {
         project.Name ??= string.Empty;
         project.Settings ??= new ProjectSettings();
         project.Settings.ApplyAspectRatio(project.Settings.AspectRatio);
@@ -441,7 +452,10 @@ public sealed class ProjectService
         project.Settings.BackgroundColor = TimelineInput.IsOpaqueArgb(project.Settings.BackgroundColor)
             ? project.Settings.BackgroundColor.ToUpperInvariant()
             : ProjectSettings.DefaultBackgroundColor;
+    }
 
+    private static void InitializeCollections(ProjectDocument project)
+    {
         project.Assets ??= [];
         project.VideoItems ??= [];
         project.AudioItems ??= [];
@@ -453,63 +467,89 @@ public sealed class ProjectService
         {
             throw new InvalidDataException("Project collections cannot contain null items.");
         }
+    }
 
+    private static Dictionary<Guid, ProjectAsset> NormalizeAssets(
+        IEnumerable<ProjectAsset> assets,
+        string? projectsRootPath)
+    {
         var assetsById = new Dictionary<Guid, ProjectAsset>();
-        foreach (var asset in project.Assets)
+        foreach (var asset in assets)
         {
-            asset.SourcePath ??= string.Empty;
-            asset.FileName ??= string.Empty;
-            asset.ThumbnailCachePath ??= string.Empty;
-            if (asset.ThumbnailCachePath.Length > 0 &&
-                !ThumbnailService.IsCanonicalRelativeCachePath(asset.ThumbnailCachePath))
-            {
-                asset.ThumbnailCachePath = string.Empty;
-            }
-
-            if (asset.Id == Guid.Empty || !assetsById.TryAdd(asset.Id, asset))
-            {
-                throw new InvalidDataException("Project assets must have unique non-empty identities.");
-            }
-
-            if (string.IsNullOrWhiteSpace(asset.SourcePath))
-            {
-                QuarantineAssetSource(asset);
-                continue;
-            }
-
-            try
-            {
-                if (!Path.IsPathFullyQualified(asset.SourcePath))
-                {
-                    QuarantineAssetSource(asset);
-                    continue;
-                }
-
-                var normalizedSourcePath = MediaImportService.NormalizePath(asset.SourcePath);
-                if (projectsRootPath is not null &&
-                    MediaImportService.IsPathWithinDirectory(normalizedSourcePath, projectsRootPath))
-                {
-                    throw new InvalidDataException(
-                        $"Source media must remain outside {AppInfo.ProductName}'s managed project folders.");
-                }
-
-                if (!MediaImportService.TryGetKind(normalizedSourcePath, out var sourceKind) || sourceKind != asset.Kind)
-                {
-                    QuarantineAssetSource(asset);
-                    continue;
-                }
-
-                asset.SourcePath = normalizedSourcePath;
-                if (string.IsNullOrWhiteSpace(asset.FileName))
-                {
-                    asset.FileName = Path.GetFileName(normalizedSourcePath);
-                }
-            }
-            catch (Exception exception) when (exception is ArgumentException or NotSupportedException or PathTooLongException)
-            {
-                QuarantineAssetSource(asset);
-            }
+            NormalizeAsset(asset, assetsById, projectsRootPath);
         }
+
+        return assetsById;
+    }
+
+    private static void NormalizeAsset(
+        ProjectAsset asset,
+        Dictionary<Guid, ProjectAsset> assetsById,
+        string? projectsRootPath)
+    {
+        asset.SourcePath ??= string.Empty;
+        asset.FileName ??= string.Empty;
+        asset.ThumbnailCachePath ??= string.Empty;
+        if (asset.ThumbnailCachePath.Length > 0 &&
+            !ThumbnailService.IsCanonicalRelativeCachePath(asset.ThumbnailCachePath))
+        {
+            asset.ThumbnailCachePath = string.Empty;
+        }
+
+        if (asset.Id == Guid.Empty || !assetsById.TryAdd(asset.Id, asset))
+        {
+            throw new InvalidDataException("Project assets must have unique non-empty identities.");
+        }
+
+        if (string.IsNullOrWhiteSpace(asset.SourcePath))
+        {
+            QuarantineAssetSource(asset);
+            return;
+        }
+
+        try
+        {
+            NormalizeAssetSource(asset, projectsRootPath);
+        }
+        catch (Exception exception) when (exception is ArgumentException or NotSupportedException or PathTooLongException)
+        {
+            QuarantineAssetSource(asset);
+        }
+    }
+
+    private static void NormalizeAssetSource(ProjectAsset asset, string? projectsRootPath)
+    {
+        if (!Path.IsPathFullyQualified(asset.SourcePath))
+        {
+            QuarantineAssetSource(asset);
+            return;
+        }
+
+        var normalizedSourcePath = MediaImportService.NormalizePath(asset.SourcePath);
+        if (projectsRootPath is not null &&
+            MediaImportService.IsPathWithinDirectory(normalizedSourcePath, projectsRootPath))
+        {
+            throw new InvalidDataException(
+                $"Source media must remain outside {AppInfo.ProductName}'s managed project folders.");
+        }
+
+        if (!MediaImportService.TryGetKind(normalizedSourcePath, out var sourceKind) || sourceKind != asset.Kind)
+        {
+            QuarantineAssetSource(asset);
+            return;
+        }
+
+        asset.SourcePath = normalizedSourcePath;
+        if (string.IsNullOrWhiteSpace(asset.FileName))
+        {
+            asset.FileName = Path.GetFileName(normalizedSourcePath);
+        }
+    }
+
+    private static void ValidateTimelineItems(
+        ProjectDocument project,
+        Dictionary<Guid, ProjectAsset> assetsById)
+    {
 
         var timelineItemIds = new HashSet<Guid>();
         if (project.VideoItems.Select(static item => item.Id)
@@ -529,9 +569,14 @@ public sealed class ProjectService
         {
             throw new InvalidDataException("A timeline item references an incompatible asset kind.");
         }
+    }
 
+    private static void NormalizeVideoItems(
+        List<VideoTimelineItem> videoItems,
+        Dictionary<Guid, ProjectAsset> assetsById)
+    {
         long videoStart = 0;
-        for (var index = 0; index < project.VideoItems.Count; index++)
+        for (var index = 0; index < videoItems.Count; index++)
         {
             if (videoStart > ProjectDocument.MaximumTimelineDurationMilliseconds - ProjectDocument.MinimumItemDurationMilliseconds)
             {
@@ -539,7 +584,7 @@ public sealed class ProjectService
                     "The V1 timeline exceeds the 24-hour limit and cannot be repaired without removing items.");
             }
 
-            var item = project.VideoItems[index];
+            var item = videoItems[index];
             item.Volume = double.IsFinite(item.Volume) ? Math.Clamp(item.Volume, 0, 1) : 1;
             var hasKnownVisualAsset = assetsById.TryGetValue(item.AssetId, out var asset) &&
                 asset.Kind is ProjectAssetKind.Video or ProjectAssetKind.Image &&
@@ -567,8 +612,13 @@ public sealed class ProjectService
 
             videoStart += item.DurationMilliseconds;
         }
+    }
 
-        foreach (var item in project.AudioItems)
+    private static void NormalizeAudioItems(
+        IEnumerable<AudioTimelineItem> audioItems,
+        Dictionary<Guid, ProjectAsset> assetsById)
+    {
+        foreach (var item in audioItems)
         {
             var originalSourceIn = item.SourceInMilliseconds;
             var maximumSourceOut = assetsById.TryGetValue(item.AssetId, out var asset) &&
@@ -585,11 +635,7 @@ public sealed class ProjectService
                 maximumSourceOut);
 
             var shiftedStart = (decimal)item.StartMilliseconds + item.SourceInMilliseconds - originalSourceIn;
-            var normalizedStart = shiftedStart > long.MaxValue
-                ? long.MaxValue
-                : shiftedStart < long.MinValue
-                    ? long.MinValue
-                    : (long)shiftedStart;
+            var normalizedStart = (long)decimal.Clamp(shiftedStart, long.MinValue, long.MaxValue);
             if (normalizedStart < 0)
             {
                 var availableLeftTrim = item.DurationMilliseconds - ProjectDocument.MinimumItemDurationMilliseconds;
@@ -604,8 +650,11 @@ public sealed class ProjectService
             item.FadeInMilliseconds = Math.Clamp(item.FadeInMilliseconds, 0, item.DurationMilliseconds);
             item.FadeOutMilliseconds = Math.Clamp(item.FadeOutMilliseconds, 0, item.DurationMilliseconds);
         }
+    }
 
-        foreach (var item in project.TextItems)
+    private static void NormalizeTextItems(IEnumerable<TextTimelineItem> textItems)
+    {
+        foreach (var item in textItems)
         {
             var duration = item.StartMilliseconds < 0
                 ? TimelineMath.SaturatingAdd(item.StartMilliseconds, Math.Max(0, item.DurationMilliseconds))
@@ -628,7 +677,6 @@ public sealed class ProjectService
             item.NormalizedX = TextStyle.ClampNormalized(item.NormalizedX, 0.5);
             item.NormalizedY = TextStyle.ClampNormalized(item.NormalizedY, 0.5);
         }
-
     }
 
     private static void QuarantineAssetSource(ProjectAsset asset)

@@ -91,14 +91,7 @@ public sealed partial class PreviewPane : UserControl, IDisposable
         bool hasVisualContent)
     {
         ObjectDisposedException.ThrowIf(_disposed, this);
-        var hasContent = composition is not null && composition.Clips.Count > 0 && composition.Duration > TimeSpan.Zero;
-        MediaSource? preparedSource = null;
-        if (hasContent && composition is not null)
-        {
-            var previewSize = PreviewStreamSize.Fit((int)PreviewSurface.Width, (int)PreviewSurface.Height, 1280, 720);
-            preparedSource = MediaSource.CreateFromMediaStreamSource(
-                composition.GeneratePreviewMediaStreamSource(previewSize.Width, previewSize.Height));
-        }
+        var (hasContent, preparedSource) = PrepareSource(composition);
 
         var sourceTransferred = false;
         try
@@ -107,7 +100,7 @@ public sealed partial class PreviewPane : UserControl, IDisposable
             var swapPositionMilliseconds = oldSource is not null
                 ? PositionMilliseconds
                 : preservedPositionMilliseconds;
-            RunSuccessfulSourceSwap(
+            RunSuccessfulSourceSwap([
                 () => _playerEventGeneration.Advance(),
                 DetachPlayerEvents,
                 () => _player.Pause(),
@@ -117,43 +110,11 @@ public sealed partial class PreviewPane : UserControl, IDisposable
                     _source = null;
                 },
                 () => oldSource?.Dispose(),
-                () =>
-                {
-                    _composition = composition;
-                    SetDuration(hasContent && composition is not null
-                        ? (long)composition.Duration.TotalMilliseconds
-                        : 0);
-                    if (!hasContent || composition is null || preparedSource is null)
-                    {
-                        SetCanPlay(false);
-                        EmptyState.Visibility = Visibility.Visible;
-                        return;
-                    }
-
-                    _player.Source = preparedSource;
-                    _source = preparedSource;
-                    SetCanPlay(true);
-                    EmptyState.Visibility = hasVisualContent ? Visibility.Collapsed : Visibility.Visible;
-                },
-                () =>
-                {
-                    if (hasContent && composition is not null)
-                    {
-                        _player.PlaybackSession.Position = TimeSpan.FromMilliseconds(
-                            PreviewPlaybackPolicy.GetRebuildStartPosition(
-                                swapPositionMilliseconds,
-                                (long)composition.Duration.TotalMilliseconds,
-                                resumePlayback));
-                    }
-
-                    _playbackState.SetIntent(hasContent && resumePlayback);
-                    ApplyActualPlaybackState(isPlaying: false);
-                },
+                () => ApplyPreparedComposition(composition, preparedSource, hasContent, hasVisualContent),
+                () => RestorePlaybackPosition(composition, hasContent, swapPositionMilliseconds, resumePlayback),
                 AttachPlayerEvents,
-                () =>
-                {
-                    if (_playbackState.PlayIntent) _player.Play();
-                });
+                ResumePlaybackIfRequested
+            ]);
             sourceTransferred = preparedSource is not null && ReferenceEquals(_source, preparedSource);
         }
         catch
@@ -162,17 +123,7 @@ public sealed partial class PreviewPane : UserControl, IDisposable
                 () => _playerEventGeneration.Advance(),
                 DetachPlayerEvents,
                 () => _player.Pause(),
-                () =>
-                {
-                    _player.Source = null;
-                    _source = null;
-                    _composition = null;
-                    SetDuration(0);
-                    _playbackState.SetIntent(false);
-                    ApplyActualPlaybackState(isPlaying: false);
-                    SetCanPlay(false);
-                    EmptyState.Visibility = Visibility.Visible;
-                },
+                ClearFailedComposition,
                 () =>
                 {
                     preparedSource?.Dispose();
@@ -187,26 +138,82 @@ public sealed partial class PreviewPane : UserControl, IDisposable
         }
     }
 
-    internal static void RunSuccessfulSourceSwap(
-        Action invalidateGeneration,
-        Action detachEvents,
-        Action pause,
-        Action clearSourceAndState,
-        Action disposeOldSource,
-        Action installNewSourceAndState,
-        Action restorePositionAndIntent,
-        Action attachEvents,
-        Action resumePlayback)
+    private (bool HasContent, MediaSource? Source) PrepareSource(MediaComposition? composition)
     {
-        invalidateGeneration();
-        detachEvents();
-        pause();
-        clearSourceAndState();
-        disposeOldSource();
-        installNewSourceAndState();
-        restorePositionAndIntent();
-        attachEvents();
-        resumePlayback();
+        if (composition is null || composition.Clips.Count == 0 || composition.Duration <= TimeSpan.Zero)
+        {
+            return (false, null);
+        }
+
+        var previewSize = PreviewStreamSize.Fit((int)PreviewSurface.Width, (int)PreviewSurface.Height, 1280, 720);
+        return (true, MediaSource.CreateFromMediaStreamSource(
+            composition.GeneratePreviewMediaStreamSource(previewSize.Width, previewSize.Height)));
+    }
+
+    private void ApplyPreparedComposition(
+        MediaComposition? composition,
+        MediaSource? preparedSource,
+        bool hasContent,
+        bool hasVisualContent)
+    {
+        _composition = composition;
+        SetDuration(hasContent && composition is not null ? (long)composition.Duration.TotalMilliseconds : 0);
+        if (!hasContent || preparedSource is null)
+        {
+            SetCanPlay(false);
+            EmptyState.Visibility = Visibility.Visible;
+            return;
+        }
+
+        _player.Source = preparedSource;
+        _source = preparedSource;
+        SetCanPlay(true);
+        EmptyState.Visibility = hasVisualContent ? Visibility.Collapsed : Visibility.Visible;
+    }
+
+    private void RestorePlaybackPosition(
+        MediaComposition? composition,
+        bool hasContent,
+        long swapPositionMilliseconds,
+        bool resumePlayback)
+    {
+        if (hasContent && composition is not null)
+        {
+            _player.PlaybackSession.Position = TimeSpan.FromMilliseconds(
+                PreviewPlaybackPolicy.GetRebuildStartPosition(
+                    swapPositionMilliseconds,
+                    (long)composition.Duration.TotalMilliseconds,
+                    resumePlayback));
+        }
+
+        _playbackState.SetIntent(hasContent && resumePlayback);
+        ApplyActualPlaybackState(isPlaying: false);
+    }
+
+    private void ResumePlaybackIfRequested()
+    {
+        if (_playbackState.PlayIntent)
+        {
+            _player.Play();
+        }
+    }
+
+    private void ClearFailedComposition()
+    {
+        _player.Source = null;
+        _source = null;
+        _composition = null;
+        SetDuration(0);
+        _playbackState.SetIntent(false);
+        ApplyActualPlaybackState(isPlaying: false);
+        SetCanPlay(false);
+        EmptyState.Visibility = Visibility.Visible;
+    }
+
+    internal static void RunSuccessfulSourceSwap(IReadOnlyList<Action> steps)
+    {
+        if (steps.Count != 9) throw new ArgumentException("A successful source swap requires exactly nine ordered steps.", nameof(steps));
+        foreach (var step in steps) step();
     }
 
     internal static void RunFailedSourceSwapCleanup(
@@ -304,9 +311,10 @@ public sealed partial class PreviewPane : UserControl, IDisposable
     public void SetPlaying(bool isPlaying)
     {
         var playing = _canPlay && isPlaying;
+        var playAction = playing ? "Pause" : "Play";
         PlayIcon.Glyph = playing ? "\uE769" : "\uE768";
-        PlayToolTip.Content = _canPlay ? (playing ? "Pause" : "Play") : "Playback is unavailable until the preview has media";
-        AutomationProperties.SetName(PlayButton, _canPlay ? (playing ? "Pause preview" : "Play preview") : "Play preview unavailable");
+        PlayToolTip.Content = _canPlay ? playAction : "Playback is unavailable until the preview has media";
+        AutomationProperties.SetName(PlayButton, _canPlay ? $"{playAction} preview" : "Play preview unavailable");
     }
 
     public void RequestSeek(long positionMilliseconds) =>
@@ -380,8 +388,9 @@ public sealed partial class PreviewPane : UserControl, IDisposable
         }
     }
 
-    private void PlaybackSession_PlaybackStateChanged(MediaPlaybackSession sender, object args, long generation)
+    private void PlaybackSession_PlaybackStateChanged(MediaPlaybackSession sender, object eventArgs, long generation)
     {
+        _ = eventArgs;
         if (_disposed || !_playerEventGeneration.IsCurrent(generation)) return;
         DispatcherQueue.TryEnqueue(() =>
         {
@@ -394,8 +403,9 @@ public sealed partial class PreviewPane : UserControl, IDisposable
         });
     }
 
-    private void Player_MediaEnded(MediaPlayer sender, object args, long generation)
+    private void Player_MediaEnded(MediaPlayer sender, object eventArgs, long generation)
     {
+        _ = eventArgs;
         if (_disposed || !_playerEventGeneration.IsCurrent(generation)) return;
         DispatcherQueue.TryEnqueue(() =>
         {
