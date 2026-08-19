@@ -1,5 +1,6 @@
 using System.Security.Cryptography;
 using System.Text;
+using CutFlow.Utilities;
 using Windows.Storage;
 
 namespace CutFlow.Services;
@@ -30,6 +31,8 @@ public sealed class SimpleLogService
         var lockIdentity = SHA256.HashData(Encoding.UTF8.GetBytes(_logPath.ToUpperInvariant()));
         _processWriteLockName = $@"Local\CutFlow.SimpleLog.{Convert.ToHexString(lockIdentity)}";
     }
+
+    internal string ProcessWriteLockName => _processWriteLockName;
 
     public async Task WriteAsync(string technicalMessage, CancellationToken cancellationToken = default)
     {
@@ -135,7 +138,7 @@ public sealed class SimpleLogService
         {
             await WriteAsync(technicalMessage, cancellationToken);
         }
-        catch (Exception)
+        catch (Exception exception) when (!ExceptionPolicy.IsFatal(exception))
         {
             // Technical logging must never interfere with the user flow it observes.
         }

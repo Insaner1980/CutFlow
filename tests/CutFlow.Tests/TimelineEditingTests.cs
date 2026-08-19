@@ -9,6 +9,30 @@ namespace CutFlow.Tests;
 public sealed class TimelineEditingTests
 {
     [TestMethod]
+    [DataRow(0L, false)]
+    [DataRow(99L, false)]
+    [DataRow(100L, true)]
+    [DataRow(101L, true)]
+    public void ProjectBounds_EnforcesMinimumDurationBoundary(long durationMilliseconds, bool expected)
+    {
+        Assert.AreEqual(expected, TimelineMath.IsWithinProjectBounds(0, durationMilliseconds));
+    }
+
+    [TestMethod]
+    public void ProjectBounds_AcceptsExactTwentyFourHourEndAndRejectsOneMillisecondBeyond()
+    {
+        Assert.IsTrue(TimelineMath.IsWithinProjectBounds(
+            0,
+            ProjectDocument.MaximumTimelineDurationMilliseconds));
+        Assert.IsTrue(TimelineMath.IsWithinProjectBounds(
+            ProjectDocument.MaximumTimelineDurationMilliseconds - ProjectDocument.MinimumItemDurationMilliseconds,
+            ProjectDocument.MinimumItemDurationMilliseconds));
+        Assert.IsFalse(TimelineMath.IsWithinProjectBounds(
+            ProjectDocument.MaximumTimelineDurationMilliseconds - ProjectDocument.MinimumItemDurationMilliseconds + 1,
+            ProjectDocument.MinimumItemDurationMilliseconds));
+    }
+
+    [TestMethod]
     public void CalculateProjectDuration_UsesTheLatestEndAcrossAllTracks()
     {
         var project = TestProjects.WithVideo(2_000, 3_000);

@@ -91,7 +91,7 @@ public sealed class Task11AutosaveTests
         var savedCase = source.IndexOf("case DebouncedSaveState.Saved:", StringComparison.Ordinal);
         var savingCase = source.IndexOf("case DebouncedSaveState.Saving:", savedCase, StringComparison.Ordinal);
         var clearOnSuccess = source.IndexOf("ClearProjectSaveFailure();", savedCase, StringComparison.Ordinal);
-        var showFailure = source.IndexOf("private void ShowProjectSaveFailure(string message)", StringComparison.Ordinal);
+        var showFailure = source.IndexOf("private void TryShowProjectSaveFailure", StringComparison.Ordinal);
         var clearFailure = source.IndexOf("private void ClearProjectSaveFailure()", StringComparison.Ordinal);
         var genericMessage = source.IndexOf("private void ShowMessage(InfoBarSeverity severity", StringComparison.Ordinal);
 

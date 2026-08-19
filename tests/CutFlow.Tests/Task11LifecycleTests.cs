@@ -55,6 +55,20 @@ public sealed class Task11LifecycleTests
     }
 
     [TestMethod]
+    public void CanceledCloseDoesNotCommitTheWindowCloseCallback()
+    {
+        var lifecycle = new MainWindowLifecycle();
+        var closeCalls = 0;
+
+        Assert.IsTrue(lifecycle.TryBeginClosing());
+        lifecycle.ApproveClose();
+        lifecycle.CancelClosing();
+
+        Assert.IsFalse(lifecycle.TryCommitClose(() => closeCalls++));
+        Assert.AreEqual(0, closeCalls);
+    }
+
+    [TestMethod]
     public void EditorEventGateRejectsStaleSourcesAndClosingWindow()
     {
         var lifecycle = new MainWindowLifecycle();
@@ -98,6 +112,61 @@ public sealed class Task11LifecycleTests
     }
 
     [TestMethod]
+    public void UiExceptionBoundaries_FilterLocalFailuresAndLogBroadStartupRecovery()
+    {
+        var root = FindRepositoryRoot();
+        var mainWindow = File.ReadAllText(Path.Combine(root, "src", "CutFlow", "MainWindow.xaml.cs"));
+        var initializeStart = mainWindow.IndexOf("private async Task InitializeAsync()", StringComparison.Ordinal);
+        var initializeEnd = mainWindow.IndexOf("private void MainWindow_Activated", initializeStart, StringComparison.Ordinal);
+        var initialize = mainWindow[initializeStart..initializeEnd];
+        var homeView = File.ReadAllText(Path.Combine(root, "src", "CutFlow", "Views", "HomeView.xaml.cs"));
+
+        Assert.AreEqual(
+            5,
+            homeView.Split(
+                "catch (Exception exception) when (HomeViewModel.IsExpectedProjectOperationFailure(exception))",
+                StringSplitOptions.None).Length - 1);
+        Assert.Contains(
+            "catch (Exception exception) when (exception is IOException or UnauthorizedAccessException or InvalidDataException or System.Security.SecurityException)",
+            initialize);
+        Assert.Contains(
+            "catch (Exception exception) when (exception is ArgumentException or InvalidOperationException or COMException or OverflowException)",
+            initialize);
+        Assert.Contains("Workspace settings restore failed:", initialize);
+        Assert.Contains("Window geometry restore failed:", initialize);
+        Assert.Contains("Startup failed:", initialize);
+    }
+
+    [TestMethod]
+    public void UiCancellationHandlers_RequireTheirOwningLifetimeToBeCanceled()
+    {
+        var root = FindRepositoryRoot();
+        var mainWindow = File.ReadAllText(Path.Combine(root, "src", "CutFlow", "MainWindow.xaml.cs"));
+        var mediaPanel = File.ReadAllText(Path.Combine(root, "src", "CutFlow", "Controls", "MediaPanel.xaml.cs"));
+        var timeline = File.ReadAllText(Path.Combine(root, "src", "CutFlow", "Controls", "TimelineControl.xaml.cs"));
+        var editor = File.ReadAllText(Path.Combine(root, "src", "CutFlow", "Views", "EditorView.xaml.cs"));
+
+        Assert.AreEqual(
+            3,
+            mainWindow.Split(
+                "catch (OperationCanceledException) when (!_lifecycle.CanHandleEditorEvent(_editorView, editor))",
+                StringSplitOptions.None).Length - 1);
+        Assert.AreEqual(
+            2,
+            mediaPanel.Split(
+                "catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)",
+                StringSplitOptions.None).Length - 1);
+        Assert.Contains("catch (OperationCanceledException) when (lifetimeToken.IsCancellationRequested)", timeline);
+        Assert.Contains("catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)", timeline);
+        Assert.AreEqual(
+            2,
+            editor.Split(
+                "catch (OperationCanceledException) when (_lifetimeToken.IsCancellationRequested)",
+                StringSplitOptions.None).Length - 1);
+        Assert.Contains("lease?.Token.IsCancellationRequested == true", editor);
+    }
+
+    [TestMethod]
     public void CurrentViewSwitch_DetachesAnExistingEditorBeforeConstructingItsReplacement()
     {
         var root = FindRepositoryRoot();
@@ -116,6 +185,50 @@ public sealed class Task11LifecycleTests
         Assert.IsGreaterThan(construction, exposure);
         Assert.Contains("ReferenceEquals(_editorView.ViewModel, editorViewModel)", showCurrentView);
         Assert.Contains("ReferenceEquals(ContentHost.Content, _editorView)", showCurrentView);
+    }
+
+    [TestMethod]
+    public void CurrentViewSwitch_QueuesFocusForTheLiveReplacement()
+    {
+        var root = FindRepositoryRoot();
+        var mainWindow = File.ReadAllText(Path.Combine(root, "src", "CutFlow", "MainWindow.xaml.cs"));
+        var homeView = File.ReadAllText(Path.Combine(root, "src", "CutFlow", "Views", "HomeView.xaml.cs"));
+        var editorView = File.ReadAllText(Path.Combine(root, "src", "CutFlow", "Views", "EditorView.xaml.cs"));
+        var queueStart = mainWindow.IndexOf("private void QueueInitialFocus", StringComparison.Ordinal);
+        var queueEnd = mainWindow.IndexOf("private void DetachEditorView", queueStart, StringComparison.Ordinal);
+        var queue = mainWindow[queueStart..queueEnd];
+
+        Assert.Contains("QueueInitialFocus(_editorView, _editorView.FocusInitialControl);", mainWindow);
+        Assert.Contains("QueueInitialFocus(_homeView, _homeView.FocusInitialControl);", mainWindow);
+        Assert.Contains("ReferenceEquals(ContentHost.Content, content)", queue);
+        Assert.Contains("_lifecycle.CanContinueInitialization", queue);
+        Assert.Contains("HomeItem.Focus(FocusState.Programmatic)", homeView);
+        Assert.Contains("BackButton.Focus(FocusState.Programmatic)", editorView);
+    }
+
+    [TestMethod]
+    public void ProjectDialogs_RestoreLiveFocusAndDestructiveDeleteDefaultsToCancel()
+    {
+        var source = File.ReadAllText(Path.Combine(
+            FindRepositoryRoot(),
+            "src",
+            "CutFlow",
+            "Views",
+            "HomeView.xaml.cs"));
+        var renameStart = source.IndexOf("private async void RenameProject_Click", StringComparison.Ordinal);
+        var deleteStart = source.IndexOf("private async void DeleteProject_Click", StringComparison.Ordinal);
+        var rename = source[renameStart..deleteStart];
+        var deleteEnd = source.IndexOf("private void HomeNavigation_SelectionChanged", deleteStart, StringComparison.Ordinal);
+        var delete = source[deleteStart..deleteEnd];
+
+        Assert.Contains("dialog.Opened +=", rename);
+        Assert.Contains("nameBox.Focus(FocusState.Programmatic);", rename);
+        Assert.Contains("nameBox.SelectAll();", rename);
+        Assert.Contains("ContentDialogButton.Close", delete);
+        Assert.Contains("finally", delete);
+        Assert.Contains("RestoreProjectFocus(project.Id);", delete);
+        Assert.Contains("FindProjectActionsButton", source);
+        Assert.Contains("HomeItem.Focus(FocusState.Programmatic)", source);
     }
 
     [TestMethod]
@@ -254,18 +367,84 @@ public sealed class Task11LifecycleTests
         var rebuildStart = editor.IndexOf("private async Task RebuildPreviewAsync", StringComparison.Ordinal);
         var rebuildEnd = editor.IndexOf("private void EditorView_SizeChanged", rebuildStart, StringComparison.Ordinal);
         var rebuild = editor[rebuildStart..rebuildEnd];
-        var showMessage = editor.IndexOf("private void ShowPreviewMessage", StringComparison.Ordinal);
+        var showMessage = editor.IndexOf("private void TryShowPreviewMessage", StringComparison.Ordinal);
         var clearMessage = editor.IndexOf("private void ClearPreviewMessage", StringComparison.Ordinal);
 
         Assert.Contains("CompositionBuildResult.SelectPreviewErrors(result.Errors)", rebuild);
-        Assert.Contains("ShowPreviewMessage(", rebuild);
+        Assert.Contains("TryShowPreviewMessage(", rebuild);
         Assert.Contains("InfoBarSeverity.Warning", rebuild);
         Assert.Contains("ClearPreviewMessage();", rebuild);
-        Assert.Contains("ShowPreviewMessage(InfoBarSeverity.Error", rebuild);
+        Assert.Contains("TryShowPreviewMessage(publication, InfoBarSeverity.Error", rebuild);
         Assert.IsGreaterThanOrEqualTo(0, showMessage);
         Assert.IsGreaterThan(showMessage, clearMessage);
         Assert.Contains("_previewInfoBarIsCurrent = true;", editor[showMessage..clearMessage]);
         Assert.Contains("if (!_previewInfoBarIsCurrent)", editor[clearMessage..]);
+    }
+
+    [TestMethod]
+    public void AsyncInfoBarPublication_RejectsDisposedStaleOrLessRelevantUpdates()
+    {
+        var publication = new CutFlow.Views.InfoBarPublication(7);
+
+        Assert.IsTrue(CutFlow.Views.EditorView.CanPublishInfoBar(
+            disposed: false,
+            lifetimeCanceled: false,
+            currentRevision: 7,
+            Microsoft.UI.Xaml.Controls.InfoBarSeverity.Error,
+            publication,
+            Microsoft.UI.Xaml.Controls.InfoBarSeverity.Success));
+        Assert.IsFalse(CutFlow.Views.EditorView.CanPublishInfoBar(
+            disposed: true,
+            lifetimeCanceled: false,
+            currentRevision: 7,
+            Microsoft.UI.Xaml.Controls.InfoBarSeverity.Success,
+            publication,
+            Microsoft.UI.Xaml.Controls.InfoBarSeverity.Error));
+        Assert.IsFalse(CutFlow.Views.EditorView.CanPublishInfoBar(
+            disposed: false,
+            lifetimeCanceled: true,
+            currentRevision: 7,
+            Microsoft.UI.Xaml.Controls.InfoBarSeverity.Success,
+            publication,
+            Microsoft.UI.Xaml.Controls.InfoBarSeverity.Error));
+        Assert.IsFalse(CutFlow.Views.EditorView.CanPublishInfoBar(
+            disposed: false,
+            lifetimeCanceled: false,
+            currentRevision: 8,
+            Microsoft.UI.Xaml.Controls.InfoBarSeverity.Warning,
+            publication,
+            Microsoft.UI.Xaml.Controls.InfoBarSeverity.Success));
+        Assert.IsTrue(CutFlow.Views.EditorView.CanPublishInfoBar(
+            disposed: false,
+            lifetimeCanceled: false,
+            currentRevision: 8,
+            Microsoft.UI.Xaml.Controls.InfoBarSeverity.Warning,
+            publication,
+            Microsoft.UI.Xaml.Controls.InfoBarSeverity.Error));
+    }
+
+    [TestMethod]
+    public void AsyncUserVisibleResults_UseTheInfoBarPublicationGuard()
+    {
+        var root = FindRepositoryRoot();
+        var editor = File.ReadAllText(Path.Combine(root, "src", "CutFlow", "Views", "EditorView.xaml.cs"));
+        var export = File.ReadAllText(Path.Combine(root, "src", "CutFlow", "Views", "EditorView.Export.cs"));
+        var mainWindow = File.ReadAllText(Path.Combine(root, "src", "CutFlow", "MainWindow.xaml.cs"));
+
+        Assert.Contains("publication = CaptureInfoBarPublication();", editor);
+        Assert.Contains("TryShowProjectSaveFailure(", editor);
+        Assert.Contains("TryShowPreviewMessage(", editor);
+        Assert.Contains("TryShowMessage(publication, InfoBarSeverity.Error", editor);
+        Assert.Contains("TryShowMessage(publication, InfoBarSeverity.Success", editor);
+        Assert.Contains("TryShowMessage(publication, InfoBarSeverity.Error", export);
+        Assert.Contains("TryShowMessage(publication, InfoBarSeverity.Informational", export);
+        Assert.Contains("_workspaceSettingsSaveEditor = _editorView;", mainWindow);
+        Assert.Contains("state != DebouncedSaveState.SaveFailed || noticeTargetsCurrentView", mainWindow);
+        Assert.Contains("ReferenceEquals(editor, _workspaceSettingsSaveEditor)", mainWindow);
+        Assert.Contains("editor.ReportError(_workspaceSettingsSavePublication", mainWindow);
+        Assert.AreEqual(
+            2,
+            mainWindow.Split("_workspaceSettingsSaveEditor = null;", StringSplitOptions.None).Length - 1);
     }
 
     [TestMethod]
@@ -453,6 +632,31 @@ public sealed class Task11LifecycleTests
     }
 
     [TestMethod]
+    public void PreviewMediaFailure_IsGenerationGatedStopsIntentAndSurfacesAReadableError()
+    {
+        var root = FindRepositoryRoot();
+        var preview = File.ReadAllText(Path.Combine(root, "src", "CutFlow", "Controls", "PreviewPane.xaml.cs"));
+        var editor = File.ReadAllText(Path.Combine(root, "src", "CutFlow", "Views", "EditorView.xaml.cs"));
+        var handlerStart = preview.IndexOf("private void Player_MediaFailed", StringComparison.Ordinal);
+        var handlerEnd = preview.IndexOf("private void ApplyActualPlaybackState", handlerStart, StringComparison.Ordinal);
+
+        Assert.IsGreaterThanOrEqualTo(0, handlerStart);
+        Assert.IsGreaterThan(handlerStart, handlerEnd);
+        var handler = preview[handlerStart..handlerEnd];
+        Assert.Contains("_playerEventGeneration.IsCurrent(generation)", handler);
+        Assert.Contains("_playerEventGeneration.TryRun(generation", handler);
+        Assert.Contains("_positionTimer.Stop();", handler);
+        Assert.Contains("_playbackState.SetIntent(false);", handler);
+        Assert.Contains("ApplyActualPlaybackState(isPlaying: false);", handler);
+        Assert.Contains("PlaybackFailed?.Invoke", handler);
+        Assert.Contains("_player.MediaFailed += _mediaFailedHandler;", preview);
+        Assert.Contains("_player.MediaFailed -= _mediaFailedHandler;", preview);
+        Assert.Contains("Preview.PlaybackFailed += Preview_PlaybackFailed;", editor);
+        Assert.Contains("Preview.PlaybackFailed -= Preview_PlaybackFailed;", editor);
+        Assert.Contains("require a codec that is not installed", editor);
+    }
+
+    [TestMethod]
     public void ThumbnailWork_CancelsWhenCardsUnrealizeAndDisposalDoesNotBlockTheUiThread()
     {
         var root = FindRepositoryRoot();
@@ -472,6 +676,28 @@ public sealed class Task11LifecycleTests
         Assert.IsFalse(dispose.Contains(".Wait(", StringComparison.Ordinal));
         Assert.IsFalse(dispose.Contains(".Result", StringComparison.Ordinal));
         Assert.IsFalse(dispose.Contains("GetAwaiter().GetResult", StringComparison.Ordinal));
+    }
+
+    [TestMethod]
+    public void AssetSearchAndRealization_PublishOneVirtualizedListAndUseGuidLookup()
+    {
+        var mediaPanel = File.ReadAllText(Path.Combine(
+            FindRepositoryRoot(),
+            "src",
+            "CutFlow",
+            "Controls",
+            "MediaPanel.xaml.cs"));
+        var refreshStart = mediaPanel.IndexOf("public void RefreshAssets()", StringComparison.Ordinal);
+        var refreshEnd = mediaPanel.IndexOf("public void SetTool", refreshStart, StringComparison.Ordinal);
+        var refresh = mediaPanel[refreshStart..refreshEnd];
+        var realizationStart = mediaPanel.IndexOf("private void AssetGrid_ContainerContentChanging", StringComparison.Ordinal);
+        var realizationEnd = mediaPanel.IndexOf("private MenuFlyout CreateAssetContextMenu", realizationStart, StringComparison.Ordinal);
+        var realization = mediaPanel[realizationStart..realizationEnd];
+
+        Assert.Contains("AssetGrid.ItemsSource = _cards;", refresh);
+        Assert.DoesNotContain("_cards.Add", refresh);
+        Assert.Contains("_project.Assets.ToDictionary", refresh);
+        Assert.Contains("_assetsById.TryGetValue", realization);
     }
 
     [TestMethod]
@@ -496,6 +722,24 @@ public sealed class Task11LifecycleTests
         Assert.Contains("ThumbnailService.IsCurrentRequest(asset, request)", load);
         Assert.Contains("string.Equals(asset.ThumbnailCachePath, relativePath", load);
         Assert.Contains("Timeline.StopThumbnailWork", editor);
+    }
+
+    [TestMethod]
+    public void TimelineRendering_UsesBufferedViewportVirtualizationAndIndexedVideoLookup()
+    {
+        var timeline = File.ReadAllText(Path.Combine(
+            FindRepositoryRoot(),
+            "src",
+            "CutFlow",
+            "Controls",
+            "TimelineControl.xaml.cs"));
+        var renderStart = timeline.IndexOf("private void RenderClips()", StringComparison.Ordinal);
+        var renderEnd = timeline.IndexOf("private Border CreateVideoCard", renderStart, StringComparison.Ordinal);
+        var render = timeline[renderStart..renderEnd];
+
+        Assert.Contains("_project.VideoItems.ToDictionary", render);
+        Assert.Contains("IsClipVisible(bound)", render);
+        Assert.Contains("ClipWindowContainsViewport()", timeline);
     }
 
     [TestMethod]

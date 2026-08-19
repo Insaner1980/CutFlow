@@ -1,7 +1,7 @@
 dependency vulnerabilities
 Root: C:\Dev\CutFlow
 Command: dotnet package list --project CutFlow.slnx --vulnerable --include-transitive
-Started: 2026-08-17 17.48.46
+Started: 2026-08-19 09.18.19
 
   Determining projects to restore...
   All projects are up-to-date for restore.

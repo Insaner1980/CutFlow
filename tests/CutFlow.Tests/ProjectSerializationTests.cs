@@ -218,9 +218,31 @@ public sealed partial class ProjectSerializationTests
     {
         using var directory = new TemporaryDirectory();
         var id = Guid.NewGuid();
+        var explicitOffsetAssetId = Guid.NewGuid();
+        var missingOffsetAssetId = Guid.NewGuid();
         var projectDirectory = Directory.CreateDirectory(Path.Combine(directory.Path, "Projects", id.ToString("D")));
         await File.WriteAllTextAsync(Path.Combine(projectDirectory.FullName, "project.json"), $$"""
-            { "schemaVersion": 1, "id": "{{id}}", "name": "UTC project", "createdAt": "2026-08-09T23:59:59.9999999", "modifiedAt": "2026-08-10T02:00:00+03:00" }
+            {
+              "schemaVersion": 1,
+              "id": "{{id}}",
+              "name": "UTC project",
+              "createdAt": "2026-08-09T23:59:59.9999999",
+              "modifiedAt": "2026-08-10T02:00:00+03:00",
+              "assets": [
+                {
+                  "id": "{{explicitOffsetAssetId}}",
+                  "kind": "Video",
+                  "sourcePath": "C:\\Media\\explicit.mp4",
+                  "lastWriteUtc": "2026-08-10T02:30:00+03:00"
+                },
+                {
+                  "id": "{{missingOffsetAssetId}}",
+                  "kind": "Image",
+                  "sourcePath": "C:\\Media\\missing.jpg",
+                  "lastWriteUtc": "2026-08-09T23:45:00"
+                }
+              ]
+            }
             """, TestContext.CancellationToken);
 
         var savedAt = new DateTimeOffset(2026, 8, 11, 0, 0, 0, TimeSpan.Zero);
@@ -233,6 +255,13 @@ public sealed partial class ProjectSerializationTests
         Assert.AreEqual(new DateTimeOffset(2026, 8, 9, 23, 0, 0, TimeSpan.Zero), loaded.ModifiedAt);
         Assert.AreEqual(TimeSpan.Zero, loaded.CreatedAt.Offset);
         Assert.AreEqual(TimeSpan.Zero, loaded.ModifiedAt.Offset);
+        Assert.AreEqual(
+            new DateTimeOffset(2026, 8, 9, 23, 30, 0, TimeSpan.Zero),
+            loaded.Assets.Single(asset => asset.Id == explicitOffsetAssetId).LastWriteUtc);
+        Assert.AreEqual(
+            new DateTimeOffset(2026, 8, 9, 23, 45, 0, TimeSpan.Zero),
+            loaded.Assets.Single(asset => asset.Id == missingOffsetAssetId).LastWriteUtc);
+        Assert.IsTrue(loaded.Assets.All(asset => asset.LastWriteUtc.Offset == TimeSpan.Zero));
 
         await service.SaveAsync(loaded, TestContext.CancellationToken);
         using var savedJson = JsonDocument.Parse(
@@ -240,6 +269,9 @@ public sealed partial class ProjectSerializationTests
 
         Assert.AreEqual("2026-08-09T23:59:59.9999999+00:00", savedJson.RootElement.GetProperty("createdAt").GetString());
         Assert.AreEqual("2026-08-11T00:00:00+00:00", savedJson.RootElement.GetProperty("modifiedAt").GetString());
+        var savedAssets = savedJson.RootElement.GetProperty("assets").EnumerateArray().ToArray();
+        Assert.AreEqual("2026-08-09T23:30:00+00:00", savedAssets[0].GetProperty("lastWriteUtc").GetString());
+        Assert.AreEqual("2026-08-09T23:45:00+00:00", savedAssets[1].GetProperty("lastWriteUtc").GetString());
     }
 
     [TestMethod]
@@ -933,6 +965,113 @@ public sealed partial class ProjectSerializationTests
     }
 
     [TestMethod]
+    public async Task LoadAsync_WhenJsonExceedsSizeLimit_RejectsBeforeParsing()
+    {
+        using var directory = new TemporaryDirectory();
+        var id = Guid.NewGuid();
+        var projectDirectory = Directory.CreateDirectory(Path.Combine(directory.Path, "Projects", id.ToString("D")));
+        var json = new string(' ', ProjectService.MaximumProjectJsonCharacters + 1);
+        await File.WriteAllTextAsync(
+            Path.Combine(projectDirectory.FullName, "project.json"),
+            json,
+            TestContext.CancellationToken);
+
+        var exception = await Assert.ThrowsExactlyAsync<InvalidDataException>(
+            () => new ProjectService(directory.Path).LoadAsync(id, TestContext.CancellationToken));
+
+        Assert.Contains("size limit", exception.Message);
+    }
+
+    [TestMethod]
+    public async Task LoadAsync_WhenUnknownJsonExceedsDepthLimit_RejectsProject()
+    {
+        using var directory = new TemporaryDirectory();
+        var id = Guid.NewGuid();
+        var projectDirectory = Directory.CreateDirectory(Path.Combine(directory.Path, "Projects", id.ToString("D")));
+        var nested = string.Concat(Enumerable.Repeat("{\"unknown\":", 33)) + "null" + new string('}', 33);
+        await File.WriteAllTextAsync(
+            Path.Combine(projectDirectory.FullName, "project.json"),
+            $$"""{ "schemaVersion": 1, "id": "{{id}}", "extra": {{nested}} }""",
+            TestContext.CancellationToken);
+
+        await Assert.ThrowsExactlyAsync<InvalidDataException>(
+            () => new ProjectService(directory.Path).LoadAsync(id, TestContext.CancellationToken));
+    }
+
+    [TestMethod]
+    public async Task LoadAsync_WhenResourceCollectionsExceedLimit_RejectsBeforeCreatingUiState()
+    {
+        using var directory = new TemporaryDirectory();
+        var cases = new[]
+        {
+            (PropertyName: "assets", Count: ProjectService.MaximumAssetCount + 1),
+            (PropertyName: "textItems", Count: ProjectService.MaximumTimelineItemCount + 1)
+        };
+        foreach (var testCase in cases)
+        {
+            var id = Guid.NewGuid();
+            var projectDirectory = Directory.CreateDirectory(Path.Combine(directory.Path, "Projects", id.ToString("D")));
+            var items = string.Join(',', Enumerable.Repeat("{}", testCase.Count));
+            await File.WriteAllTextAsync(
+                Path.Combine(projectDirectory.FullName, "project.json"),
+                $$"""{ "schemaVersion": 1, "id": "{{id}}", "{{testCase.PropertyName}}": [{{items}}] }""",
+                TestContext.CancellationToken);
+
+            var exception = await Assert.ThrowsExactlyAsync<InvalidDataException>(
+                () => new ProjectService(directory.Path).LoadAsync(id, TestContext.CancellationToken));
+
+            Assert.Contains("assets or timeline items", exception.Message);
+        }
+    }
+
+    [TestMethod]
+    public async Task LoadAsync_WhenTextContentExceedsLimit_RejectsBeforeRenderingOrCaching()
+    {
+        using var directory = new TemporaryDirectory();
+        var id = Guid.NewGuid();
+        var textId = Guid.NewGuid();
+        var projectDirectory = Directory.CreateDirectory(Path.Combine(directory.Path, "Projects", id.ToString("D")));
+        var text = new string('x', ProjectService.MaximumPersistedTextLength + 1);
+        await File.WriteAllTextAsync(
+            Path.Combine(projectDirectory.FullName, "project.json"),
+            JsonSerializer.Serialize(new
+            {
+                schemaVersion = 1,
+                id,
+                textItems = new[] { new { id = textId, text } }
+            }),
+            TestContext.CancellationToken);
+
+        var exception = await Assert.ThrowsExactlyAsync<InvalidDataException>(
+            () => new ProjectService(directory.Path).LoadAsync(id, TestContext.CancellationToken));
+
+        Assert.Contains("content length", exception.Message);
+    }
+
+    [TestMethod]
+    public async Task LoadAsync_WhenAssetsRepeatNormalizedSourcePath_RejectsAmbiguousProject()
+    {
+        using var directory = new TemporaryDirectory();
+        var id = Guid.NewGuid();
+        var projectDirectory = Directory.CreateDirectory(Path.Combine(directory.Path, "Projects", id.ToString("D")));
+        await File.WriteAllTextAsync(Path.Combine(projectDirectory.FullName, "project.json"), $$"""
+            {
+              "schemaVersion": 1,
+              "id": "{{id}}",
+              "assets": [
+                { "id": "{{Guid.NewGuid()}}", "kind": "Video", "sourcePath": "C:\\Media\\clip.mp4" },
+                { "id": "{{Guid.NewGuid()}}", "kind": "Video", "sourcePath": "c:\\media\\.\\CLIP.mp4" }
+              ]
+            }
+            """, TestContext.CancellationToken);
+
+        var exception = await Assert.ThrowsExactlyAsync<InvalidDataException>(
+            () => new ProjectService(directory.Path).LoadAsync(id, TestContext.CancellationToken));
+
+        Assert.Contains("unique source paths", exception.Message);
+    }
+
+    [TestMethod]
     public async Task LoadAsync_WhenReferenceStringsAreExplicitJsonNull_NormalizesModelDefaults()
     {
         using var directory = new TemporaryDirectory();
@@ -1045,6 +1184,28 @@ public sealed partial class ProjectSerializationTests
     }
 
     [TestMethod]
+    public async Task SaveAsync_WhenNormalizationFails_PreservesExistingJsonModifiedAtAndCreatesNoOwnedTempFile()
+    {
+        using var directory = new TemporaryDirectory();
+        var service = new ProjectService(directory.Path);
+        var project = await service.CreateAsync("Invalid normalized state", TestContext.CancellationToken);
+        var projectDirectory = Path.Combine(directory.Path, "Projects", project.Id.ToString("D"));
+        var projectPath = Path.Combine(projectDirectory, "project.json");
+        var originalBytes = await File.ReadAllBytesAsync(projectPath, TestContext.CancellationToken);
+        var originalModifiedAt = project.ModifiedAt;
+        var duplicateAssetId = Guid.NewGuid();
+        project.Assets.Add(new ProjectAsset { Id = duplicateAssetId, SourcePath = Path.Combine(directory.Path, "first.mp4") });
+        project.Assets.Add(new ProjectAsset { Id = duplicateAssetId, SourcePath = Path.Combine(directory.Path, "second.mp4") });
+
+        await Assert.ThrowsExactlyAsync<InvalidDataException>(
+            () => service.SaveAsync(project, TestContext.CancellationToken));
+
+        Assert.AreEqual(originalModifiedAt, project.ModifiedAt);
+        Assert.AreSequenceEqual(originalBytes, await File.ReadAllBytesAsync(projectPath, TestContext.CancellationToken));
+        Assert.IsEmpty(Directory.EnumerateFiles(projectDirectory, "project.json.*.tmp"));
+    }
+
+    [TestMethod]
     public async Task SaveAsync_WhenSerializationFails_DoesNotDeleteAnUnownedTempFile()
     {
         using var directory = new TemporaryDirectory();
@@ -1056,14 +1217,16 @@ public sealed partial class ProjectSerializationTests
         var temporaryPath = Path.Combine(projectDirectory.FullName, "project.json.tmp");
         const string originalJson = "{\"schemaVersion\":1,\"name\":\"previous\"}";
         await File.WriteAllTextAsync(projectPath, originalJson, TestContext.CancellationToken);
+        var originalBytes = await File.ReadAllBytesAsync(projectPath, TestContext.CancellationToken);
         await File.WriteAllTextAsync(temporaryPath, "stale temporary data", TestContext.CancellationToken);
         var service = new ProjectService(directory.Path, _ => throw new InvalidOperationException("Deterministic serializer failure"));
 
         await Assert.ThrowsExactlyAsync<InvalidOperationException>(() => service.SaveAsync(project, TestContext.CancellationToken));
 
         Assert.AreEqual(originalModifiedAt, project.ModifiedAt);
-        Assert.AreEqual(originalJson, await File.ReadAllTextAsync(projectPath, TestContext.CancellationToken));
+        Assert.AreSequenceEqual(originalBytes, await File.ReadAllBytesAsync(projectPath, TestContext.CancellationToken));
         Assert.AreEqual("stale temporary data", await File.ReadAllTextAsync(temporaryPath, TestContext.CancellationToken));
+        Assert.IsEmpty(Directory.EnumerateFiles(projectDirectory.FullName, "project.json.*.tmp"));
     }
 
     [TestMethod]
@@ -1096,14 +1259,15 @@ public sealed partial class ProjectSerializationTests
         var projectPath = Path.Combine(projectDirectory.FullName, "project.json");
         const string originalJson = "{\"schemaVersion\":1,\"name\":\"previous\"}";
         await File.WriteAllTextAsync(projectPath, originalJson, TestContext.CancellationToken);
+        var originalBytes = await File.ReadAllBytesAsync(projectPath, TestContext.CancellationToken);
         using var cancellation = new CancellationTokenSource();
         cancellation.Cancel();
 
         await Assert.ThrowsExactlyAsync<OperationCanceledException>(() => new ProjectService(directory.Path).SaveAsync(project, cancellation.Token));
 
         Assert.AreEqual(originalModifiedAt, project.ModifiedAt);
-        Assert.AreEqual(originalJson, await File.ReadAllTextAsync(projectPath, TestContext.CancellationToken));
-        Assert.IsFalse(File.Exists(projectPath + ".tmp"));
+        Assert.AreSequenceEqual(originalBytes, await File.ReadAllBytesAsync(projectPath, TestContext.CancellationToken));
+        Assert.IsEmpty(Directory.EnumerateFiles(projectDirectory.FullName, "project.json.*.tmp"));
     }
 
     [TestMethod]
@@ -1113,7 +1277,7 @@ public sealed partial class ProjectSerializationTests
         var initialService = new ProjectService(directory.Path);
         var project = await initialService.CreateAsync("Canceled serialization", TestContext.CancellationToken);
         var projectPath = Path.Combine(directory.Path, "Projects", project.Id.ToString("D"), "project.json");
-        var originalJson = await File.ReadAllTextAsync(projectPath, TestContext.CancellationToken);
+        var originalBytes = await File.ReadAllBytesAsync(projectPath, TestContext.CancellationToken);
         var originalModifiedAt = project.ModifiedAt;
         using var cancellation = new CancellationTokenSource();
         var writeStarted = false;
@@ -1136,7 +1300,64 @@ public sealed partial class ProjectSerializationTests
 
         Assert.IsFalse(writeStarted);
         Assert.AreEqual(originalModifiedAt, project.ModifiedAt);
-        Assert.AreEqual(originalJson, await File.ReadAllTextAsync(projectPath, TestContext.CancellationToken));
+        Assert.AreSequenceEqual(originalBytes, await File.ReadAllBytesAsync(projectPath, TestContext.CancellationToken));
+        Assert.IsEmpty(Directory.EnumerateFiles(Path.GetDirectoryName(projectPath)!, "project.json.*.tmp"));
+    }
+
+    [TestMethod]
+    public async Task SaveAsync_WhenWriteFailsAfterCreatingOwnedTemp_PreservesExistingBytesAndCleansOwnedTemp()
+    {
+        using var directory = new TemporaryDirectory();
+        var initialService = new ProjectService(directory.Path);
+        var project = await initialService.CreateAsync("Write failure", TestContext.CancellationToken);
+        var projectPath = Path.Combine(directory.Path, "Projects", project.Id.ToString("D"), "project.json");
+        var originalBytes = await File.ReadAllBytesAsync(projectPath, TestContext.CancellationToken);
+        var originalModifiedAt = project.ModifiedAt;
+        string? ownedTemporaryPath = null;
+        var service = new ProjectService(
+            directory.Path,
+            writeAndFlushAsync: async (path, _, _) =>
+            {
+                ownedTemporaryPath = path;
+                await File.WriteAllBytesAsync(path, [0x7B, 0x22, 0x70], TestContext.CancellationToken);
+                throw new IOException("Deterministic write failure");
+            });
+        project.Name = "Must not be published";
+
+        await Assert.ThrowsExactlyAsync<IOException>(() => service.SaveAsync(project, TestContext.CancellationToken));
+
+        Assert.AreEqual(originalModifiedAt, project.ModifiedAt);
+        Assert.AreSequenceEqual(originalBytes, await File.ReadAllBytesAsync(projectPath, TestContext.CancellationToken));
+        Assert.IsNotNull(ownedTemporaryPath);
+        Assert.IsFalse(File.Exists(ownedTemporaryPath));
+    }
+
+    [TestMethod]
+    public async Task SaveAsync_WhenFlushOperationFails_PreservesExistingBytesAndCleansOwnedTemp()
+    {
+        using var directory = new TemporaryDirectory();
+        var initialService = new ProjectService(directory.Path);
+        var project = await initialService.CreateAsync("Flush failure", TestContext.CancellationToken);
+        var projectPath = Path.Combine(directory.Path, "Projects", project.Id.ToString("D"), "project.json");
+        var originalBytes = await File.ReadAllBytesAsync(projectPath, TestContext.CancellationToken);
+        var originalModifiedAt = project.ModifiedAt;
+        string? ownedTemporaryPath = null;
+        var service = new ProjectService(
+            directory.Path,
+            writeAndFlushAsync: async (path, json, _) =>
+            {
+                ownedTemporaryPath = path;
+                await File.WriteAllTextAsync(path, json, TestContext.CancellationToken);
+                throw new IOException("Deterministic flush failure");
+            });
+        project.Name = "Must not be published";
+
+        await Assert.ThrowsExactlyAsync<IOException>(() => service.SaveAsync(project, TestContext.CancellationToken));
+
+        Assert.AreEqual(originalModifiedAt, project.ModifiedAt);
+        Assert.AreSequenceEqual(originalBytes, await File.ReadAllBytesAsync(projectPath, TestContext.CancellationToken));
+        Assert.IsNotNull(ownedTemporaryPath);
+        Assert.IsFalse(File.Exists(ownedTemporaryPath));
     }
 
     [TestMethod]
@@ -1153,14 +1374,16 @@ public sealed partial class ProjectSerializationTests
         var projectPath = Path.Combine(directory.Path, "Projects", project.Id.ToString("D"), "project.json");
         Directory.CreateDirectory(Path.GetDirectoryName(projectPath)!);
         var unownedTemporaryPath = projectPath + ".tmp";
-        var originalJson = destinationExists ? await File.ReadAllTextAsync(projectPath, TestContext.CancellationToken) : null;
+        var originalBytes = destinationExists ? await File.ReadAllBytesAsync(projectPath, TestContext.CancellationToken) : null;
         var originalModifiedAt = project.ModifiedAt;
         await File.WriteAllTextAsync(unownedTemporaryPath, "another operation", TestContext.CancellationToken);
         using var cancellation = new CancellationTokenSource();
+        string? ownedTemporaryPath = null;
         var service = new ProjectService(
             directory.Path,
             writeAndFlushAsync: async (path, json, _) =>
             {
+                ownedTemporaryPath = path;
                 await File.WriteAllTextAsync(path, json, TestContext.CancellationToken);
                 cancellation.Cancel();
             });
@@ -1172,9 +1395,11 @@ public sealed partial class ProjectSerializationTests
         Assert.AreEqual(destinationExists, File.Exists(projectPath));
         if (destinationExists)
         {
-            Assert.AreEqual(originalJson, await File.ReadAllTextAsync(projectPath, TestContext.CancellationToken));
+            Assert.AreSequenceEqual(originalBytes!, await File.ReadAllBytesAsync(projectPath, TestContext.CancellationToken));
         }
         Assert.AreEqual("another operation", await File.ReadAllTextAsync(unownedTemporaryPath, TestContext.CancellationToken));
+        Assert.IsNotNull(ownedTemporaryPath);
+        Assert.IsFalse(File.Exists(ownedTemporaryPath));
     }
 
     [TestMethod]
@@ -1184,7 +1409,7 @@ public sealed partial class ProjectSerializationTests
         var initialService = new ProjectService(directory.Path);
         var project = await initialService.CreateAsync("Cleanup failure", TestContext.CancellationToken);
         var projectPath = Path.Combine(directory.Path, "Projects", project.Id.ToString("D"), "project.json");
-        var originalJson = await File.ReadAllTextAsync(projectPath, TestContext.CancellationToken);
+        var originalBytes = await File.ReadAllBytesAsync(projectPath, TestContext.CancellationToken);
         var originalModifiedAt = project.ModifiedAt;
         using var cancellation = new CancellationTokenSource();
         string? ownedTemporaryPath = null;
@@ -1205,7 +1430,7 @@ public sealed partial class ProjectSerializationTests
                 () => service.SaveAsync(project, cancellation.Token));
 
             Assert.AreEqual(originalModifiedAt, project.ModifiedAt);
-            Assert.AreEqual(originalJson, await File.ReadAllTextAsync(projectPath, TestContext.CancellationToken));
+            Assert.AreSequenceEqual(originalBytes, await File.ReadAllBytesAsync(projectPath, TestContext.CancellationToken));
             Assert.IsNotNull(ownedTemporaryPath);
             Assert.IsTrue(File.Exists(ownedTemporaryPath));
         }
@@ -1262,7 +1487,7 @@ public sealed partial class ProjectSerializationTests
         var project = ProjectDocument.CreateNew("Locked destination", DateTimeOffset.UnixEpoch);
         await service.SaveAsync(project, TestContext.CancellationToken);
         var projectPath = Path.Combine(directory.Path, "Projects", project.Id.ToString("D"), "project.json");
-        var originalJson = await File.ReadAllTextAsync(projectPath, TestContext.CancellationToken);
+        var originalBytes = await File.ReadAllBytesAsync(projectPath, TestContext.CancellationToken);
         var originalModifiedAt = project.ModifiedAt;
         project.Name = "Changed while locked";
 
@@ -1272,8 +1497,8 @@ public sealed partial class ProjectSerializationTests
         }
 
         Assert.AreEqual(originalModifiedAt, project.ModifiedAt);
-        Assert.AreEqual(originalJson, await File.ReadAllTextAsync(projectPath, TestContext.CancellationToken));
-        Assert.IsFalse(File.Exists(projectPath + ".tmp"));
+        Assert.AreSequenceEqual(originalBytes, await File.ReadAllBytesAsync(projectPath, TestContext.CancellationToken));
+        Assert.IsEmpty(Directory.EnumerateFiles(Path.GetDirectoryName(projectPath)!, "project.json.*.tmp"));
     }
 
     [TestMethod]
@@ -1343,7 +1568,7 @@ public sealed partial class ProjectSerializationTests
         await Assert.ThrowsExactlyAsync<InvalidDataException>(() => new ProjectService(directory.Path).SaveAsync(project, TestContext.CancellationToken));
 
         Assert.AreEqual(originalJson, await File.ReadAllTextAsync(projectPath, TestContext.CancellationToken));
-        Assert.IsFalse(File.Exists(projectPath + ".tmp"));
+        Assert.IsEmpty(Directory.EnumerateFiles(projectDirectory.FullName, "project.json.*.tmp"));
     }
 
     [TestMethod]

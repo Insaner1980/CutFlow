@@ -55,7 +55,7 @@
                         TabIndex="22">
                         <GridView.ItemsPanel>
                             <ItemsPanelTemplate>
-                                <ItemsWrapGrid Orientation="Horizontal" ItemWidth="124" ItemHeight="154" />
+                                <ItemsWrapGrid Orientation="Horizontal" ItemWidth="124" />
                             </ItemsPanelTemplate>
                         </GridView.ItemsPanel>
                         <GridView.ItemContainerStyle>
@@ -69,21 +69,13 @@
                         <GridView.ItemTemplate>
                             <DataTemplate>
                                 <Border
+                                    MinHeight="154"
                                     Padding="6"
                                     Background="{StaticResource ControlBackgroundBrush}"
                                     CanDrag="True"
                                     CornerRadius="6"
                                     DragStarting="AssetCard_DragStarting"
-                                    ToolTipService.ToolTip="{Binding FullPath}">
-                                    <Border.ContextFlyout>
-                                        <MenuFlyout>
-                                            <MenuFlyoutItem Text="Add to track" Tag="{Binding AssetId}" IsEnabled="{Binding CanAdd}" Click="AddToTrack_Click" />
-                                            <MenuFlyoutItem Text="Relink" Tag="{Binding AssetId}" Click="Relink_Click" />
-                                            <MenuFlyoutItem Text="Show in Explorer" Tag="{Binding AssetId}" Click="ShowInExplorer_Click" />
-                                            <MenuFlyoutSeparator />
-                                            <MenuFlyoutItem Text="Remove from project" Tag="{Binding AssetId}" Click="Remove_Click" />
-                                        </MenuFlyout>
-                                    </Border.ContextFlyout>
+                                    ToolTipService.ToolTip="{Binding FileName}">
                                     <Grid RowSpacing="4">
                                         <Grid.RowDefinitions>
                                             <RowDefinition Height="78" />
@@ -118,7 +110,7 @@
                                                     Background="{StaticResource WarningBrush}"
                                                     CornerRadius="3"
                                                     Visibility="{Binding MissingVisibility}">
-                                                    <TextBlock FontSize="9" Foreground="{StaticResource WindowBackgroundBrush}" Text="Missing" />
+                                                    <TextBlock FontSize="9" Foreground="{StaticResource AccentTextBrush}" Text="Missing" />
                                                 </Border>
                                             </Grid>
                                         </Border>

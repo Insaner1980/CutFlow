@@ -82,6 +82,19 @@ public static class ExportPresentation
         return !isExporting && project.VideoItems.Any(item => item.DurationMilliseconds > 0);
     }
 
+    public static string GetDisabledHelpText(ProjectDocument project, bool isExporting)
+    {
+        ArgumentNullException.ThrowIfNull(project);
+        if (isExporting)
+        {
+            return "Finish or cancel the active export operation before exporting again.";
+        }
+
+        return project.VideoItems.Any(item => item.DurationMilliseconds > 0)
+            ? string.Empty
+            : "Add positive-duration visual media to V1 before exporting.";
+    }
+
     public static double NormalizeProgress(double value) =>
         double.IsFinite(value) ? Math.Clamp(value, 0, 100) : 0;
 

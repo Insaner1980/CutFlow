@@ -1,5 +1,6 @@
 using CutFlow.Utilities;
 using Microsoft.VisualStudio.TestTools.UnitTesting;
+using System.Xml.Linq;
 
 namespace CutFlow.Tests;
 
@@ -74,6 +75,26 @@ public sealed class Task11WorkspaceSettingsTests
     }
 
     [TestMethod]
+    public void TimelineResize_HandleSupportsKeyboardArrowsAndExposesInstructions()
+    {
+        var xaml = File.ReadAllText(Path.Combine(
+            FindRepositoryRoot(),
+            "src",
+            "CutFlow",
+            "Views",
+            "EditorView.xaml"));
+
+        Assert.Contains("<ContentControl x:Name=\"TimelineResizeHandle\"", xaml);
+        Assert.Contains("IsTabStop=\"True\" UseSystemFocusVisuals=\"True\"", xaml);
+        Assert.Contains("AutomationProperties.Name=\"Resize timeline\"", xaml);
+        Assert.Contains("AutomationProperties.HelpText=\"Use the Up and Down arrow keys to resize the timeline.\"", xaml);
+        Assert.Contains("KeyDown=\"TimelineResizeHandle_KeyDown\"", xaml);
+        Assert.AreEqual(20d, CutFlow.Views.EditorView.TimelineResizeDelta(Windows.System.VirtualKey.Up));
+        Assert.AreEqual(-20d, CutFlow.Views.EditorView.TimelineResizeDelta(Windows.System.VirtualKey.Down));
+        Assert.AreEqual(0d, CutFlow.Views.EditorView.TimelineResizeDelta(Windows.System.VirtualKey.Enter));
+    }
+
+    [TestMethod]
     public void PreviewTransport_NarrowWidthKeepsEveryControlReachableByHorizontalScrolling()
     {
         var xaml = File.ReadAllText(Path.Combine(
@@ -98,6 +119,46 @@ public sealed class Task11WorkspaceSettingsTests
         Assert.Contains("x:Name=\"MuteButton\"", transport);
         Assert.Contains("x:Name=\"LoopButton\"", transport);
         Assert.Contains("x:Name=\"FitButton\"", transport);
+    }
+
+    [TestMethod]
+    public void EditorTopBar_TabOrderIncludesTheEditableProjectNameInVisualOrder()
+    {
+        var document = XDocument.Load(Path.Combine(
+            FindRepositoryRoot(),
+            "src",
+            "CutFlow",
+            "Views",
+            "EditorView.xaml"));
+        XNamespace x = "http://schemas.microsoft.com/winfx/2006/xaml";
+
+        var topBar = document.Root!
+            .Elements()
+            .Single()
+            .Elements()
+            .Single(element => element.Name.LocalName == "Grid" && (string?)element.Attribute("Grid.Row") == "0");
+        var tabStops = topBar
+            .Descendants()
+            .Where(element => element.Attribute("TabIndex") is not null)
+            .Select(element => new
+            {
+                Name = (string?)element.Attribute(x + "Name") ?? (string?)element.Attribute("AutomationProperties.Name"),
+                TabIndex = int.Parse(element.Attribute("TabIndex")!.Value, System.Globalization.CultureInfo.InvariantCulture)
+            })
+            .ToList();
+
+        CollectionAssert.AreEqual(
+            new[]
+            {
+                "BackButton:0",
+                "ProjectNameBox:1",
+                "UndoButton:2",
+                "RedoButton:3",
+                "InspectorToggleButton:4",
+                "ExportButton:5",
+                "ExportAvailabilityButton:6"
+            },
+            tabStops.Select(item => $"{item.Name}:{item.TabIndex}").ToArray());
     }
 
     [TestMethod]
@@ -154,6 +215,37 @@ public sealed class Task11WorkspaceSettingsTests
         Assert.Contains("ToolTipService.SetToolTip(InspectorToggleButton, action);", applyLayout);
         Assert.Contains("ApplyInspectorLayout();", toggle);
         Assert.Contains("ApplyInspectorLayout();", close);
+    }
+
+    [TestMethod]
+    public void NarrowInspector_CloseButtonAndEscapeRestoreFocusThroughTheSharedDismissalRoute()
+    {
+        var source = File.ReadAllText(Path.Combine(
+            FindRepositoryRoot(),
+            "src",
+            "CutFlow",
+            "Views",
+            "EditorView.xaml.cs"));
+        var close = GetMethod(source, "private void CloseOverlayInspector_Click", "private void Inspector_EditCommitted");
+        var escape = GetMethod(source, "private void HandlePlaybackOrEscapeShortcut", "private bool IsEditableControlFocused");
+
+        Assert.Contains("DismissNarrowInspector();", close);
+        Assert.Contains("DismissNarrowInspector();", escape);
+    }
+
+    [TestMethod]
+    [DataRow(false, "hide")]
+    [DataRow(true, "hide,restore")]
+    public void TransientSurfaceDismissal_RestoresOnlyWhenTheSurfaceOwnedFocus(bool ownedFocus, string expectedCalls)
+    {
+        var calls = new List<string>();
+
+        CutFlow.Views.EditorView.DismissTransientSurface(
+            () => ownedFocus,
+            () => calls.Add("hide"),
+            () => calls.Add("restore"));
+
+        Assert.AreEqual(expectedCalls, string.Join(',', calls));
     }
 
     [TestMethod]
@@ -216,11 +308,14 @@ public sealed class Task11WorkspaceSettingsTests
     }
 
     [TestMethod]
-    public void InspectorEnter_MovesFocusAndObservesHandledNumberBoxKeyUp()
+    public void InspectorEnter_MovesFocusOnlyAfterValidationAndObservesHandledNumberBoxKeyUp()
     {
         var source = File.ReadAllText(Path.Combine(FindRepositoryRoot(), "src", "CutFlow", "Controls", "InspectorPanel.xaml.cs"));
+        var keyDown = GetMethod(source, "private void EditBox_KeyDown", "private void EditBox_LostFocus");
 
-        Assert.Contains("CommitTextBox(textBox);\r\n            FocusManager.TryMoveFocus(FocusNavigationDirection.Next);", source.ReplaceLineEndings("\r\n"));
+        Assert.Contains("CommitTextBox(textBox);", keyDown);
+        Assert.Contains("if (ValidationText.Visibility != Visibility.Visible)", keyDown);
+        Assert.Contains("FocusManager.TryMoveFocus(FocusNavigationDirection.Next);", keyDown);
         Assert.AreEqual(2, source.Split("new KeyEventHandler(TextPositionBox_KeyUp), handledEventsToo: true", StringSplitOptions.None).Length - 1);
         Assert.Contains("if (e.Key == VirtualKey.Enter)", source);
     }

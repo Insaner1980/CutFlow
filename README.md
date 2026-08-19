@@ -6,8 +6,8 @@ CutFlow is a local-only Windows video editor built with C#, WinUI 3, and the nat
 
 - An x64 Windows PC. Windows 11 is the primary target. The package declares Windows 10 version 1809 (build 17763) as its minimum, but media support still depends on the codecs installed in Windows.
 - [.NET SDK 10.0.302](https://dotnet.microsoft.com/download/dotnet/10.0), pinned by `global.json` (`latestPatch` roll-forward, prerelease SDKs disabled).
-- Windows SDK 10.0.26100.0. The project restores `Microsoft.Windows.SDK.BuildTools` 10.0.26100.7705.
-- [Windows App SDK 2.3.1 x64 runtime](https://learn.microsoft.com/windows/apps/windows-app-sdk/downloads). The matching 2.3.1 NuGet package is restored with the project.
+- Windows SDK 10.0.26100.0. The project restores `Microsoft.Windows.SDK.BuildTools` 10.0.28000.2526.
+- [Windows App SDK 2.4 x64 runtime](https://learn.microsoft.com/windows/apps/windows-app-sdk/downloads). The matching 2.4.0 NuGet package is restored with the project.
 - PowerShell and [Developer Mode](https://learn.microsoft.com/windows/apps/get-started/enable-your-device-for-development) for loose-package registration.
 
 The verified development configuration is x64; x86 and Arm64 are not configured by this solution. Visual Studio is optional for the command-line workflow below.
@@ -17,10 +17,10 @@ The verified development configuration is x64; x86 and Arm64 are not configured 
 Run from the repository root:
 
 ```powershell
-dotnet restore .\CutFlow.slnx
-dotnet test .\CutFlow.slnx -c Release --no-restore
-dotnet build .\CutFlow.slnx -c Release -p:Platform=x64 --no-restore
+.\scripts\Verify-CutFlowRelease.ps1
 ```
+
+The command removes only the app and test `bin`/`obj` directories and ignored local `.sonarqube` analysis output, restores the solution, runs the Release x64 tests, and performs a non-incremental Release x64 build. This clean-output sequence prevents a passing incremental build or stale analysis state from being the only release evidence.
 
 The Release loose-package layout is written to:
 
@@ -28,7 +28,7 @@ The Release loose-package layout is written to:
 src\CutFlow\bin\x64\Release\net10.0-windows10.0.26100.0
 ```
 
-These commands are the reproducible verification sequence; successful execution on the target machine is required before treating a build as release-ready.
+This command is the reproducible verification sequence; successful execution on the target machine is required before treating a build as release-ready.
 
 ## Register and run
 
@@ -37,6 +37,14 @@ The application is a framework-dependent, packaged WinUI 3 app. Register the bui
 ```powershell
 .\scripts\Register-CutFlowDevelopment.ps1 -Configuration Release
 ```
+
+For the clean-checkout launch gate, verification, registration, and launch can be run as one command:
+
+```powershell
+.\scripts\Verify-CutFlowRelease.ps1 -RegisterAndLaunch
+```
+
+Registration requires Developer Mode and the Windows App SDK runtime listed under Requirements, but it does not use a repository certificate or signing key. A successful process launch is not interactive acceptance; complete the fresh-checkout gate in `MANUAL_ACCEPTANCE.md` and record the environment and result.
 
 The helper refuses to register when a `CutFlow` package is installed outside this repository's `src\CutFlow\bin` tree. This prevents development registration from replacing or being confused with a production installation. It also launches only the package registered from the requested build layout.
 
@@ -47,7 +55,7 @@ dotnet build .\src\CutFlow\CutFlow.csproj -c Debug -p:Platform=x64
 .\scripts\Register-CutFlowDevelopment.ps1 -Configuration Debug
 ```
 
-If activation reports a missing framework package, install the Windows App SDK 2.3.1 x64 runtime linked under Requirements and register the layout again.
+If activation reports a missing framework package, install the Windows App SDK 2.4 x64 runtime linked under Requirements and register the layout again.
 
 ## Editing workflow
 
@@ -126,7 +134,7 @@ Exports are H.264 video with AAC stereo audio in an MP4 container, always at 30 
 | 720p | 1280x720 | 720x1280 | 720x720 | 5 Mbit/s | 8 Mbit/s |
 | 1080p | 1920x1080 | 1080x1920 | 1080x1080 | 8 Mbit/s | 12 Mbit/s |
 
-Export requires at least one visual V1 item and all referenced V1/A1 source files. Rendering uses `MediaComposition.RenderToFileAsync` with precise trimming and a temporary sibling file; an incomplete temporary export is removed after failure or cancellation. CutFlow does not add a watermark.
+Export requires at least one visual V1 item, all positive-duration A1 source files, and all positive-duration V1 source files while V1 is visible. Hidden V1 is exported as project-background filler without reading its source files. Rendering uses `MediaComposition.RenderToFileAsync` with precise trimming and a temporary sibling file; an incomplete temporary export is removed after failure or cancellation. CutFlow does not add a watermark.
 
 ## V1 limitations
 

@@ -49,6 +49,25 @@ public sealed class InspectorValidationTests
         Assert.Contains("InspectorValidationPolicy.ShouldPublish", validation);
     }
 
+    [TestMethod]
+    public void EnterCommit_MovesFocusOnlyAfterValidInput()
+    {
+        var code = File.ReadAllText(Path.Combine(
+            FindRepositoryRoot(),
+            "src",
+            "CutFlow",
+            "Controls",
+            "InspectorPanel.xaml.cs"));
+        var keyDown = GetMethod(code, "private void EditBox_KeyDown", "private void EditBox_LostFocus");
+        var commit = keyDown.IndexOf("CommitTextBox(textBox);", StringComparison.Ordinal);
+        var validationGate = keyDown.IndexOf("if (ValidationText.Visibility != Visibility.Visible)", StringComparison.Ordinal);
+        var moveFocus = keyDown.IndexOf("FocusManager.TryMoveFocus(FocusNavigationDirection.Next);", StringComparison.Ordinal);
+
+        Assert.IsGreaterThanOrEqualTo(0, commit);
+        Assert.IsGreaterThan(commit, validationGate);
+        Assert.IsGreaterThan(validationGate, moveFocus);
+    }
+
     private static string GetMethod(string source, string startMarker, string endMarker)
     {
         var start = source.IndexOf(startMarker, StringComparison.Ordinal);

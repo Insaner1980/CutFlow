@@ -246,7 +246,11 @@ public sealed partial class InspectorPanel : UserControl
         else if (InspectorCommitGesture.ShouldCommit(textBox.Tag?.ToString(), e.Key, IsControlDown()))
         {
             CommitTextBox(textBox);
-            FocusManager.TryMoveFocus(FocusNavigationDirection.Next);
+            if (ValidationText.Visibility != Visibility.Visible)
+            {
+                FocusManager.TryMoveFocus(FocusNavigationDirection.Next);
+            }
+
             e.Handled = true;
         }
     }

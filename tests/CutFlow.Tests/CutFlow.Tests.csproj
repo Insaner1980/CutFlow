@@ -11,6 +11,7 @@
     <Nullable>enable</Nullable>
     <IsPackable>false</IsPackable>
     <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+    <RunSettingsFilePath>$(MSBuildThisFileDirectory)CutFlow.Tests.runsettings</RunSettingsFilePath>
   </PropertyGroup>
 
   <ItemGroup>
@@ -28,6 +29,7 @@
   </ItemGroup>
 
   <ItemGroup>
+    <Content Include="SerializationFixtures\schema-1-legacy-minimal.json" CopyToOutputDirectory="PreserveNewest" />
     <Content Include="TestMedia\valid-audio.wav" CopyToOutputDirectory="PreserveNewest" />
     <Content Include="TestMedia\valid-image.jpg" CopyToOutputDirectory="PreserveNewest" />
     <Content Include="TestMedia\valid-video.mp4" CopyToOutputDirectory="PreserveNewest" />

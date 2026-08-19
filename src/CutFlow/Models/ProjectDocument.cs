@@ -144,6 +144,7 @@ public sealed class ProjectAsset
     public ulong FileSize { get; set; }
 
     [JsonPropertyName("lastWriteUtc")]
+    [JsonConverter(typeof(UtcDateTimeOffsetConverter))]
     public DateTimeOffset LastWriteUtc { get; set; }
 
     [JsonPropertyName("thumbnailCachePath")]

@@ -112,7 +112,7 @@ internal sealed partial class DebouncedSaveCoordinator : IDisposable
         {
             // A newer edit replaced this pending debounce operation.
         }
-        catch
+        catch (Exception exception) when (!ExceptionPolicy.IsFatal(exception))
         {
             // The state is set by SaveLatestAsync. Debounced saves are surfaced in the editor rather than faulting unobserved tasks.
         }

@@ -91,6 +91,10 @@ public sealed class Task11ShortcutTests
         Assert.Contains("private MenuFlyout CreateContextMenu(Guid itemId, EditorSelectionKind kind)", timeline);
         Assert.Contains("menu.Opening +=", timeline);
         Assert.Contains("TimelineContextCommands.Resolve(_project, itemId, _trackLocks, _playheadMilliseconds)", timeline);
+        Assert.Contains("Move earlier", timeline);
+        Assert.Contains("Move later", timeline);
+        Assert.Contains("ReorderVideoBy(itemId, -1)", timeline);
+        Assert.Contains("ReorderVideoBy(itemId, 1)", timeline);
         Assert.Contains("IsTabStop = true", timeline);
         Assert.Contains("DeleteTimelineItemWithGuidance(commandItemId);", editor);
         Assert.Contains("ShowTimelineSourceInExplorer(commandItemId);", editor);

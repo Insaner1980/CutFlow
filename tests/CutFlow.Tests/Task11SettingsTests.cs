@@ -8,6 +8,16 @@ namespace CutFlow.Tests;
 public sealed partial class Task11SettingsTests
 {
     [TestMethod]
+    [DataRow(20d)]
+    [DataRow(400d)]
+    public void Normalize_PreservesExactTimelineZoomBoundaries(double zoom)
+    {
+        var settings = AppSettings.Normalize(new AppSettings { TimelineZoom = zoom });
+
+        Assert.AreEqual(zoom, settings.TimelineZoom);
+    }
+
+    [TestMethod]
     public void ClampPhysicalToWorkArea_EnforcesMinimumSizeAndVisiblePositionAt96Dpi()
     {
         var geometry = WindowGeometry.ClampPhysicalToWorkArea(

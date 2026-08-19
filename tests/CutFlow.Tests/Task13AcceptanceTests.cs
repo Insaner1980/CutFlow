@@ -1,3 +1,4 @@
+using CutFlow.Controls;
 using CutFlow.Models;
 using CutFlow.Services;
 using CutFlow.Utilities;
@@ -206,10 +207,11 @@ public sealed class Task13AcceptanceTests
         var source = File.ReadAllText(Path.Combine(FindRepositoryRoot(), "src", "CutFlow", "Views", "HomeView.xaml.cs"));
 
         Assert.Contains("private bool IsProjectOperationActive", source);
-        Assert.AreEqual(
-            6,
-            source.Split("RunProjectOpenGateAsync", StringSplitOptions.None).Length - 1,
-            "Create, Open, Rename, Duplicate, and Delete must all use the shared atomic gate.");
+        Assert.Contains("RunProjectOpenGateAsync", GetMethod(source, "public async Task CreateProjectAsync()", "private async void ProjectOpen_Click"));
+        Assert.Contains("RunProjectOpenGateAsync", GetMethod(source, "private async Task OpenFromTagAsync", "internal async Task<bool> RunProjectOpenGateAsync"));
+        Assert.Contains("RunProjectOpenGateAsync", GetMethod(source, "private async void RenameProject_Click", "private async void DuplicateProject_Click"));
+        Assert.Contains("RunProjectOpenGateAsync", GetMethod(source, "private async void DuplicateProject_Click", "private async void DeleteProject_Click"));
+        Assert.Contains("RunProjectOpenGateAsync", GetMethod(source, "private async void DeleteProject_Click", "private ContentDialog CreateDialog"));
     }
 
     [TestMethod]
@@ -225,16 +227,78 @@ public sealed class Task13AcceptanceTests
         Assert.AreEqual("40", (string?)actionsButton.Attribute("Width"));
         Assert.AreEqual("40", (string?)actionsButton.Attribute("Height"));
         Assert.DoesNotContain(openButton, actionsButton.Ancestors());
-        Assert.AreEqual("Open project Accessible project", card.OpenAutomationName);
+        Assert.AreEqual(
+            $"Open project Accessible project. {card.ModifiedText}. Aspect ratio {card.AspectRatioText}. Duration {card.DurationText}. Thumbnail unavailable.",
+            card.OpenAutomationName);
         Assert.AreEqual("Project actions for Accessible project", card.ActionsAutomationName);
-        Assert.AreEqual("{x:Bind OpenAutomationName}", (string?)openButton.Attribute("AutomationProperties.Name"));
+        Assert.AreEqual("Open project Accessible project", card.OpenActionName);
+        Assert.AreEqual("Rename project Accessible project", card.RenameActionName);
+        Assert.AreEqual("Duplicate project Accessible project", card.DuplicateActionName);
+        Assert.AreEqual("Delete project Accessible project", card.DeleteActionName);
+        Assert.AreEqual("{x:Bind OpenAutomationName, Mode=OneWay}", (string?)openButton.Attribute("AutomationProperties.Name"));
         Assert.AreEqual("{x:Bind ActionsAutomationName}", (string?)actionsButton.Attribute("AutomationProperties.Name"));
         Assert.AreEqual(
-            "{x:Bind OpenAutomationName}",
+            "{x:Bind OpenAutomationName, Mode=OneWay}",
             (string?)openButton.Descendants().Single(element => element.Name.LocalName == "ToolTip").Attribute("Content"));
         Assert.AreEqual(
             "{x:Bind ActionsAutomationName}",
             (string?)actionsButton.Descendants().Single(element => element.Name.LocalName == "ToolTip").Attribute("Content"));
+        var actionNames = actionsButton.Descendants()
+            .Where(element => element.Name.LocalName == "MenuFlyoutItem")
+            .Select(element => (string?)element.Attribute("AutomationProperties.Name"))
+            .ToArray();
+        Assert.AreSequenceEqual(
+            new[]
+            {
+                "{x:Bind OpenActionName}",
+                "{x:Bind RenameActionName}",
+                "{x:Bind DuplicateActionName}",
+                "{x:Bind DeleteActionName}"
+            },
+            actionNames);
+
+        var cardRoot = openButton.Ancestors().First(element => element.Name.LocalName == "Border");
+        var presentationElements = cardRoot.Descendants()
+            .Where(element => element.Name.LocalName is "TextBlock" or "Image" or "FontIcon")
+            .ToArray();
+        Assert.HasCount(8, presentationElements);
+        Assert.IsTrue(presentationElements.All(element =>
+            (string?)element.Attribute("AutomationProperties.AccessibilityView") == "Raw"));
+
+        var changedProperties = new List<string?>();
+        card.PropertyChanged += (_, args) => changedProperties.Add(args.PropertyName);
+        card.SetThumbnailPath(@"C:\Thumbnails\accessible.jpg");
+
+        Assert.Contains(nameof(ProjectCardViewModel.OpenAutomationName), changedProperties);
+        Assert.EndsWith("Thumbnail available.", card.OpenAutomationName, StringComparison.Ordinal);
+    }
+
+    [TestMethod]
+    public void AssetCards_ExposeKeyboardContextActionsWithoutTooltipOnlySourceData()
+    {
+        var asset = new ProjectAsset
+        {
+            Id = Guid.NewGuid(),
+            Kind = ProjectAssetKind.Video,
+            SourcePath = @"C:\Media\interview.mp4",
+            FileName = "interview.mp4",
+            DurationMilliseconds = 1_000,
+            Width = 1920,
+            Height = 1080,
+            IsMissing = true
+        };
+        var card = new MediaAssetCard(asset);
+        var mediaPanelPath = Path.Combine(FindRepositoryRoot(), "src", "CutFlow", "Controls", "MediaPanel.xaml");
+        var mediaPanel = XDocument.Load(mediaPanelPath);
+        var assetCard = mediaPanel.Descendants()
+            .Single(element => element.Name.LocalName == "Border" && (string?)element.Attribute("DragStarting") == "AssetCard_DragStarting");
+        var source = File.ReadAllText(Path.ChangeExtension(mediaPanelPath, ".xaml.cs"));
+
+        Assert.AreEqual("{Binding FileName}", (string?)assetCard.Attribute("ToolTipService.ToolTip"));
+        Assert.IsFalse(assetCard.Descendants().Any(element => element.Name.LocalName == "MenuFlyout"));
+        Assert.Contains("Source file missing.", card.AccessibleName, StringComparison.Ordinal);
+        Assert.Contains("container.ContextFlyout = CreateAssetContextMenu(card);", source, StringComparison.Ordinal);
+        Assert.Contains("RestoreAssetFocus(card.AssetId)", source, StringComparison.Ordinal);
     }
 
     [TestMethod]
@@ -357,5 +421,13 @@ public sealed class Task13AcceptanceTests
         }
 
         throw new DirectoryNotFoundException("Could not locate the CutFlow repository root.");
+    }
+
+    private static string GetMethod(string source, string startMarker, string endMarker)
+    {
+        var start = source.IndexOf(startMarker, StringComparison.Ordinal);
+        var end = source.IndexOf(endMarker, start, StringComparison.Ordinal);
+        Assert.IsTrue(start >= 0 && end > start, $"Could not isolate {startMarker}.");
+        return source[start..end];
     }
 }

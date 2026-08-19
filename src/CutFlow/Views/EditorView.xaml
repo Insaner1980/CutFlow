@@ -9,7 +9,7 @@
     KeyDown="EditorRoot_KeyDown">
     <Grid x:Name="EditorRoot" Background="{StaticResource WindowBackgroundBrush}">
         <Grid.RowDefinitions>
-            <RowDefinition Height="48" />
+            <RowDefinition Height="Auto" MinHeight="48" />
             <RowDefinition Height="*" />
             <RowDefinition Height="8" />
             <RowDefinition x:Name="TimelineRow" Height="300" />
@@ -27,7 +27,7 @@
                 <ColumnDefinition Width="Auto" />
                 <ColumnDefinition Width="138" />
             </Grid.ColumnDefinitions>
-            <Button Grid.Column="0" Width="34" Height="32" HorizontalAlignment="Center" VerticalAlignment="Center" Background="Transparent" BorderThickness="0" AutomationProperties.Name="Back to Home" Click="Back_Click" TabIndex="0">
+            <Button x:Name="BackButton" Grid.Column="0" Width="34" Height="32" HorizontalAlignment="Center" VerticalAlignment="Center" Background="Transparent" BorderThickness="0" AutomationProperties.Name="Back to Home" Click="Back_Click" TabIndex="0">
                 <FontIcon FontSize="14" Glyph="&#xE72B;" />
                 <ToolTipService.ToolTip><ToolTip Content="Back to Home" /></ToolTipService.ToolTip>
             </Button>
@@ -57,6 +57,7 @@
                         FontWeight="SemiBold"
                         Text="{x:Bind ViewModel.ProjectName, Mode=OneWay}"
                         AutomationProperties.Name="Project name"
+                        TabIndex="1"
                         KeyDown="ProjectNameBox_KeyDown"
                         LostFocus="ProjectNameBox_LostFocus" />
                     <TextBlock Foreground="{StaticResource TextTertiaryBrush}" Text="•" />
@@ -64,23 +65,38 @@
                 </StackPanel>
                 <Grid x:Name="TitleBarDragRegion" Grid.Column="1" Margin="12,0,0,0" Background="Transparent" />
             </Grid>
-            <Button x:Name="UndoButton" Grid.Column="3" Margin="2,0" AutomationProperties.Name="Undo" Click="Undo_Click" IsEnabled="{x:Bind ViewModel.CanUndo, Mode=OneWay}" Style="{StaticResource IconButtonStyle}" TabIndex="1">
+            <Button x:Name="UndoButton" Grid.Column="3" Margin="2,0" AutomationProperties.Name="Undo" Click="Undo_Click" IsEnabled="{x:Bind ViewModel.CanUndo, Mode=OneWay}" Style="{StaticResource IconButtonStyle}" TabIndex="2">
                 <FontIcon FontSize="14" Glyph="&#xE7A7;" />
                 <ToolTipService.ToolTip><ToolTip Content="Undo" /></ToolTipService.ToolTip>
             </Button>
-            <Button x:Name="RedoButton" Grid.Column="4" Margin="2,0" AutomationProperties.Name="Redo" Click="Redo_Click" IsEnabled="{x:Bind ViewModel.CanRedo, Mode=OneWay}" Style="{StaticResource IconButtonStyle}" TabIndex="2">
+            <Button x:Name="RedoButton" Grid.Column="4" Margin="2,0" AutomationProperties.Name="Redo" Click="Redo_Click" IsEnabled="{x:Bind ViewModel.CanRedo, Mode=OneWay}" Style="{StaticResource IconButtonStyle}" TabIndex="3">
                 <FontIcon FontSize="14" Glyph="&#xE7A6;" />
                 <ToolTipService.ToolTip><ToolTip Content="Redo" /></ToolTipService.ToolTip>
             </Button>
-            <ToggleButton x:Name="InspectorToggleButton" Grid.Column="5" Width="34" Height="32" Margin="6,0,2,0" Padding="0" AutomationProperties.Name="Hide inspector" Click="InspectorToggle_Click" IsChecked="True" TabIndex="3">
+            <ToggleButton x:Name="InspectorToggleButton" Grid.Column="5" Width="34" Height="32" Margin="6,0,2,0" Padding="0" AutomationProperties.Name="Hide inspector" Click="InspectorToggle_Click" IsChecked="True" TabIndex="4">
                 <FontIcon FontSize="14" Glyph="&#xE90D;" />
                 <ToolTipService.ToolTip><ToolTip Content="Hide inspector" /></ToolTipService.ToolTip>
             </ToggleButton>
-            <Button x:Name="ExportButton" Grid.Column="6" Margin="8,0" AutomationProperties.Name="Export project" Click="Export_Click" Style="{StaticResource AccentButtonStyle}" TabIndex="4">
+            <Button x:Name="ExportButton" Grid.Column="6" Margin="8,0" AutomationProperties.Name="Export project" Click="Export_Click" Style="{StaticResource AccentButtonStyle}" TabIndex="5">
                 <StackPanel Orientation="Horizontal" Spacing="7">
                     <FontIcon FontSize="14" Glyph="&#xE898;" />
                     <TextBlock Text="Export" />
                 </StackPanel>
+            </Button>
+            <Button
+                x:Name="ExportAvailabilityButton"
+                Grid.Column="7"
+                Width="34"
+                Height="32"
+                Margin="0,0,6,0"
+                Padding="0"
+                AutomationProperties.Name="Why export is unavailable"
+                Click="ExportAvailability_Click"
+                Style="{StaticResource IconButtonStyle}"
+                TabIndex="6"
+                Visibility="Collapsed">
+                <FontIcon FontSize="14" Glyph="&#xE946;" />
+                <ToolTipService.ToolTip><ToolTip Content="Why export is unavailable" /></ToolTipService.ToolTip>
             </Button>
         </Grid>
 
@@ -98,15 +114,15 @@
 
                 <ScrollViewer Grid.Column="0" VerticalScrollBarVisibility="Hidden" HorizontalScrollMode="Disabled" Background="{StaticResource ChromeBackgroundBrush}">
                     <StackPanel>
-                        <Button x:Name="MediaToolButton" Tag="Media" Click="Tool_Click" Style="{StaticResource RailButtonStyle}" AutomationProperties.Name="Media" TabIndex="10"><StackPanel Spacing="3"><FontIcon FontSize="17" Glyph="&#xE8B7;" /><TextBlock FontSize="11" Text="Media" /></StackPanel></Button>
-                        <Button x:Name="AudioToolButton" Tag="Audio" Click="Tool_Click" Style="{StaticResource RailButtonStyle}" AutomationProperties.Name="Audio" TabIndex="11"><StackPanel Spacing="3"><FontIcon FontSize="17" Glyph="&#xE8D6;" /><TextBlock FontSize="11" Text="Audio" /></StackPanel></Button>
-                        <Button x:Name="TextToolButton" Tag="Text" Click="Tool_Click" Style="{StaticResource RailButtonStyle}" AutomationProperties.Name="Text" TabIndex="12"><StackPanel Spacing="3"><FontIcon FontSize="17" Glyph="&#xE8D2;" /><TextBlock FontSize="11" Text="Text" /></StackPanel></Button>
-                        <Button x:Name="StickersToolButton" Tag="Stickers" Click="Tool_Click" Style="{StaticResource RailButtonStyle}" AutomationProperties.Name="Stickers" TabIndex="13"><StackPanel Spacing="3"><FontIcon FontSize="17" Glyph="&#xE899;" /><TextBlock FontSize="11" Text="Stickers" /></StackPanel></Button>
-                        <Button x:Name="EffectsToolButton" Tag="Effects" Click="Tool_Click" Style="{StaticResource RailButtonStyle}" AutomationProperties.Name="Effects" TabIndex="14"><StackPanel Spacing="3"><FontIcon FontSize="17" Glyph="&#xE945;" /><TextBlock FontSize="11" Text="Effects" /></StackPanel></Button>
-                        <Button x:Name="TransitionsToolButton" Tag="Transitions" Click="Tool_Click" Style="{StaticResource RailButtonStyle}" AutomationProperties.Name="Transitions" TabIndex="15"><StackPanel Spacing="3"><FontIcon FontSize="17" Glyph="&#xE7C8;" /><TextBlock FontSize="10" Text="Transitions" /></StackPanel></Button>
-                        <Button x:Name="CaptionsToolButton" Tag="Captions" Click="Tool_Click" Style="{StaticResource RailButtonStyle}" AutomationProperties.Name="Captions" TabIndex="16"><StackPanel Spacing="3"><FontIcon FontSize="17" Glyph="&#xE8C1;" /><TextBlock FontSize="11" Text="Captions" /></StackPanel></Button>
-                        <Button x:Name="FiltersToolButton" Tag="Filters" Click="Tool_Click" Style="{StaticResource RailButtonStyle}" AutomationProperties.Name="Filters" TabIndex="17"><StackPanel Spacing="3"><FontIcon FontSize="17" Glyph="&#xE71C;" /><TextBlock FontSize="11" Text="Filters" /></StackPanel></Button>
-                        <Button x:Name="AdjustmentToolButton" Tag="Adjustment" Click="Tool_Click" Style="{StaticResource RailButtonStyle}" AutomationProperties.Name="Adjustment" TabIndex="18"><StackPanel Spacing="3"><FontIcon FontSize="17" Glyph="&#xE9E9;" /><TextBlock FontSize="10" Text="Adjustment" /></StackPanel></Button>
+                        <Button x:Name="MediaToolButton" Tag="Media" Click="Tool_Click" Style="{StaticResource RailButtonStyle}" AutomationProperties.Name="Media" TabIndex="10"><StackPanel Spacing="3"><FontIcon FontSize="17" Glyph="&#xE8B7;" /><TextBlock FontSize="11" Text="Media" TextAlignment="Center" TextWrapping="Wrap" /></StackPanel></Button>
+                        <Button x:Name="AudioToolButton" Tag="Audio" Click="Tool_Click" Style="{StaticResource RailButtonStyle}" AutomationProperties.Name="Audio" TabIndex="11"><StackPanel Spacing="3"><FontIcon FontSize="17" Glyph="&#xE8D6;" /><TextBlock FontSize="11" Text="Audio" TextAlignment="Center" TextWrapping="Wrap" /></StackPanel></Button>
+                        <Button x:Name="TextToolButton" Tag="Text" Click="Tool_Click" Style="{StaticResource RailButtonStyle}" AutomationProperties.Name="Text" TabIndex="12"><StackPanel Spacing="3"><FontIcon FontSize="17" Glyph="&#xE8D2;" /><TextBlock FontSize="11" Text="Text" TextAlignment="Center" TextWrapping="Wrap" /></StackPanel></Button>
+                        <Button x:Name="StickersToolButton" Tag="Stickers" Click="Tool_Click" Style="{StaticResource RailButtonStyle}" AutomationProperties.Name="Stickers" TabIndex="13"><StackPanel Spacing="3"><FontIcon FontSize="17" Glyph="&#xE899;" /><TextBlock FontSize="11" Text="Stickers" TextAlignment="Center" TextWrapping="Wrap" /></StackPanel></Button>
+                        <Button x:Name="EffectsToolButton" Tag="Effects" Click="Tool_Click" Style="{StaticResource RailButtonStyle}" AutomationProperties.Name="Effects" TabIndex="14"><StackPanel Spacing="3"><FontIcon FontSize="17" Glyph="&#xE945;" /><TextBlock FontSize="11" Text="Effects" TextAlignment="Center" TextWrapping="Wrap" /></StackPanel></Button>
+                        <Button x:Name="TransitionsToolButton" Tag="Transitions" Click="Tool_Click" Style="{StaticResource RailButtonStyle}" AutomationProperties.Name="Transitions" TabIndex="15"><StackPanel Spacing="3"><FontIcon FontSize="17" Glyph="&#xE7C8;" /><TextBlock FontSize="10" Text="Transitions" TextAlignment="Center" TextWrapping="Wrap" /></StackPanel></Button>
+                        <Button x:Name="CaptionsToolButton" Tag="Captions" Click="Tool_Click" Style="{StaticResource RailButtonStyle}" AutomationProperties.Name="Captions" TabIndex="16"><StackPanel Spacing="3"><FontIcon FontSize="17" Glyph="&#xE8C1;" /><TextBlock FontSize="11" Text="Captions" TextAlignment="Center" TextWrapping="Wrap" /></StackPanel></Button>
+                        <Button x:Name="FiltersToolButton" Tag="Filters" Click="Tool_Click" Style="{StaticResource RailButtonStyle}" AutomationProperties.Name="Filters" TabIndex="17"><StackPanel Spacing="3"><FontIcon FontSize="17" Glyph="&#xE71C;" /><TextBlock FontSize="11" Text="Filters" TextAlignment="Center" TextWrapping="Wrap" /></StackPanel></Button>
+                        <Button x:Name="AdjustmentToolButton" Tag="Adjustment" Click="Tool_Click" Style="{StaticResource RailButtonStyle}" AutomationProperties.Name="Adjustment" TabIndex="18"><StackPanel Spacing="3"><FontIcon FontSize="17" Glyph="&#xE9E9;" /><TextBlock FontSize="10" Text="Adjustment" TextAlignment="Center" TextWrapping="Wrap" /></StackPanel></Button>
                     </StackPanel>
                 </ScrollViewer>
                 <Border Grid.Column="1" Background="{StaticResource BorderBrush}" />
@@ -128,14 +144,21 @@
                 IsOpen="False" />
 
         </Grid>
-        <Border x:Name="TimelineResizeHandle" Grid.Row="2" Background="Transparent"
+        <ContentControl x:Name="TimelineResizeHandle" Grid.Row="2" IsTabStop="True" UseSystemFocusVisuals="True"
+                HorizontalContentAlignment="Stretch"
+                AutomationProperties.Name="Resize timeline"
+                AutomationProperties.HelpText="Use the Up and Down arrow keys to resize the timeline."
+                KeyDown="TimelineResizeHandle_KeyDown"
                 PointerPressed="TimelineResizeHandle_PointerPressed"
                 PointerMoved="TimelineResizeHandle_PointerMoved"
                 PointerReleased="TimelineResizeHandle_PointerReleased"
                 PointerCanceled="TimelineResizeHandle_PointerCanceled"
                 PointerCaptureLost="TimelineResizeHandle_PointerCaptureLost">
-            <Border Height="1" VerticalAlignment="Center" Background="{StaticResource TextTertiaryBrush}" IsHitTestVisible="False" />
-        </Border>
+            <Grid Background="Transparent">
+                <Border Height="1" VerticalAlignment="Center" Background="{StaticResource TextTertiaryBrush}" IsHitTestVisible="False" />
+            </Grid>
+            <ToolTipService.ToolTip><ToolTip Content="Resize timeline (Up/Down arrows)" /></ToolTipService.ToolTip>
+        </ContentControl>
         <controls:TimelineControl
             x:Name="Timeline"
             Grid.Row="3"
@@ -165,7 +188,6 @@
             Padding="16"
             HorizontalAlignment="Right"
             VerticalAlignment="Top"
-            AutomationProperties.LiveSetting="Polite"
             Background="{StaticResource SurfaceElevatedBrush}"
             BorderBrush="{StaticResource BorderBrush}"
             BorderThickness="1"
@@ -183,7 +205,7 @@
                         <ToolTipService.ToolTip><ToolTip Content="Dismiss export status" /></ToolTipService.ToolTip>
                     </Button>
                 </Grid>
-                <TextBlock x:Name="ExportStatusMessage" Style="{StaticResource BodyTextBlockStyle}" />
+                <TextBlock x:Name="ExportStatusMessage" AutomationProperties.LiveSetting="Polite" Style="{StaticResource BodyTextBlockStyle}" />
                 <ProgressBar x:Name="ExportProgressBar" Minimum="0" Maximum="100" Value="0" />
                 <Grid x:Name="ExportProgressActions">
                     <Grid.ColumnDefinitions>

@@ -1,4 +1,3 @@
-using System.Collections.ObjectModel;
 using System.ComponentModel;
 using System.Runtime.CompilerServices;
 using CutFlow.Models;
@@ -6,6 +5,7 @@ using CutFlow.Services;
 using CutFlow.Utilities;
 using CutFlow.ViewModels;
 using Microsoft.UI.Xaml;
+using Microsoft.UI.Xaml.Automation;
 using Microsoft.UI.Xaml.Controls;
 using Microsoft.UI.Xaml.Input;
 using Microsoft.UI.Xaml.Media.Imaging;
@@ -17,7 +17,9 @@ namespace CutFlow.Controls;
 
 public sealed partial class MediaPanel : UserControl, IDisposable
 {
-    private readonly ObservableCollection<MediaAssetCard> _cards = [];
+    private IReadOnlyList<MediaAssetCard> _cards = [];
+    private HashSet<MediaAssetCard> _activeCards = [];
+    private IReadOnlyDictionary<Guid, ProjectAsset> _assetsById = new Dictionary<Guid, ProjectAsset>();
     private ProjectDocument? _project;
     private ThumbnailService? _thumbnailService;
     private EditorTool _tool = EditorTool.Media;
@@ -66,12 +68,10 @@ public sealed partial class MediaPanel : UserControl, IDisposable
             .OrderBy(asset => AssetFileName(asset), StringComparer.CurrentCultureIgnoreCase)
             .ToList();
 
-        _cards.Clear();
-        foreach (var asset in assets)
-        {
-            var card = new MediaAssetCard(asset);
-            _cards.Add(card);
-        }
+        _assetsById = _project.Assets.ToDictionary(asset => asset.Id);
+        _cards = assets.Select(asset => new MediaAssetCard(asset)).ToList();
+        _activeCards = [.. _cards];
+        AssetGrid.ItemsSource = _cards;
 
         AssetEmptyState.Visibility = assets.Count == 0 ? Visibility.Visible : Visibility.Collapsed;
         var anyForTool = _project.Assets.Any(asset => kinds.Contains(asset.Kind));
@@ -130,7 +130,7 @@ public sealed partial class MediaPanel : UserControl, IDisposable
             request = ThumbnailService.CaptureRequest(asset, ThumbnailService.DefaultRequestedSize);
             var source = await StorageFile.GetFileFromPathAsync(request.Value.SourcePath).AsTask(cancellationToken);
             if (!ThumbnailService.IsCurrentRequest(asset, request.Value) ||
-                !_cards.Contains(card) ||
+                !_activeCards.Contains(card) ||
                 !card.IsCurrentThumbnailRequest(cardGeneration))
             {
                 return;
@@ -138,7 +138,7 @@ public sealed partial class MediaPanel : UserControl, IDisposable
 
             var cachePath = await _thumbnailService.GetOrCreateThumbnailAsync(source, asset, cancellationToken: cancellationToken);
             cancellationToken.ThrowIfCancellationRequested();
-            if (cachePath is null || !_cards.Contains(card) || !card.IsCurrentThumbnailRequest(cardGeneration))
+            if (cachePath is null || !_activeCards.Contains(card) || !card.IsCurrentThumbnailRequest(cardGeneration))
             {
                 return;
             }
@@ -159,7 +159,7 @@ public sealed partial class MediaPanel : UserControl, IDisposable
             var bitmap = new BitmapImage();
             await bitmap.SetSourceAsync(stream).AsTask(cancellationToken);
             cancellationToken.ThrowIfCancellationRequested();
-            if (_cards.Contains(card) &&
+            if (_activeCards.Contains(card) &&
                 card.IsCurrentThumbnailRequest(cardGeneration) &&
                 ThumbnailService.IsCurrentRequest(asset, request.Value) &&
                 string.Equals(asset.ThumbnailCachePath, relativePath, StringComparison.Ordinal))
@@ -167,14 +167,14 @@ public sealed partial class MediaPanel : UserControl, IDisposable
                 card.Thumbnail = bitmap;
             }
         }
-        catch (OperationCanceledException)
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
         {
             // A newer thumbnail request superseded this load.
         }
         catch (Exception exception) when (MediaImportService.IsExpectedMediaFailure(exception))
         {
             if (!cancellationToken.IsCancellationRequested &&
-                _cards.Contains(card) &&
+                _activeCards.Contains(card) &&
                 card.IsCurrentThumbnailRequest(cardGeneration) &&
                 request is { } failedRequest &&
                 ThumbnailService.IsCurrentRequest(asset, failedRequest))
@@ -295,12 +295,17 @@ public sealed partial class MediaPanel : UserControl, IDisposable
             return;
         }
 
+        var container = args.ItemContainer;
+        AutomationProperties.SetName(container, card.AccessibleName);
+        AutomationProperties.SetHelpText(container, "Press Shift+F10 or the Menu key for asset actions.");
+        container.ContextFlyout = CreateAssetContextMenu(card);
+
         if (card.ThumbnailRequested || _project is null)
         {
             return;
         }
 
-        var asset = _project.Assets.FirstOrDefault(candidate => candidate.Id == card.AssetId);
+        _assetsById.TryGetValue(card.AssetId, out var asset);
         if (asset is null || asset.Kind == ProjectAssetKind.Audio || asset.IsMissing || _thumbnailService is null)
         {
             return;
@@ -308,6 +313,54 @@ public sealed partial class MediaPanel : UserControl, IDisposable
 
         var work = card.BeginThumbnailRequest(_thumbnailRefreshCts?.Token ?? CancellationToken.None);
         _ = LoadThumbnailSafelyAsync(asset, card, work.Generation, work.Token);
+    }
+
+    private MenuFlyout CreateAssetContextMenu(MediaAssetCard card)
+    {
+        var menu = new MenuFlyout();
+        var add = CreateAssetMenuItem($"Add {card.FileName} to track", card, AddToTrack_Click);
+        add.IsEnabled = card.CanAdd;
+        AutomationProperties.SetHelpText(
+            add,
+            card.CanAdd ? string.Empty : $"Cannot add {card.FileName} because its source file is missing. Relink the asset first.");
+        menu.Items.Add(add);
+        menu.Items.Add(CreateAssetMenuItem($"Relink {card.FileName}", card, Relink_Click));
+        menu.Items.Add(CreateAssetMenuItem($"Show {card.FileName} in Explorer", card, ShowInExplorer_Click));
+        menu.Items.Add(new MenuFlyoutSeparator());
+        menu.Items.Add(CreateAssetMenuItem($"Remove {card.FileName} from project", card, Remove_Click));
+
+        var restoreFocus = false;
+        menu.Opening += (_, _) => restoreFocus = ReferenceEquals(FocusManager.GetFocusedElement(XamlRoot), menu.Target);
+        menu.Closed += (_, _) =>
+        {
+            if (restoreFocus)
+            {
+                DispatcherQueue.TryEnqueue(() => RestoreAssetFocus(card.AssetId));
+            }
+        };
+        return menu;
+    }
+
+    private static MenuFlyoutItem CreateAssetMenuItem(
+        string name,
+        MediaAssetCard card,
+        RoutedEventHandler clickHandler)
+    {
+        var item = new MenuFlyoutItem { Text = name, Tag = card.AssetId };
+        AutomationProperties.SetName(item, name);
+        item.Click += clickHandler;
+        return item;
+    }
+
+    private void RestoreAssetFocus(Guid assetId)
+    {
+        var card = _cards.FirstOrDefault(candidate => candidate.AssetId == assetId);
+        if (card is not null && AssetGrid.ContainerFromItem(card) is Control container && container.Focus(FocusState.Programmatic))
+        {
+            return;
+        }
+
+        SearchBox.Focus(FocusState.Programmatic);
     }
 
     private void AssetGrid_DoubleTapped(object sender, DoubleTappedRoutedEventArgs e)
@@ -347,7 +400,12 @@ public sealed partial class MediaPanel : UserControl, IDisposable
             return;
         }
 
-        var asset = _project!.Assets.First(candidate => candidate.Id == card.AssetId);
+        if (!_assetsById.TryGetValue(card.AssetId, out var asset))
+        {
+            e.Cancel = true;
+            return;
+        }
+
         MediaAssetDragPayload.Set(e.Data, asset);
         e.Data.RequestedOperation = DataPackageOperation.Copy;
         e.Data.Properties.Title = card.FileName;
@@ -371,7 +429,7 @@ public sealed partial class MediaPanel : UserControl, IDisposable
 
     private bool CanUseAsset(Guid assetId)
     {
-        var asset = _project?.Assets.FirstOrDefault(candidate => candidate.Id == assetId);
+        _assetsById.TryGetValue(assetId, out var asset);
         return asset is not null && CanUseAssetKind(_tool, asset.Kind);
     }
 
@@ -429,7 +487,7 @@ public sealed partial class MediaPanel : UserControl, IDisposable
 
             PublishDropResult(scope, result, e);
         }
-        catch (OperationCanceledException)
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
         {
             // The panel lifetime ended while the drop was being read.
         }
@@ -549,6 +607,9 @@ public sealed partial class MediaAssetCard : INotifyPropertyChanged
     public Guid AssetId { get; }
     public string FileName { get; }
     public string FullPath { get; }
+    public string AccessibleName =>
+        $"{TypeText} asset {FileName}. Duration {DurationText}. Dimensions {DimensionsText}." +
+        (CanAdd ? string.Empty : " Source file missing.");
     public string TypeText { get; }
     public string DurationText { get; }
     public string DimensionsText { get; }

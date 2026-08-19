@@ -326,4 +326,30 @@ public sealed class PreviewTimingTests
 
         Assert.IsTrue(gate.ShouldRender(key, hasPointerCapture: false));
     }
+
+    [TestMethod]
+    public void LiveTextRenderGate_SkipsKeyRebuildInsideStableIntervalAndInvalidatesAtBoundaryOrRevision()
+    {
+        var project = new ProjectDocument();
+        project.TextItems.Add(new TextTimelineItem
+        {
+            Id = Guid.NewGuid(),
+            StartMilliseconds = 1_000,
+            DurationMilliseconds = 1_000,
+            Text = "Visible"
+        });
+        var selection = EditorSelection.None;
+        var gate = new LiveTextRenderGate();
+
+        Assert.IsTrue(gate.ShouldBuildKey(project, 7, selection, 1_100, 1280, 720, hasPointerCapture: false));
+        var key = LiveTextRenderKey.Create(project, selection, 1_100, 1280, 720, revision: 7);
+        Assert.IsTrue(gate.ShouldRender(key, hasPointerCapture: false));
+
+        Assert.IsFalse(gate.ShouldBuildKey(project, 7, selection, 1_999, 1280, 720, hasPointerCapture: false));
+        Assert.IsTrue(gate.ShouldBuildKey(project, 7, selection, 2_000, 1280, 720, hasPointerCapture: false));
+        Assert.IsTrue(gate.ShouldBuildKey(project, 8, selection, 1_500, 1280, 720, hasPointerCapture: false));
+        var sameVisualsAtNewRevision = LiveTextRenderKey.Create(project, selection, 1_500, 1280, 720, revision: 8);
+        Assert.IsFalse(gate.ShouldRender(sameVisualsAtNewRevision, hasPointerCapture: false));
+        Assert.IsFalse(gate.ShouldBuildKey(project, 8, selection, 1_501, 1280, 720, hasPointerCapture: false));
+    }
 }

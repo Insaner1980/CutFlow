@@ -73,4 +73,46 @@ public sealed class EditorImportGateTests
 
         Assert.IsFalse(committed);
     }
+
+    [TestMethod]
+    public async Task ExecuteAsync_WhenQueuedWaitIsCanceled_DoesNotReleaseUnacquiredGate()
+    {
+        var gate = new EditorImportGate();
+        var firstEntered = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var releaseFirst = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var thirdEntered = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        var first = gate.ExecuteAsync(
+            async cancellationToken =>
+            {
+                firstEntered.SetResult();
+                await releaseFirst.Task.WaitAsync(cancellationToken);
+                return true;
+            },
+            _ => { },
+            CancellationToken.None);
+        await firstEntered.Task;
+
+        using var queuedCancellation = new CancellationTokenSource();
+        var canceled = gate.ExecuteAsync(
+            _ => Task.FromResult(true),
+            _ => { },
+            queuedCancellation.Token);
+        queuedCancellation.Cancel();
+        await Assert.ThrowsExactlyAsync<OperationCanceledException>(() => canceled);
+
+        var third = gate.ExecuteAsync(
+            _ =>
+            {
+                thirdEntered.SetResult();
+                return Task.FromResult(true);
+            },
+            _ => { },
+            CancellationToken.None);
+
+        Assert.IsFalse(thirdEntered.Task.IsCompleted);
+        releaseFirst.SetResult();
+        await Task.WhenAll(first, third);
+        Assert.IsTrue(thirdEntered.Task.IsCompletedSuccessfully);
+    }
 }

@@ -517,6 +517,69 @@ public sealed class MediaImportServiceTests
     }
 
     [TestMethod]
+    public void VisualDimensionValidation_RejectsInvalidAndExtremeProductsWithoutOverflow()
+    {
+        Assert.AreEqual(
+            (8192, 8192),
+            MediaImportService.ValidateVisualDimensions(8192, 8192));
+
+        foreach (var dimensions in new (uint Width, uint Height)[]
+                 {
+                     (0, 1),
+                     (1, 0),
+                     (8193, 8192),
+                     (uint.MaxValue, uint.MaxValue)
+                 })
+        {
+            Assert.ThrowsExactly<InvalidDataException>(() =>
+                MediaImportService.ValidateVisualDimensions(dimensions.Width, dimensions.Height));
+        }
+    }
+
+    [TestMethod]
+    public void CreateAsset_RejectsUnsafeVisualDimensionsBeforeTheyReachComposition()
+    {
+        foreach (var kind in new[] { ProjectAssetKind.Video, ProjectAssetKind.Image })
+        {
+            var metadata = new MediaFileMetadata(
+                @"C:\Media\oversized.mp4", "oversized.mp4", kind,
+                DurationMilliseconds: 1_000, Width: int.MaxValue, Height: int.MaxValue,
+                FileSize: ulong.MaxValue, LastWriteUtc: DateTimeOffset.MaxValue);
+
+            Assert.ThrowsExactly<InvalidDataException>(() => MediaImportService.CreateAsset(metadata));
+        }
+    }
+
+    [TestMethod]
+    public void Relink_UnsafeVisualDimensionsLeavesExistingAssetUntouched()
+    {
+        var existing = new ProjectAsset
+        {
+            Id = Guid.NewGuid(),
+            Kind = ProjectAssetKind.Image,
+            SourcePath = @"C:\Media\original.jpg",
+            FileName = "original.jpg",
+            DurationMilliseconds = 5_000,
+            Width = 1920,
+            Height = 1080
+        };
+        var replacement = new MediaFileMetadata(
+            @"D:\Media\oversized.jpg", "oversized.jpg", ProjectAssetKind.Image,
+            DurationMilliseconds: 5_000, Width: int.MaxValue, Height: int.MaxValue,
+            FileSize: ulong.MaxValue, LastWriteUtc: DateTimeOffset.MaxValue);
+
+        Assert.IsFalse(MediaImportService.TryApplyRelink(
+            existing,
+            replacement,
+            new ProjectDocument { Assets = [existing] },
+            out var error));
+        Assert.AreEqual("The visual dimensions exceed the supported decode limit.", error);
+        Assert.AreEqual(@"C:\Media\original.jpg", existing.SourcePath);
+        Assert.AreEqual(1920, existing.Width);
+        Assert.AreEqual(1080, existing.Height);
+    }
+
+    [TestMethod]
     public void Relink_CompatibleKindKeepsIdentityAndUpdatesMetadata()
     {
         var id = Guid.NewGuid();

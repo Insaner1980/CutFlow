@@ -2,6 +2,7 @@ using System.Diagnostics.CodeAnalysis;
 using System.Globalization;
 using CutFlow.Models;
 using CutFlow.Utilities;
+using Windows.Graphics.Imaging;
 using Windows.Media.Editing;
 using Windows.Storage;
 using Windows.UI;
@@ -90,9 +91,32 @@ public sealed class CompositionService
         {
             var file = await StorageFile.GetFileFromPathAsync(visual.SourcePath);
             cancellationToken.ThrowIfCancellationRequested();
-            var clip = visual.Kind == CompositionVisualKind.Image
-                ? await MediaClip.CreateFromImageFileAsync(file, ToTimeSpan(visual.DurationMilliseconds))
-                : await MediaClip.CreateFromFileAsync(file);
+            MediaClip clip;
+            if (visual.Kind == CompositionVisualKind.Image)
+            {
+                using (var stream = await file.OpenReadAsync())
+                {
+                    var decoder = await BitmapDecoder.CreateAsync(stream);
+                    cancellationToken.ThrowIfCancellationRequested();
+                    MediaImportService.ValidateVisualDimensions(
+                        decoder.OrientedPixelWidth,
+                        decoder.OrientedPixelHeight);
+                }
+
+                clip = await MediaClip.CreateFromImageFileAsync(file, ToTimeSpan(visual.DurationMilliseconds));
+            }
+            else
+            {
+                var storageProperties = await file.Properties.GetVideoPropertiesAsync();
+                cancellationToken.ThrowIfCancellationRequested();
+                MediaImportService.ValidateVisualDimensions(
+                    storageProperties.Width,
+                    storageProperties.Height);
+                clip = await MediaClip.CreateFromFileAsync(file);
+                var properties = clip.GetVideoEncodingProperties();
+                MediaImportService.ValidateVisualDimensions(properties.Width, properties.Height);
+            }
+
             cancellationToken.ThrowIfCancellationRequested();
             if (visual.Kind == CompositionVisualKind.Video)
             {
@@ -164,10 +188,15 @@ public sealed class CompositionService
         }
 
         var layer = new MediaOverlayLayer();
+        var textItems = project.TextItems.ToDictionary(item => item.Id);
         foreach (var overlayPlan in overlayPlans)
         {
             cancellationToken.ThrowIfCancellationRequested();
-            var item = project.TextItems.First(item => item.Id == overlayPlan.ItemId);
+            if (!textItems.TryGetValue(overlayPlan.ItemId, out var item))
+            {
+                continue;
+            }
+
             try
             {
                 var path = await textOverlayRenderer.RenderAsync(project, item, renderHost, cancellationToken);
@@ -187,8 +216,7 @@ public sealed class CompositionService
             }
             catch (Exception exception) when (IsItemFailure(exception) || exception is InvalidOperationException)
             {
-                var name = string.IsNullOrWhiteSpace(item.Text) ? item.Id.ToString("D") : item.Text;
-                errors.Add($"Text '{name}' could not be rendered and was omitted.");
+                errors.Add("A text overlay could not be rendered and was omitted.");
             }
         }
 

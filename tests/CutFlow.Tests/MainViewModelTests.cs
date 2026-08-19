@@ -10,6 +10,22 @@ namespace CutFlow.Tests;
 public sealed partial class MainViewModelTests
 {
     [TestMethod]
+    public void ProjectOperationFailureFilter_RejectsCancellationAndProgrammingDefects()
+    {
+        Assert.IsTrue(HomeViewModel.IsExpectedProjectOperationFailure(new IOException()));
+        Assert.IsTrue(HomeViewModel.IsExpectedProjectOperationFailure(new UnauthorizedAccessException()));
+        Assert.IsTrue(HomeViewModel.IsExpectedProjectOperationFailure(new InvalidDataException()));
+        Assert.IsTrue(HomeViewModel.IsExpectedProjectOperationFailure(new ArgumentException()));
+        Assert.IsTrue(HomeViewModel.IsExpectedProjectOperationFailure(new NotSupportedException()));
+        Assert.IsTrue(HomeViewModel.IsExpectedProjectOperationFailure(new OverflowException()));
+        Assert.IsTrue(HomeViewModel.IsExpectedProjectOperationFailure(new System.Runtime.InteropServices.COMException()));
+        Assert.IsTrue(HomeViewModel.IsExpectedProjectOperationFailure(new System.Security.SecurityException()));
+        Assert.IsFalse(HomeViewModel.IsExpectedProjectOperationFailure(new OperationCanceledException()));
+        Assert.IsFalse(HomeViewModel.IsExpectedProjectOperationFailure(new InvalidOperationException()));
+        Assert.IsFalse(HomeViewModel.IsExpectedProjectOperationFailure(new NullReferenceException()));
+    }
+
+    [TestMethod]
     public async Task OpenEditorAsync_RevalidatesMissingMediaWithoutRemovingReferences()
     {
         using var directory = new TemporaryDirectory();

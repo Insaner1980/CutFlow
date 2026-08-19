@@ -19,6 +19,24 @@ internal static class PreviewTransportMath
         return (long)target;
     }
 
+    public static bool ShouldUpdateTimecodeAutomationName(
+        string currentTimecode,
+        string totalTimecode,
+        string? announcedCurrentTimecode,
+        string? announcedTotalTimecode,
+        bool isPlaying)
+    {
+        if (string.Equals(currentTimecode, announcedCurrentTimecode, StringComparison.Ordinal) &&
+            string.Equals(totalTimecode, announcedTotalTimecode, StringComparison.Ordinal))
+        {
+            return false;
+        }
+
+        return !isPlaying ||
+               !string.Equals(totalTimecode, announcedTotalTimecode, StringComparison.Ordinal) ||
+               !string.Equals(WholeSecond(currentTimecode), WholeSecond(announcedCurrentTimecode), StringComparison.Ordinal);
+    }
+
     public static PreviewFitSize CalculateFitSize(
         double availableWidth,
         double availableHeight,
@@ -38,6 +56,12 @@ internal static class PreviewTransportMath
     }
 
     private static bool IsPositiveFinite(double value) => double.IsFinite(value) && value > 0;
+
+    private static string? WholeSecond(string? timecode)
+    {
+        var frameSeparator = timecode?.LastIndexOf(':') ?? -1;
+        return frameSeparator > 0 ? timecode![..frameSeparator] : timecode;
+    }
 }
 
 internal readonly record struct PreviewFitSize(double Width, double Height);

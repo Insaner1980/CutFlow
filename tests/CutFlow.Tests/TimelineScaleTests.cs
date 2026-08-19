@@ -122,4 +122,34 @@ public sealed class TimelineScaleTests
 
         Assert.AreEqual(long.MaxValue, scale.PixelsToTime(double.MaxValue));
     }
+
+    [TestMethod]
+    public void IsCardVisible_UsesViewportRangeAndMinimumVisualOverflow()
+    {
+        var scale = new TimelineScale(20);
+        var beforeViewport = new TimelineItemBounds(Guid.NewGuid(), CutFlow.Models.EditorSelectionKind.VideoItem, 0, 100);
+        var insideViewport = new TimelineItemBounds(Guid.NewGuid(), CutFlow.Models.EditorSelectionKind.VideoItem, 50_000, 100);
+        var afterViewport = new TimelineItemBounds(Guid.NewGuid(), CutFlow.Models.EditorSelectionKind.VideoItem, 100_000, 100);
+
+        Assert.IsTrue(scale.IsCardVisible(beforeViewport, 10, 1_100, 18, 3));
+        Assert.IsTrue(scale.IsCardVisible(insideViewport, 10, 1_100, 18, 3));
+        Assert.IsFalse(scale.IsCardVisible(afterViewport, 10, 1_100, 18, 3));
+    }
+
+    [TestMethod]
+    public void IsCardVisible_LargeTimelineBoundsOnlyTheBufferedViewportPopulation()
+    {
+        var scale = new TimelineScale(TimelineScale.MinimumPixelsPerSecond);
+        var bounds = Enumerable.Range(0, 10_000)
+            .Select(index => new TimelineItemBounds(
+                Guid.NewGuid(),
+                CutFlow.Models.EditorSelectionKind.VideoItem,
+                index * 100L,
+                100))
+            .ToArray();
+
+        var visibleCount = bounds.Count(bound => scale.IsCardVisible(bound, 0, 2_000, 18, 3));
+
+        Assert.IsLessThan(1_100, visibleCount);
+    }
 }

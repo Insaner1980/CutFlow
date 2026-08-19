@@ -7,7 +7,7 @@
     Loaded="HomeView_Loaded">
     <Grid x:Name="HomeRoot" Background="{StaticResource WindowBackgroundBrush}">
         <Grid.RowDefinitions>
-            <RowDefinition Height="48" />
+            <RowDefinition Height="Auto" MinHeight="48" />
             <RowDefinition Height="*" />
         </Grid.RowDefinitions>
 
@@ -94,7 +94,7 @@
                             </ItemsRepeater.Layout>
                             <ItemsRepeater.ItemTemplate>
                                 <DataTemplate x:DataType="vm:ProjectCardViewModel">
-                                    <Border Width="260" Height="224" Background="{StaticResource SurfaceBrush}" BorderBrush="{StaticResource BorderBrush}" BorderThickness="1" CornerRadius="8">
+                                    <Border Width="260" MinHeight="224" Background="{StaticResource SurfaceBrush}" BorderBrush="{StaticResource BorderBrush}" BorderThickness="1" CornerRadius="8">
                                         <Grid>
                                             <Grid.RowDefinitions>
                                                 <RowDefinition Height="140" />
@@ -108,20 +108,20 @@
                                                 VerticalContentAlignment="Stretch"
                                                 Background="Transparent"
                                                 BorderThickness="0"
-                                                AutomationProperties.Name="{x:Bind OpenAutomationName}"
+                                                AutomationProperties.Name="{x:Bind OpenAutomationName, Mode=OneWay}"
                                                 Click="ProjectOpen_Click"
                                                 Tag="{x:Bind Id}">
                                                 <Grid />
                                                 <ToolTipService.ToolTip>
-                                                    <ToolTip Content="{x:Bind OpenAutomationName}" />
+                                                    <ToolTip Content="{x:Bind OpenAutomationName, Mode=OneWay}" />
                                                 </ToolTipService.ToolTip>
                                             </Button>
                                             <Grid Margin="8" Background="{StaticResource PreviewBackgroundBrush}" IsHitTestVisible="False">
                                                 <StackPanel HorizontalAlignment="Center" VerticalAlignment="Center" Spacing="8">
-                                                    <FontIcon Foreground="{StaticResource TextTertiaryBrush}" FontSize="28" Glyph="&#xE714;" />
-                                                    <TextBlock Style="{StaticResource CaptionTextBlockStyle}" Text="Thumbnail unavailable" />
+                                                    <FontIcon Foreground="{StaticResource TextTertiaryBrush}" FontSize="28" Glyph="&#xE714;" AutomationProperties.AccessibilityView="Raw" />
+                                                    <TextBlock Style="{StaticResource CaptionTextBlockStyle}" Text="Thumbnail unavailable" AutomationProperties.AccessibilityView="Raw" />
                                                 </StackPanel>
-                                                <Image Source="{x:Bind ThumbnailSource, Mode=OneWay}" Stretch="UniformToFill" />
+                                                <Image Source="{x:Bind ThumbnailSource, Mode=OneWay}" Stretch="UniformToFill" AutomationProperties.AccessibilityView="Raw" />
                                             </Grid>
                                             <Grid Grid.Row="1" Padding="12,10">
                                                 <Grid.ColumnDefinitions>
@@ -129,11 +129,11 @@
                                                     <ColumnDefinition Width="Auto" />
                                                 </Grid.ColumnDefinitions>
                                                 <StackPanel Spacing="3" IsHitTestVisible="False">
-                                                    <TextBlock MaxWidth="195" TextTrimming="CharacterEllipsis" Style="{StaticResource TitleTextBlockStyle}" Text="{x:Bind Name}" />
-                                                    <TextBlock Style="{StaticResource CaptionTextBlockStyle}" Text="{x:Bind ModifiedText}" />
+                                                    <TextBlock MaxWidth="195" TextTrimming="CharacterEllipsis" Style="{StaticResource TitleTextBlockStyle}" Text="{x:Bind Name}" AutomationProperties.AccessibilityView="Raw" />
+                                                    <TextBlock Style="{StaticResource CaptionTextBlockStyle}" Text="{x:Bind ModifiedText}" AutomationProperties.AccessibilityView="Raw" />
                                                     <StackPanel Orientation="Horizontal" Spacing="10">
-                                                        <TextBlock Style="{StaticResource CaptionTextBlockStyle}" Text="{x:Bind AspectRatioText}" />
-                                                        <TextBlock Style="{StaticResource CaptionTextBlockStyle}" Text="{x:Bind DurationText}" />
+                                                        <TextBlock Style="{StaticResource CaptionTextBlockStyle}" Text="{x:Bind AspectRatioText}" AutomationProperties.AccessibilityView="Raw" />
+                                                        <TextBlock Style="{StaticResource CaptionTextBlockStyle}" Text="{x:Bind DurationText}" AutomationProperties.AccessibilityView="Raw" />
                                                     </StackPanel>
                                                 </StackPanel>
                                                 <Button
@@ -144,17 +144,17 @@
                                                     AutomationProperties.Name="{x:Bind ActionsAutomationName}"
                                                     Style="{StaticResource IconButtonStyle}"
                                                     Tag="{x:Bind Id}">
-                                                    <FontIcon FontSize="15" Glyph="&#xE712;" />
+                                                    <FontIcon FontSize="15" Glyph="&#xE712;" AutomationProperties.AccessibilityView="Raw" />
                                                     <ToolTipService.ToolTip>
                                                         <ToolTip Content="{x:Bind ActionsAutomationName}" />
                                                     </ToolTipService.ToolTip>
                                                     <Button.Flyout>
                                                         <MenuFlyout>
-                                                            <MenuFlyoutItem Text="Open" Tag="{x:Bind Id}" Click="ProjectOpenMenu_Click" />
-                                                            <MenuFlyoutItem Text="Rename" Tag="{x:Bind Id}" Click="RenameProject_Click" />
-                                                            <MenuFlyoutItem Text="Duplicate" Tag="{x:Bind Id}" Click="DuplicateProject_Click" />
+                                                            <MenuFlyoutItem Text="Open" AutomationProperties.Name="{x:Bind OpenActionName}" Tag="{x:Bind Id}" Click="ProjectOpenMenu_Click" />
+                                                            <MenuFlyoutItem Text="Rename" AutomationProperties.Name="{x:Bind RenameActionName}" Tag="{x:Bind Id}" Click="RenameProject_Click" />
+                                                            <MenuFlyoutItem Text="Duplicate" AutomationProperties.Name="{x:Bind DuplicateActionName}" Tag="{x:Bind Id}" Click="DuplicateProject_Click" />
                                                             <MenuFlyoutSeparator />
-                                                            <MenuFlyoutItem Text="Delete" Tag="{x:Bind Id}" Click="DeleteProject_Click" />
+                                                            <MenuFlyoutItem Text="Delete" AutomationProperties.Name="{x:Bind DeleteActionName}" Tag="{x:Bind Id}" Click="DeleteProject_Click" />
                                                         </MenuFlyout>
                                                     </Button.Flyout>
                                                 </Button>

@@ -31,6 +31,8 @@ public sealed partial class MainWindow : Window
     private AppWindow? _appWindow;
     private WindowGeometry? _restoredWindowBounds;
     private AppSettings _appSettings = AppSettings.Normalize(null);
+    private EditorView? _workspaceSettingsSaveEditor;
+    private InfoBarPublication _workspaceSettingsSavePublication;
 
     public MainWindow()
     {
@@ -84,6 +86,7 @@ public sealed partial class MainWindow : Window
             _editorView.WorkspaceSettingsChanged += Editor_WorkspaceSettingsChanged;
             ContentHost.Content = _editorView;
             SetTitleBar(_editorView.TitleBarElement);
+            QueueInitialFocus(_editorView, _editorView.FocusInitialControl);
             return;
         }
 
@@ -96,6 +99,18 @@ public sealed partial class MainWindow : Window
         DetachEditorView();
         ContentHost.Content = _homeView;
         SetTitleBar(_homeView.TitleBarElement);
+        QueueInitialFocus(_homeView, _homeView.FocusInitialControl);
+    }
+
+    private void QueueInitialFocus(UIElement content, Func<bool> focus)
+    {
+        DispatcherQueue.TryEnqueue(() =>
+        {
+            if (_lifecycle.CanContinueInitialization && ReferenceEquals(ContentHost.Content, content))
+            {
+                focus();
+            }
+        });
     }
 
     private void DetachEditorView()
@@ -132,9 +147,10 @@ public sealed partial class MainWindow : Window
             {
                 loadedSettings = await _settingsService.LoadAsync();
             }
-            catch (Exception exception)
+            catch (Exception exception) when (exception is IOException or UnauthorizedAccessException or InvalidDataException or System.Security.SecurityException)
             {
-                settingsError = $"Could not restore window settings. {exception.Message}";
+                settingsError = "Could not restore workspace settings. Default workspace settings were used.";
+                _ = _logService.TryWriteAsync($"Workspace settings restore failed: {exception.GetType().Name}; HRESULT=0x{exception.HResult:X8}");
             }
 
             _appSettings = loadedSettings;
@@ -147,9 +163,10 @@ public sealed partial class MainWindow : Window
             {
                 RestoreWindowGeometry(context);
             }
-            catch (Exception exception)
+            catch (Exception exception) when (exception is ArgumentException or InvalidOperationException or COMException or OverflowException)
             {
-                settingsError = $"Could not restore window geometry. {exception.Message}";
+                settingsError = "Could not restore the previous window position. A safe default layout was used.";
+                _ = _logService.TryWriteAsync($"Window geometry restore failed: {exception.GetType().Name}; HRESULT=0x{exception.HResult:X8}");
             }
 
             if (!_lifecycle.CanContinueInitialization)
@@ -172,16 +189,17 @@ public sealed partial class MainWindow : Window
         {
             // Window closing canceled the pending initialization.
         }
-        catch (Exception exception)
+        catch (Exception exception) when (!ExceptionPolicy.IsFatal(exception))
         {
+            _ = _logService.TryWriteAsync($"Startup failed: {exception.GetType().Name}");
             if (_lifecycle.CanContinueInitialization)
             {
                 try
                 {
-                    _viewModel.Home.ReportError(exception.Message);
+                    _viewModel.Home.ReportError($"{AppInfo.ProductName} could not finish starting. Close and reopen the app. If the problem continues, check the local log.");
                     ShowCurrentView();
                 }
-                catch (Exception recoveryException)
+                catch (Exception recoveryException) when (!ExceptionPolicy.IsFatal(recoveryException))
                 {
                     _ = _logService.TryWriteAsync($"Startup recovery failed: {recoveryException.GetType().Name}");
                     _lifecycle.ApproveClose();
@@ -258,7 +276,7 @@ public sealed partial class MainWindow : Window
             var displayArea = DisplayArea.GetFromRect(ToRect(bounds), DisplayAreaFallback.Nearest);
             ApplyPreferredMinimum(sender, displayArea.WorkArea, GetWindowDpi());
         }
-        catch (Exception exception)
+        catch (Exception exception) when (!ExceptionPolicy.IsFatal(exception))
         {
             _ = _logService.TryWriteAsync($"Window minimum tracking update failed: {exception.GetType().Name}");
         }
@@ -342,15 +360,16 @@ public sealed partial class MainWindow : Window
                     await _viewModel.ReplaceEditorAsync(project);
                 }
             }
-            catch (OperationCanceledException)
+            catch (OperationCanceledException) when (!_lifecycle.CanHandleEditorEvent(_editorView, editor))
             {
                 // The editor lifetime ended while the project was being created.
             }
-            catch (Exception exception) when (exception is IOException or UnauthorizedAccessException or InvalidDataException or ArgumentException or InvalidOperationException)
+            catch (Exception exception) when (HomeViewModel.IsExpectedProjectOperationFailure(exception))
             {
                 if (_lifecycle.CanHandleEditorEvent(_editorView, editor))
                 {
-                    editor.ReportError("Could not create project", exception.Message);
+                    editor.ReportError("Could not create project", "Check available disk space and try again.");
+                    _ = _logService.TryWriteAsync($"Project creation failed: {exception.GetType().Name}; HRESULT=0x{exception.HResult:X8}");
                 }
             }
             finally
@@ -378,7 +397,7 @@ public sealed partial class MainWindow : Window
                 await editor.ImportFilesAsync(files);
             }
         }
-        catch (OperationCanceledException)
+        catch (OperationCanceledException) when (!_lifecycle.CanHandleEditorEvent(_editorView, editor))
         {
             // The editor lifetime ended while the picker or import was active.
         }
@@ -386,7 +405,8 @@ public sealed partial class MainWindow : Window
         {
             if (_lifecycle.CanHandleEditorEvent(_editorView, editor))
             {
-                editor.ReportError("Could not open media", $"The file picker or import failed. {exception.Message}");
+                editor.ReportError("Could not open media", "The file picker or import could not be completed. Choose the media file again.");
+                _ = _logService.TryWriteAsync($"Media picker or import failed: {exception.GetType().Name}; HRESULT=0x{exception.HResult:X8}");
             }
         }
     }
@@ -408,7 +428,7 @@ public sealed partial class MainWindow : Window
                 await editor.RelinkAssetAsync(e.AssetId, file);
             }
         }
-        catch (OperationCanceledException)
+        catch (OperationCanceledException) when (!_lifecycle.CanHandleEditorEvent(_editorView, editor))
         {
             // The editor lifetime ended while the picker or relink was active.
         }
@@ -416,7 +436,8 @@ public sealed partial class MainWindow : Window
         {
             if (_lifecycle.CanHandleEditorEvent(_editorView, editor))
             {
-                editor.ReportError($"Could not relink '{asset.FileName}'", $"The replacement could not be opened. {exception.Message}");
+                editor.ReportError($"Could not relink '{asset.FileName}'", "The replacement could not be opened. Choose the file again and confirm it is available.");
+                _ = _logService.TryWriteAsync($"Media relink picker failed: {exception.GetType().Name}; HRESULT=0x{exception.HResult:X8}");
             }
         }
     }
@@ -493,9 +514,28 @@ public sealed partial class MainWindow : Window
                 return;
             }
 
-            if (_workspaceSettingsSaveFailureNotice.Observe(state))
+            if (state == DebouncedSaveState.Saving)
+            {
+                _workspaceSettingsSaveEditor = _editorView;
+                _workspaceSettingsSavePublication = _editorView?.CaptureInfoBarPublication() ?? default;
+            }
+            else if (state == DebouncedSaveState.Saved)
+            {
+                _workspaceSettingsSaveEditor = null;
+            }
+
+            var noticeTargetsCurrentView =
+                (_editorView is not null && ReferenceEquals(_editorView, _workspaceSettingsSaveEditor)) ||
+                (_editorView is null && _workspaceSettingsSaveEditor is null);
+            if ((state != DebouncedSaveState.SaveFailed || noticeTargetsCurrentView) &&
+                _workspaceSettingsSaveFailureNotice.Observe(state))
             {
                 ReportWorkspaceSettingsSaveFailure();
+            }
+
+            if (state == DebouncedSaveState.SaveFailed)
+            {
+                _workspaceSettingsSaveEditor = null;
             }
         });
     }
@@ -504,11 +544,11 @@ public sealed partial class MainWindow : Window
     {
         const string title = "Could not save workspace settings";
         const string message = "Your timeline and playback preferences could not be saved. Try changing them again.";
-        if (_editorView is not null)
+        if (_editorView is { } editor && ReferenceEquals(editor, _workspaceSettingsSaveEditor))
         {
-            _editorView.ReportError(title, message);
+            editor.ReportError(_workspaceSettingsSavePublication, title, message);
         }
-        else
+        else if (_editorView is null && _workspaceSettingsSaveEditor is null)
         {
             _viewModel.Home.ReportError($"{title}. {message}");
         }
@@ -572,7 +612,7 @@ public sealed partial class MainWindow : Window
                 throw;
             }
         }
-        catch (Exception exception)
+        catch (Exception exception) when (!ExceptionPolicy.IsFatal(exception))
         {
             _ = _logService.TryWriteAsync($"Close save failed: {exception.GetType().Name}");
             if (!_lifecycle.CanContinueClosing)

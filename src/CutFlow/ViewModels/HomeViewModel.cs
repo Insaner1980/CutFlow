@@ -121,6 +121,16 @@ public sealed partial class HomeViewModel : ViewModelBase
 
     public void ReportError(string message) => ErrorMessage = message;
 
+    internal static bool IsExpectedProjectOperationFailure(Exception exception) =>
+        exception is IOException or
+            UnauthorizedAccessException or
+            InvalidDataException or
+            ArgumentException or
+            NotSupportedException or
+            OverflowException or
+            System.Runtime.InteropServices.COMException or
+            System.Security.SecurityException;
+
     private async Task RefreshCoreAsync(CancellationToken cancellationToken)
     {
         var projects = await _projectService.ListAsync(cancellationToken);
@@ -160,7 +170,7 @@ public sealed partial class HomeViewModel : ViewModelBase
         }
         catch (Exception exception) when (exception is IOException or UnauthorizedAccessException or InvalidDataException)
         {
-            ErrorMessage = exception.Message;
+            ErrorMessage = "The project operation could not be completed. Check app storage and try again.";
             throw;
         }
         finally
@@ -198,9 +208,16 @@ public sealed partial class ProjectCardViewModel : ViewModelBase
 
     public string Name => Project.Name;
 
-    public string OpenAutomationName => $"Open project {Name}";
+    public string OpenAutomationName =>
+        $"Open project {Name}. {ModifiedText}. Aspect ratio {AspectRatioText}. Duration {DurationText}. " +
+        (HasThumbnail ? "Thumbnail available." : "Thumbnail unavailable.");
 
     public string ActionsAutomationName => $"Project actions for {Name}";
+
+    public string OpenActionName => $"Open project {Name}";
+    public string RenameActionName => $"Rename project {Name}";
+    public string DuplicateActionName => $"Duplicate project {Name}";
+    public string DeleteActionName => $"Delete project {Name}";
 
     public string ModifiedText => $"Modified {Project.ModifiedAt.ToLocalTime().ToString("g", CultureInfo.CurrentCulture)}";
 
@@ -229,6 +246,7 @@ public sealed partial class ProjectCardViewModel : ViewModelBase
         {
             OnPropertyChanged(nameof(HasThumbnail));
             OnPropertyChanged(nameof(ThumbnailSource));
+            OnPropertyChanged(nameof(OpenAutomationName));
         }
     }
 

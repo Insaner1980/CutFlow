@@ -188,8 +188,9 @@ public sealed class ThumbnailService
             FileShare.None,
             16 * 1024,
             FileOptions.Asynchronous);
+        using var source = encodedThumbnail.AsStreamForRead();
         await CopyBoundedAsync(
-            encodedThumbnail.AsStreamForRead(),
+            source,
             destination,
             MaximumCachedThumbnailBytes,
             cancellationToken);
@@ -234,7 +235,7 @@ public sealed class ThumbnailService
         }
     }
 
-    private static async Task<ThumbnailRequest?> CaptureCurrentRequestAsync(
+    private async Task<ThumbnailRequest?> CaptureCurrentRequestAsync(
         StorageFile file,
         ProjectAsset asset,
         int requestedSize,
@@ -245,6 +246,8 @@ public sealed class ThumbnailService
         var fileSize = basic.Size;
         var lastWriteUtc = basic.DateModified.ToUniversalTime();
 
+        string? obsoleteCachePath = null;
+        ThumbnailRequest? request;
         lock (asset)
         {
             cancellationToken.ThrowIfCancellationRequested();
@@ -262,16 +265,20 @@ public sealed class ThumbnailService
             if (asset.FileSize != fileSize ||
                 asset.LastWriteUtc.ToUniversalTime() != lastWriteUtc)
             {
+                obsoleteCachePath = asset.ThumbnailCachePath;
                 asset.FileSize = fileSize;
                 asset.LastWriteUtc = lastWriteUtc;
                 asset.ThumbnailCachePath = string.Empty;
             }
 
-            return CaptureRequestLocked(asset, requestedSize);
+            request = CaptureRequestLocked(asset, requestedSize);
         }
+
+        TryDeleteSupersededThumbnail(obsoleteCachePath);
+        return request;
     }
 
-    private static async Task<bool> SourceStillMatchesRequestAsync(
+    private async Task<bool> SourceStillMatchesRequestAsync(
         StorageFile file,
         ProjectAsset asset,
         ThumbnailRequest request,
@@ -649,6 +656,16 @@ public sealed class ThumbnailService
         {
             // Cache deletion is best effort and must not block the project edit.
         }
+    }
+
+    private void TryDeleteSupersededThumbnail(string? relativePath)
+    {
+        if (string.IsNullOrWhiteSpace(relativePath) || !IsCanonicalRelativeCachePath(relativePath))
+        {
+            return;
+        }
+
+        TryDeleteProjectOwnedFile(ResolveProjectCachePath(_projectRootPath, relativePath));
     }
 
     private readonly record struct ThumbnailAttemptResult(bool IsComplete, bool ShouldRetry, string? Path)

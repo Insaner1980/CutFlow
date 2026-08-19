@@ -322,6 +322,28 @@ public sealed class Task9CompositionTests
     }
 
     [TestMethod]
+    public void PreviewCompositionKey_IgnoresLiveTextPixelsButTracksNativeCompositionChanges()
+    {
+        var project = TestProjects.WithVideo(5_000);
+        var text = TestProjects.Text(startMilliseconds: 1_000, durationMilliseconds: 1_000);
+        project.TextItems.Add(text);
+        var original = PreviewCompositionKey.Create(project);
+
+        text.Text = "Changed live text";
+        text.FontSize = 72;
+        text.NormalizedX = 0.25;
+        Assert.AreEqual(original, PreviewCompositionKey.Create(project));
+
+        project.VideoItems[0].IsMuted = true;
+        Assert.AreNotEqual(original, PreviewCompositionKey.Create(project));
+        project.VideoItems[0].IsMuted = false;
+
+        text.StartMilliseconds = 5_000;
+        text.DurationMilliseconds = 1_000;
+        Assert.AreNotEqual(original, PreviewCompositionKey.Create(project));
+    }
+
+    [TestMethod]
     public void PreviewResourceCleanup_DetachesElementBeforeDisposingNativeResources()
     {
         var calls = new List<string>();
