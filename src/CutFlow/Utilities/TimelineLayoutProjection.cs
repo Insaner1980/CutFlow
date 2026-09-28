@@ -41,7 +41,10 @@ public static class TimelineLayoutProjection
 
     public static TimelineItemBounds? GetAdjacentClip(ProjectDocument project, Guid currentId, bool backwards)
     {
-        var bounds = GetAllBounds(project);
+        var bounds = GetAllBounds(project)
+            .GroupBy(bound => bound.Kind)
+            .SelectMany(track => track.OrderBy(bound => bound.StartMilliseconds))
+            .ToList();
         for (var i = 0; i < bounds.Count; i++)
         {
             if (bounds[i].ItemId != currentId) continue;

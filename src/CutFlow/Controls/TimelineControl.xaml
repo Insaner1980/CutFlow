@@ -135,6 +135,7 @@
 
             <ScrollViewer
                 x:Name="TimelineScroller"
+                BringIntoViewOnFocusChange="False"
                 Grid.Column="2"
                 HorizontalScrollMode="Enabled"
                 HorizontalScrollBarVisibility="Visible"
