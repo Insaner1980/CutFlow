@@ -4,7 +4,8 @@ namespace CutFlow.Models;
 
 public sealed class ProjectDocument
 {
-    public const int CurrentSchemaVersion = 1;
+    public const int CurrentSchemaVersion = 2;
+    public const int LegacySchemaVersion = 1;
     public const int MaximumNameLength = 120;
     public const long MinimumItemDurationMilliseconds = 100;
     public const long MaximumTimelineDurationMilliseconds = 24 * 60 * 60 * 1_000;

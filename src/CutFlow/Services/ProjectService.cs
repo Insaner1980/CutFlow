@@ -189,12 +189,20 @@ public sealed partial class ProjectService
                 throw new InvalidDataException("The project schema version is invalid.");
             }
 
-            if (schemaVersion != ProjectDocument.CurrentSchemaVersion)
+            if (schemaVersion is not (ProjectDocument.LegacySchemaVersion or ProjectDocument.CurrentSchemaVersion))
             {
                 throw new InvalidDataException($"Unsupported project schema version {schemaVersion}.");
             }
 
-            ValidateJsonResourceBounds(root);
+            if (schemaVersion == ProjectDocument.CurrentSchemaVersion)
+            {
+                if (json.Length > MaximumProjectJsonCharacters)
+                {
+                    throw new InvalidDataException("The project JSON exceeds the supported size limit.");
+                }
+
+                ValidateJsonResourceBounds(root);
+            }
             project = root.Deserialize<ProjectDocument>(JsonOptions)
                 ?? throw new InvalidDataException("The project JSON did not contain a document.");
         }
@@ -226,7 +234,7 @@ public sealed partial class ProjectService
             throw new ArgumentException("A project must have an identity before it can be saved.", nameof(project));
         }
 
-        if (project.SchemaVersion != ProjectDocument.CurrentSchemaVersion)
+        if (project.SchemaVersion is not (ProjectDocument.LegacySchemaVersion or ProjectDocument.CurrentSchemaVersion))
         {
             throw new InvalidDataException($"Unsupported project schema version {project.SchemaVersion}.");
         }
@@ -256,13 +264,14 @@ public sealed partial class ProjectService
                 RejectReparsePoints(projectPath);
                 RejectReparsePoints(temporaryPath);
                 var json = _serialize(snapshot);
-                if (json.Length > MaximumProjectJsonCharacters)
+                if (snapshot.SchemaVersion == ProjectDocument.CurrentSchemaVersion)
                 {
-                    throw new InvalidDataException("The project JSON exceeds the supported size limit.");
-                }
+                    if (json.Length > MaximumProjectJsonCharacters)
+                    {
+                        throw new InvalidDataException("The project JSON exceeds the supported size limit.");
+                    }
 
-                using (var document = JsonDocument.Parse(json, new JsonDocumentOptions { MaxDepth = JsonOptions.MaxDepth }))
-                {
+                    using var document = JsonDocument.Parse(json, new JsonDocumentOptions { MaxDepth = JsonOptions.MaxDepth });
                     ValidateJsonResourceBounds(document.RootElement);
                 }
                 cancellationToken.ThrowIfCancellationRequested();
@@ -445,21 +454,38 @@ public sealed partial class ProjectService
         using var reader = new StreamReader(stream, Encoding.UTF8, detectEncodingFromByteOrderMarks: true);
         var json = new StringBuilder((int)Math.Min(stream.Length, MaximumProjectJsonCharacters));
         var buffer = new char[4096];
+        var maximumCharacters = MaximumProjectJsonCharacters;
         while (true)
         {
-            var read = await reader.ReadAsync(buffer.AsMemory(), cancellationToken);
+            var read = await reader.ReadBlockAsync(buffer.AsMemory(), cancellationToken);
             if (read == 0)
             {
                 return json.ToString();
             }
 
-            if (json.Length > MaximumProjectJsonCharacters - read)
+            // The original serializer wrote schemaVersion first. Preserve its existing
+            // documents without applying new schema-2 resource limits retroactively.
+            if (json.Length == 0 && HasLegacySchemaHeader(buffer.AsSpan(0, read)))
+            {
+                maximumCharacters = int.MaxValue;
+            }
+
+            if (json.Length > maximumCharacters - read)
             {
                 throw new InvalidDataException("The project JSON exceeds the supported size limit.");
             }
 
             json.Append(buffer, 0, read);
         }
+    }
+
+    private static bool HasLegacySchemaHeader(ReadOnlySpan<char> prefix)
+    {
+        var reader = new Utf8JsonReader(Encoding.UTF8.GetBytes(prefix.ToString()), isFinalBlock: false, state: default);
+        return reader.Read() && reader.TokenType == JsonTokenType.StartObject &&
+            reader.Read() && reader.TokenType == JsonTokenType.PropertyName && reader.ValueTextEquals("schemaVersion") &&
+            reader.Read() && reader.TokenType == JsonTokenType.Number &&
+            reader.TryGetInt32(out var version) && version == ProjectDocument.LegacySchemaVersion;
     }
 
     private static void CreateNewDirectory(string path)
@@ -484,7 +510,7 @@ public sealed partial class ProjectService
     internal static void NormalizeSnapshot(ProjectDocument project)
     {
         ArgumentNullException.ThrowIfNull(project);
-        if (project.SchemaVersion != ProjectDocument.CurrentSchemaVersion)
+        if (project.SchemaVersion is not (ProjectDocument.LegacySchemaVersion or ProjectDocument.CurrentSchemaVersion))
         {
             throw new InvalidDataException($"Unsupported project schema version {project.SchemaVersion}.");
         }

@@ -86,7 +86,7 @@ public sealed partial class ProjectSerializationTests
         Assert.HasCount(1, loaded.VideoItems);
         Assert.HasCount(1, loaded.AudioItems);
         Assert.HasCount(1, loaded.TextItems);
-        Assert.Contains("\"schemaVersion\": 1", json);
+        Assert.Contains($"\"schemaVersion\": {ProjectDocument.CurrentSchemaVersion}", json);
         Assert.Contains($"cache/thumbnails/{new string('a', 64)}.jpg", json);
     }
 
@@ -1014,7 +1014,7 @@ public sealed partial class ProjectSerializationTests
             var items = string.Join(',', Enumerable.Repeat("{}", testCase.Count));
             await File.WriteAllTextAsync(
                 Path.Combine(projectDirectory.FullName, "project.json"),
-                $$"""{ "schemaVersion": 1, "id": "{{id}}", "{{testCase.PropertyName}}": [{{items}}] }""",
+                $$"""{ "schemaVersion": 2, "id": "{{id}}", "{{testCase.PropertyName}}": [{{items}}] }""",
                 TestContext.CancellationToken);
 
             var exception = await Assert.ThrowsExactlyAsync<InvalidDataException>(
@@ -1036,7 +1036,7 @@ public sealed partial class ProjectSerializationTests
             Path.Combine(projectDirectory.FullName, "project.json"),
             JsonSerializer.Serialize(new
             {
-                schemaVersion = 1,
+                schemaVersion = 2,
                 id,
                 textItems = new[] { new { id = textId, text } }
             }),

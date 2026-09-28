@@ -30,7 +30,7 @@ public sealed partial class SerializationCompatibilityFixtureTests
 
     private static void AssertCompatibilityDefaults(ProjectDocument project)
     {
-        Assert.AreEqual(ProjectDocument.CurrentSchemaVersion, project.SchemaVersion);
+        Assert.AreEqual(ProjectDocument.LegacySchemaVersion, project.SchemaVersion);
         Assert.AreEqual(FixtureProjectId, project.Id);
         Assert.AreEqual(1920, project.Settings.Width);
         Assert.AreEqual(1080, project.Settings.Height);

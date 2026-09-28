@@ -192,6 +192,9 @@ public sealed partial class InspectorPanel : UserControl
         InspectorTitle.Text = "Text";
         InspectorSubtitle.Text = "Content and timeline properties";
         TextPanel.Visibility = Visibility.Visible;
+        TextContentBox.MaxLength = _project.SchemaVersion == ProjectDocument.LegacySchemaVersion
+            ? 0
+            : ProjectService.MaximumPersistedTextLength;
         TextContentBox.Text = text.Text;
         TextFontFamilyBox.SelectedItem = TextStyle.NormalizeFontFamily(text.FontFamily);
         TextFontSizeBox.Text = TimelineInput.FormatDoubleRoundTrip(text.FontSize);

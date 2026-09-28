@@ -145,3 +145,7 @@ Export requires at least one visual V1 item, all positive-duration A1 source fil
 - There are no accounts, cloud sync, online assets, AI features, telemetry, social publishing, or collaboration.
 - Export is limited to the profiles above. Hardware encoder selection and advanced codec controls are not exposed.
 - The repository produces a development loose-package layout. Creating and signing a distributable MSIX installer is outside the current workflow.
+
+### Project format compatibility
+
+New projects use schema 2 and enforce the documented resource limits on both save and load. Existing schema-1 projects keep their format and previous capacity when opened, listed, edited and saved; they are not silently migrated or truncated. Files emitted by the original serializer put `schemaVersion` first, allowing their original size capacity to be recognized before the schema-2 read limit. Legacy projects retain their earlier resource-use characteristics; the new limits are not a security boundary for legacy files. Structural validation, path checks and atomic saves still apply to both formats.
