@@ -671,14 +671,12 @@ public sealed partial class EditorView : UserControl, IDisposable
             var previewErrors = CompositionBuildResult.SelectPreviewErrors(result.Errors);
             if (previewErrors.Count > 0)
             {
-                if (!TryShowPreviewMessage(
+                _publishedPreviewKey = null;
+                TryShowPreviewMessage(
                     publication,
                     InfoBarSeverity.Warning,
                     "Preview contains unavailable items",
-                    string.Join(" ", previewErrors)))
-                {
-                    _publishedPreviewKey = null;
-                }
+                    string.Join(" ", previewErrors));
             }
             else
             {
