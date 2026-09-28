@@ -29,7 +29,7 @@ public sealed partial class ProjectServiceTests
 
         CollectionAssert.AreEqual(previous, await File.ReadAllBytesAsync(path, TestContext.CancellationToken));
         Assert.AreEqual(modified, project.ModifiedAt);
-        Assert.IsFalse(File.Exists(path + ".tmp"));
+        Assert.IsEmpty(Directory.EnumerateFiles(service.GetProjectPath(project.Id), "project.json.*.tmp"));
         var loaded = await service.LoadAsync(project.Id, TestContext.CancellationToken);
         Assert.AreEqual("Reopenable", loaded.Name);
         Assert.IsEmpty(loaded.TextItems);

@@ -336,7 +336,7 @@ public sealed class Task11WorkspaceSettingsTests
 
         Assert.Contains("if (_dragOperation == TimelineDragOperation.None && !ClipWindowContainsViewport())", viewChanged);
         Assert.Contains("RenderClips();", release);
-        Assert.IsLessThan(release.IndexOf("RenderClips();", StringComparison.Ordinal), release.IndexOf("RaiseEdit(request);", StringComparison.Ordinal));
+        Assert.IsTrue(release.IndexOf("RaiseEdit(request);", StringComparison.Ordinal) < release.IndexOf("RenderClips();", StringComparison.Ordinal));
     }
 
     private static string GetMethod(string source, string startMarker, string endMarker)

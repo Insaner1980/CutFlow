@@ -653,7 +653,6 @@ public sealed partial class EditorView : UserControl, IDisposable
         {
             lease = _previewRebuildGate.Begin(_lifetimeToken);
             if (debounce) await Task.Delay(140, lease.Token);
-            publication = CaptureInfoBarPublication();
             var previewKey = PreviewCompositionKey.Create(ViewModel.Project);
             if (previewKey.Equals(_publishedPreviewKey)) return;
             var result = await _compositionService.BuildPreviewAsync(ViewModel.Project, lease.Token);

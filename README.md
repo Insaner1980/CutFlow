@@ -6,8 +6,8 @@ CutFlow is a local-only Windows video editor built with C#, WinUI 3, and the nat
 
 - An x64 Windows PC. Windows 11 is the primary target. The package declares Windows 10 version 1809 (build 17763) as its minimum, but media support still depends on the codecs installed in Windows.
 - [.NET SDK 10.0.302](https://dotnet.microsoft.com/download/dotnet/10.0), pinned by `global.json` (`latestPatch` roll-forward, prerelease SDKs disabled).
-- Windows SDK 10.0.26100.0. The project restores `Microsoft.Windows.SDK.BuildTools` 10.0.28000.2526.
-- [Windows App SDK 2.4 x64 runtime](https://learn.microsoft.com/windows/apps/windows-app-sdk/downloads). The matching 2.4.0 NuGet package is restored with the project.
+- Windows SDK 10.0.26100.0. The project restores `Microsoft.Windows.SDK.BuildTools` 10.0.28000.2705.
+- [Windows App SDK 2.5 x64 runtime](https://learn.microsoft.com/windows/apps/windows-app-sdk/downloads). The matching 2.5.1 NuGet package is restored with the project.
 - PowerShell and [Developer Mode](https://learn.microsoft.com/windows/apps/get-started/enable-your-device-for-development) for loose-package registration.
 
 The verified development configuration is x64; x86 and Arm64 are not configured by this solution. Visual Studio is optional for the command-line workflow below.
@@ -55,7 +55,7 @@ dotnet build .\src\CutFlow\CutFlow.csproj -c Debug -p:Platform=x64
 .\scripts\Register-CutFlowDevelopment.ps1 -Configuration Debug
 ```
 
-If activation reports a missing framework package, install the Windows App SDK 2.4 x64 runtime linked under Requirements and register the layout again.
+If activation reports a missing framework package, install the Windows App SDK 2.5 x64 runtime linked under Requirements and register the layout again.
 
 ## Editing workflow
 

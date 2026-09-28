@@ -373,6 +373,8 @@ public sealed class Task11LifecycleTests
         Assert.Contains("CompositionBuildResult.SelectPreviewErrors(result.Errors)", rebuild);
         Assert.Contains("if (!TryShowPreviewMessage(", rebuild);
         Assert.Contains("_publishedPreviewKey = null;", rebuild);
+        Assert.AreEqual(1, rebuild.Split("CaptureInfoBarPublication()", StringSplitOptions.None).Length - 1);
+        Assert.IsTrue(rebuild.IndexOf("CaptureInfoBarPublication()", StringComparison.Ordinal) < rebuild.IndexOf("await Task.Delay", StringComparison.Ordinal));
         Assert.Contains("InfoBarSeverity.Warning", rebuild);
         Assert.Contains("ClearPreviewMessage();", rebuild);
         Assert.Contains("TryShowPreviewMessage(publication, InfoBarSeverity.Error", rebuild);
