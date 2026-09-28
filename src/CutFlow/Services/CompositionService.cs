@@ -109,7 +109,7 @@ public sealed class CompositionService
             {
                 var storageProperties = await file.Properties.GetVideoPropertiesAsync();
                 cancellationToken.ThrowIfCancellationRequested();
-                MediaImportService.ValidateVisualDimensions(
+                MediaImportService.ValidateKnownVideoDimensions(
                     storageProperties.Width,
                     storageProperties.Height);
                 clip = await MediaClip.CreateFromFileAsync(file);

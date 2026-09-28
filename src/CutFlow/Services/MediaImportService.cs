@@ -513,7 +513,7 @@ public sealed class MediaImportService
                 {
                     var storageProperties = await file.Properties.GetVideoPropertiesAsync();
                     cancellationToken.ThrowIfCancellationRequested();
-                    ValidateVisualDimensions(storageProperties.Width, storageProperties.Height);
+                    ValidateKnownVideoDimensions(storageProperties.Width, storageProperties.Height);
                     var clip = await MediaClip.CreateFromFileAsync(file);
                     cancellationToken.ThrowIfCancellationRequested();
                     var properties = clip.GetVideoEncodingProperties();
@@ -603,6 +603,15 @@ public sealed class MediaImportService
     }
 
     private static long ToMilliseconds(TimeSpan duration) => checked((long)Math.Round(duration.TotalMilliseconds));
+
+    internal static void ValidateKnownVideoDimensions(uint width, uint height)
+    {
+        // Shell metadata can omit dimensions; decoder dimensions are validated separately.
+        if (width != 0 && height != 0)
+        {
+            ValidateVisualDimensions(width, height);
+        }
+    }
 
     internal static (int Width, int Height) ValidateVisualDimensions(uint width, uint height)
     {

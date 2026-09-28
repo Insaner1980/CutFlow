@@ -517,6 +517,19 @@ public sealed class MediaImportServiceTests
     }
 
     [TestMethod]
+    public void KnownVideoDimensions_AllowMissingShellMetadataButRejectKnownOversizedFrames()
+    {
+        MediaImportService.ValidateKnownVideoDimensions(0, 0);
+        MediaImportService.ValidateKnownVideoDimensions(1920, 0);
+        MediaImportService.ValidateKnownVideoDimensions(0, 1080);
+        MediaImportService.ValidateKnownVideoDimensions(1920, 1080);
+        Assert.ThrowsExactly<InvalidDataException>(() =>
+            MediaImportService.ValidateKnownVideoDimensions(8193, 8192));
+        Assert.ThrowsExactly<InvalidDataException>(() =>
+            MediaImportService.ValidateKnownVideoDimensions(uint.MaxValue, uint.MaxValue));
+    }
+
+    [TestMethod]
     public void VisualDimensionValidation_RejectsInvalidAndExtremeProductsWithoutOverflow()
     {
         Assert.AreEqual(
