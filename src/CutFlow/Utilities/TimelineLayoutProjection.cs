@@ -39,6 +39,18 @@ public static class TimelineLayoutProjection
         return bounds;
     }
 
+    public static TimelineItemBounds? GetAdjacentClip(ProjectDocument project, Guid currentId, bool backwards)
+    {
+        var bounds = GetAllBounds(project);
+        for (var i = 0; i < bounds.Count; i++)
+        {
+            if (bounds[i].ItemId != currentId) continue;
+            var target = i + (backwards ? -1 : 1);
+            return target >= 0 && target < bounds.Count ? bounds[target] : null;
+        }
+        return null;
+    }
+
     public static int GetVideoTargetIndex(
         IReadOnlyList<TimelineItemBounds> bounds,
         Guid draggedItemId,

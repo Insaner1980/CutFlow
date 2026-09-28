@@ -26,6 +26,7 @@ public sealed partial class TimelineControl : UserControl
     private const double ContentEndPadding = 48;
     private const double ClipViewportBuffer = 1;
     private ProjectDocument? _project;
+    private Guid? _keyboardClipTarget;
     private EditorSelection _selection = EditorSelection.None;
     private EditorSelection _selectionBeforePointerPress = EditorSelection.None;
     private TimelineScale _scale = new(80);
@@ -207,6 +208,7 @@ public sealed partial class TimelineControl : UserControl
 
     private void RenderClips()
     {
+        var restoreClipFocus = XamlRoot is not null && FocusManager.GetFocusedElement(XamlRoot) is FrameworkElement { Tag: ClipTag };
         CancelPointerInteraction();
         var thumbnailToken = RestartThumbnailWork();
         var thumbnailGeneration = ++_thumbnailRenderGeneration;
@@ -258,10 +260,12 @@ public sealed partial class TimelineControl : UserControl
 
             AddClip(AudioCanvas, CreateAudioCard(item, asset, bound), bound);
         }
+
+        if (restoreClipFocus && _keyboardClipTarget is { } focusedId) RestoreTimelineCardFocus(focusedId);
     }
 
     private bool IsClipVisible(TimelineItemBounds bound) =>
-        _scale.IsCardVisible(
+        bound.ItemId == _keyboardClipTarget || _scale.IsCardVisible(
             bound,
             _renderedClipWindowStart,
             _renderedClipWindowEnd,
@@ -519,6 +523,7 @@ public sealed partial class TimelineControl : UserControl
         }
 
         hitTarget.GotFocus += Clip_GotFocus;
+        hitTarget.KeyDown += Clip_KeyDown;
         hitTarget.PointerPressed += Clip_PointerPressed;
         hitTarget.PointerMoved += Drag_PointerMoved;
         hitTarget.PointerReleased += Drag_PointerReleased;
@@ -530,6 +535,20 @@ public sealed partial class TimelineControl : UserControl
         canvas.Children.Add(hitTarget);
     }
 
+    private void Clip_KeyDown(object sender, KeyRoutedEventArgs e)
+    {
+        if (e.Key != VirtualKey.Tab || _project is null || sender is not FrameworkElement { Tag: ClipTag tag }) return;
+        var backwards = (InputKeyboardSource.GetKeyStateForCurrentThread(VirtualKey.Shift) & CoreVirtualKeyStates.Down) != 0;
+        if (TimelineLayoutProjection.GetAdjacentClip(_project, tag.Bounds.ItemId, backwards) is not { } target) return;
+
+        e.Handled = true;
+        _keyboardClipTarget = target.ItemId;
+        RenderClips();
+        RestoreTimelineCardFocus(target.ItemId);
+        var focused = FocusManager.GetFocusedElement(XamlRoot) as FrameworkElement;
+        focused?.StartBringIntoView(new BringIntoViewOptions { AnimationDesired = false });
+    }
+
     private void Clip_GotFocus(object sender, RoutedEventArgs e)
     {
         if (sender is not FrameworkElement { Tag: ClipTag tag })
@@ -537,6 +556,7 @@ public sealed partial class TimelineControl : UserControl
             return;
         }
 
+        _keyboardClipTarget = tag.Bounds.ItemId;
         var selection = new EditorSelection(tag.Bounds.Kind, tag.Bounds.ItemId);
         if (_selection == selection)
         {
