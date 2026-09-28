@@ -82,7 +82,8 @@ public sealed class ExportService
         string destinationPath,
         ExportOptions options,
         IProgress<double> progress,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken,
+        object? sourceGuardLock = null)
     {
         ArgumentNullException.ThrowIfNull(project);
         ArgumentNullException.ThrowIfNull(getSourceGuardProject);
@@ -185,7 +186,14 @@ public sealed class ExportService
             cancellationToken.ThrowIfCancellationRequested();
             stagingReservation.Dispose();
             stagingReservation = null;
-            await CommitAsync(stagingPath, destinationPath);
+            if (!await CommitAsync(
+                    stagingPath,
+                    destinationPath,
+                    canCommit: () => !IsSourceMediaPath(project, getSourceGuardProject(), destinationPath),
+                    sourceGuardLock: sourceGuardLock))
+            {
+                return SourceMediaConflict(destinationPath);
+            }
             stagingPath = null;
             progress.Report(100);
             return new ExportResult(ExportResultStatus.Success, destinationPath, string.Empty);
@@ -224,6 +232,7 @@ public sealed class ExportService
         string fileName,
         CancellationToken cancellationToken)
     {
+        cancellationToken.ThrowIfCancellationRequested();
         var path = Path.Combine(directoryPath, fileName);
         FileStream? reservation = null;
         await using var creation = new FileStream(
@@ -301,11 +310,22 @@ public sealed class ExportService
         return $"{baseName}.cutflow-{operationId:N}.mp4";
     }
 
-    internal static Task CommitAsync(
+    internal static Task<bool> CommitAsync(
         string stagingPath,
         string destinationPath,
-        Action<string, string>? move = null) =>
-        Task.Run(() => (move ?? MoveStagingFile)(stagingPath, destinationPath));
+        Action<string, string>? move = null,
+        Func<bool>? canCommit = null,
+        object? sourceGuardLock = null) =>
+        Task.Run(() =>
+        {
+            // The editor uses the same gate for import, relink, undo and other project edits.
+            lock (sourceGuardLock ?? new object())
+            {
+                if (canCommit is not null && !canCommit()) return false;
+                (move ?? MoveStagingFile)(stagingPath, destinationPath);
+                return true;
+            }
+        });
 
     private static void MoveStagingFile(string stagingPath, string destinationPath) =>
         File.Move(stagingPath, destinationPath, overwrite: true);

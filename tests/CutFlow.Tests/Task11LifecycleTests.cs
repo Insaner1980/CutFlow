@@ -372,6 +372,7 @@ public sealed class Task11LifecycleTests
 
         Assert.Contains("CompositionBuildResult.SelectPreviewErrors(result.Errors)", rebuild);
         var errorBranch = rebuild[rebuild.IndexOf("if (previewErrors.Count > 0)", StringComparison.Ordinal)..];
+        Assert.Contains("_publishedPreviewKey = null;", errorBranch);
         Assert.IsTrue(errorBranch.IndexOf("_publishedPreviewKey = null;", StringComparison.Ordinal) <
             errorBranch.IndexOf("TryShowPreviewMessage(", StringComparison.Ordinal));
         Assert.DoesNotContain("if (!TryShowPreviewMessage(", errorBranch);

@@ -13,6 +13,7 @@ public sealed partial class EditorViewModel : ViewModelBase
     public const string SaveFailedStatus = "Save failed";
 
     private readonly UndoHistory _history = new();
+    internal object ProjectMutationLock { get; } = new();
     private ProjectDocument _project;
     private EditorTool _selectedTool = EditorTool.Media;
     private EditorSelection _selection = EditorSelection.None;
@@ -698,74 +699,86 @@ public sealed partial class EditorViewModel : ViewModelBase
 
     public void CommitEdit(Action<ProjectDocument> edit)
     {
-        ArgumentNullException.ThrowIfNull(edit);
-        _history.Record(Project);
-        edit(Project);
-        _revision++;
-        ClampPlayheadToProjectDuration();
-        SaveStatus = UnsavedStatus;
-        OnPropertyChanged(nameof(CanUndo));
-        OnPropertyChanged(nameof(CanRedo));
-        OnPropertyChanged(nameof(DurationText));
-        EditCommitted?.Invoke(this, EventArgs.Empty);
+        lock (ProjectMutationLock)
+        {
+            ArgumentNullException.ThrowIfNull(edit);
+            _history.Record(Project);
+            edit(Project);
+            _revision++;
+            ClampPlayheadToProjectDuration();
+            SaveStatus = UnsavedStatus;
+            OnPropertyChanged(nameof(CanUndo));
+            OnPropertyChanged(nameof(CanRedo));
+            OnPropertyChanged(nameof(DurationText));
+            EditCommitted?.Invoke(this, EventArgs.Empty);
+        }
     }
 
     public bool TryCommitEdit(Func<ProjectDocument, bool> edit)
     {
-        ArgumentNullException.ThrowIfNull(edit);
-        var candidate = ProjectDocumentCloner.Clone(Project);
-        if (!edit(candidate) || !TimelineEditingService.IsWithinProjectDurationLimit(candidate))
+        lock (ProjectMutationLock)
         {
-            return false;
-        }
+            ArgumentNullException.ThrowIfNull(edit);
+            var candidate = ProjectDocumentCloner.Clone(Project);
+            if (!edit(candidate) || !TimelineEditingService.IsWithinProjectDurationLimit(candidate))
+            {
+                return false;
+            }
 
-        _history.Record(Project);
-        Project = candidate;
-        _revision++;
-        ClampPlayheadToProjectDuration();
-        SaveStatus = UnsavedStatus;
-        NormalizeSelection();
-        OnPropertyChanged(nameof(CanUndo));
-        OnPropertyChanged(nameof(CanRedo));
-        OnPropertyChanged(nameof(DurationText));
-        EditCommitted?.Invoke(this, EventArgs.Empty);
-        return true;
+            _history.Record(Project);
+            Project = candidate;
+            _revision++;
+            ClampPlayheadToProjectDuration();
+            SaveStatus = UnsavedStatus;
+            NormalizeSelection();
+            OnPropertyChanged(nameof(CanUndo));
+            OnPropertyChanged(nameof(CanRedo));
+            OnPropertyChanged(nameof(DurationText));
+            EditCommitted?.Invoke(this, EventArgs.Empty);
+            return true;
+        }
     }
 
     public void Undo()
     {
-        var restored = _history.Undo(Project);
-        if (restored is null)
+        lock (ProjectMutationLock)
         {
-            return;
-        }
+            var restored = _history.Undo(Project);
+            if (restored is null)
+            {
+                return;
+            }
 
-        Project = restored;
-        _revision++;
-        ClampPlayheadToProjectDuration();
-        NormalizeSelection();
-        SaveStatus = UnsavedStatus;
-        OnPropertyChanged(nameof(CanUndo));
-        OnPropertyChanged(nameof(CanRedo));
-        EditCommitted?.Invoke(this, EventArgs.Empty);
+            Project = restored;
+            _revision++;
+            ClampPlayheadToProjectDuration();
+            NormalizeSelection();
+            SaveStatus = UnsavedStatus;
+            OnPropertyChanged(nameof(CanUndo));
+            OnPropertyChanged(nameof(CanRedo));
+            EditCommitted?.Invoke(this, EventArgs.Empty);
+        }
     }
 
     public void Redo()
     {
-        var restored = _history.Redo(Project);
-        if (restored is null)
+        lock (ProjectMutationLock)
         {
-            return;
-        }
+            var restored = _history.Redo(Project);
+            if (restored is null)
+            {
+                return;
+            }
 
-        Project = restored;
-        _revision++;
-        ClampPlayheadToProjectDuration();
-        NormalizeSelection();
-        SaveStatus = UnsavedStatus;
-        OnPropertyChanged(nameof(CanUndo));
-        OnPropertyChanged(nameof(CanRedo));
-        EditCommitted?.Invoke(this, EventArgs.Empty);
+            Project = restored;
+            _revision++;
+            ClampPlayheadToProjectDuration();
+            NormalizeSelection();
+            SaveStatus = UnsavedStatus;
+            OnPropertyChanged(nameof(CanUndo));
+            OnPropertyChanged(nameof(CanRedo));
+            EditCommitted?.Invoke(this, EventArgs.Empty);
+        }
     }
 
     public void MarkSaved() => SaveStatus = SavedStatus;

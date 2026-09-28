@@ -1369,6 +1369,65 @@ public sealed class Task12ExportTests
     }
 
     [TestMethod]
+    public async Task CommitAsync_RechecksSourceGuardAfterTakingProjectMutationLock()
+    {
+        var gate = new object();
+        var canCommit = true;
+        var moved = false;
+        Task<bool> commit;
+        lock (gate)
+        {
+            commit = ExportService.CommitAsync("staging", "destination", (_, _) => moved = true,
+                () => canCommit, gate);
+            canCommit = false;
+        }
+
+        Assert.IsFalse(await commit);
+        Assert.IsFalse(moved);
+    }
+
+    [TestMethod]
+    public async Task CommitAsync_HoldsProjectMutationLockThroughReplacement()
+    {
+        var viewModel = new CutFlow.ViewModels.EditorViewModel(CreateExportableProject());
+        using var moveStarted = new ManualResetEventSlim();
+        using var releaseMove = new ManualResetEventSlim();
+        using var editStarted = new ManualResetEventSlim();
+        using var editApplied = new ManualResetEventSlim();
+        var commit = ExportService.CommitAsync("staging", "destination", (_, _) =>
+        {
+            Assert.IsTrue(Monitor.IsEntered(viewModel.ProjectMutationLock));
+            moveStarted.Set();
+            Assert.IsTrue(releaseMove.Wait(TimeSpan.FromSeconds(5), TestContext.CancellationToken));
+            Assert.IsFalse(editApplied.IsSet);
+        }, () => true, viewModel.ProjectMutationLock);
+        Task? edit = null;
+        try
+        {
+            Assert.IsTrue(moveStarted.Wait(TimeSpan.FromSeconds(5), TestContext.CancellationToken));
+            edit = Task.Run(() =>
+            {
+                editStarted.Set();
+                viewModel.CommitEdit(project =>
+                {
+                    project.Assets.Add(Asset(ProjectAssetKind.Video, "destination", "destination"));
+                    editApplied.Set();
+                });
+            }, TestContext.CancellationToken);
+            Assert.IsTrue(editStarted.Wait(TimeSpan.FromSeconds(5), TestContext.CancellationToken));
+            Assert.IsFalse(editApplied.Wait(TimeSpan.FromMilliseconds(100), TestContext.CancellationToken));
+        }
+        finally
+        {
+            releaseMove.Set();
+            await commit;
+            if (edit is not null) await edit;
+        }
+
+        Assert.IsTrue(editApplied.IsSet);
+    }
+
+    [TestMethod]
     public async Task CommitAsync_RunsTheBlockingMoveOffTheCallingThread()
     {
         using var commitStarted = new ManualResetEventSlim();
