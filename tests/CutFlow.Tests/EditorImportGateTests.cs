@@ -6,6 +6,8 @@ namespace CutFlow.Tests;
 [TestClass]
 public sealed class EditorImportGateTests
 {
+    public TestContext TestContext { get; set; } = null!;
+
     [TestMethod]
     public async Task ExecuteAsync_HoldsGateThroughCommitSoConcurrentDuplicateImportsCommitOnce()
     {
@@ -53,6 +55,58 @@ public sealed class EditorImportGateTests
         Assert.AreEqual(2, preparationCount);
         Assert.AreEqual(1, commitCount);
         Assert.HasCount(1, importedPaths);
+    }
+
+    [TestMethod]
+    public async Task ExecuteAsync_ExportWaitsForPreparedImportAndThenProtectsItsSource()
+    {
+        var gate = new EditorImportGate();
+        var prepared = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var releasePreparation = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var sourceReferenced = false;
+        var moved = false;
+        var import = gate.ExecuteAsync(async token =>
+        {
+            prepared.SetResult();
+            await releasePreparation.Task.WaitAsync(token);
+            return true;
+        }, _ => sourceReferenced = true, TestContext.CancellationToken);
+        await prepared.Task;
+
+        var export = gate.ExecuteAsync(_ => CutFlow.Services.ExportService.CommitAsync(
+            "staging", "destination", (_, _) => moved = true, () => !sourceReferenced),
+            TestContext.CancellationToken);
+        Assert.IsFalse(export.IsCompleted);
+        releasePreparation.SetResult();
+        await import;
+
+        Assert.IsFalse(await export);
+        Assert.IsFalse(moved);
+    }
+
+    [TestMethod]
+    public async Task ExecuteAsync_ImportPreparesOnlyAfterInFlightExportReplacement()
+    {
+        var gate = new EditorImportGate();
+        var moving = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var releaseMove = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var contents = "old source";
+        var preparedContents = string.Empty;
+        var export = gate.ExecuteAsync(async token =>
+        {
+            moving.SetResult();
+            await releaseMove.Task.WaitAsync(token);
+            contents = "exported source";
+            return true;
+        }, TestContext.CancellationToken);
+        await moving.Task;
+
+        var import = gate.ExecuteAsync(_ => Task.FromResult(contents),
+            value => preparedContents = value, TestContext.CancellationToken);
+        Assert.IsFalse(import.IsCompleted);
+        releaseMove.SetResult();
+        await Task.WhenAll(export, import);
+        Assert.AreEqual("exported source", preparedContents);
     }
 
     [TestMethod]

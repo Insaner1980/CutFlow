@@ -12,13 +12,25 @@ internal sealed class EditorImportGate
         ArgumentNullException.ThrowIfNull(prepareAsync);
         ArgumentNullException.ThrowIfNull(commit);
 
+        await ExecuteAsync(async token =>
+        {
+            var result = await prepareAsync(token);
+            token.ThrowIfCancellationRequested();
+            commit(result);
+            return true;
+        }, cancellationToken);
+    }
+
+    public async Task<T> ExecuteAsync<T>(
+        Func<CancellationToken, Task<T>> operation,
+        CancellationToken cancellationToken)
+    {
+        ArgumentNullException.ThrowIfNull(operation);
         await _gate.WaitAsync(cancellationToken);
         try
         {
             cancellationToken.ThrowIfCancellationRequested();
-            var result = await prepareAsync(cancellationToken);
-            cancellationToken.ThrowIfCancellationRequested();
-            commit(result);
+            return await operation(cancellationToken);
         }
         finally
         {

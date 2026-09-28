@@ -216,7 +216,8 @@ public sealed partial class EditorView
                 options,
                 progress,
                 cancellation.Token,
-                ViewModel.ProjectMutationLock);
+                ViewModel.ProjectMutationLock,
+                _importGate);
             if (_disposed || !ReferenceEquals(_exportCts, cancellation))
             {
                 return;

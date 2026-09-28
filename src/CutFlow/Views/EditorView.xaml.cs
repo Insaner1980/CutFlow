@@ -456,23 +456,28 @@ public sealed partial class EditorView : UserControl, IDisposable
 
         var candidate = CopyAsset(existing);
         var publication = CaptureInfoBarPublication();
-        var result = await _mediaImportService.RelinkAsync(
-            replacement,
-            candidate,
-            ViewModel.Project,
-            _projectsRootPath,
-            _lifetimeToken);
-        EnsureActive();
-        var oldCacheReference = FindAsset(assetId) is { } current ? CopyAsset(current) : CopyAsset(existing);
-        if (!result.IsSuccess || !ViewModel.ApplyRelinkedAsset(candidate))
-        {
-            TryShowMessage(publication, InfoBarSeverity.Error, $"Could not relink '{replacement.Name}'", result.ErrorMessage ?? "The asset could not be updated.");
-            return;
-        }
+        await _importGate.ExecuteAsync(
+            token => _mediaImportService.RelinkAsync(
+                replacement,
+                candidate,
+                ViewModel.Project,
+                _projectsRootPath,
+                token),
+            result =>
+            {
+                EnsureActive();
+                var oldCacheReference = FindAsset(assetId) is { } current ? CopyAsset(current) : CopyAsset(existing);
+                if (!result.IsSuccess || !ViewModel.ApplyRelinkedAsset(candidate))
+                {
+                    TryShowMessage(publication, InfoBarSeverity.Error, $"Could not relink '{replacement.Name}'", result.ErrorMessage ?? "The asset could not be updated.");
+                    return;
+                }
 
-        TryDeleteCache(oldCacheReference);
-        ToolPanel.RefreshAssets();
-        TryShowMessage(publication, InfoBarSeverity.Success, "Media relinked", $"'{candidate.FileName}' now replaces the missing or moved source while keeping timeline references.");
+                TryDeleteCache(oldCacheReference);
+                ToolPanel.RefreshAssets();
+                TryShowMessage(publication, InfoBarSeverity.Success, "Media relinked", $"'{candidate.FileName}' now replaces the missing or moved source while keeping timeline references.");
+            },
+            _lifetimeToken);
     }
 
     public void Dispose()

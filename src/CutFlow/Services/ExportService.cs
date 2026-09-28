@@ -83,7 +83,8 @@ public sealed class ExportService
         ExportOptions options,
         IProgress<double> progress,
         CancellationToken cancellationToken,
-        object? sourceGuardLock = null)
+        object? sourceGuardLock = null,
+        EditorImportGate? sourcePreparationGate = null)
     {
         ArgumentNullException.ThrowIfNull(project);
         ArgumentNullException.ThrowIfNull(getSourceGuardProject);
@@ -186,11 +187,21 @@ public sealed class ExportService
             cancellationToken.ThrowIfCancellationRequested();
             stagingReservation.Dispose();
             stagingReservation = null;
-            if (!await CommitAsync(
+            Task<bool> CommitPreparedAsync(CancellationToken token)
+            {
+                token.ThrowIfCancellationRequested();
+                return CommitAsync(
                     stagingPath,
                     destinationPath,
                     canCommit: () => !IsSourceMediaPath(project, getSourceGuardProject(), destinationPath),
-                    sourceGuardLock: sourceGuardLock))
+                    sourceGuardLock: sourceGuardLock);
+            }
+
+            // Finish any in-flight import/relink before checking and replacing its potential source.
+            var committed = sourcePreparationGate is null
+                ? await CommitPreparedAsync(cancellationToken)
+                : await sourcePreparationGate.ExecuteAsync(CommitPreparedAsync, cancellationToken);
+            if (!committed)
             {
                 return SourceMediaConflict(destinationPath);
             }
