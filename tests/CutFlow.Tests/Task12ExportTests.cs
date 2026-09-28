@@ -1387,6 +1387,29 @@ public sealed class Task12ExportTests
     }
 
     [TestMethod]
+    public async Task CommitAsync_CancelledWhileQueuedPreservesDestination()
+    {
+        await using var directory = new TestDirectory();
+        var stagingPath = Path.Combine(directory.Path, "staging.mp4");
+        var destinationPath = Path.Combine(directory.Path, "destination.mp4");
+        await File.WriteAllTextAsync(stagingPath, "rendered output", TestContext.CancellationToken);
+        await File.WriteAllTextAsync(destinationPath, "keep destination", TestContext.CancellationToken);
+        using var cancellation = new CancellationTokenSource();
+        var gate = new object();
+        Task<bool> commit;
+        lock (gate)
+        {
+            commit = ExportService.CommitAsync(stagingPath, destinationPath,
+                sourceGuardLock: gate, cancellationToken: cancellation.Token);
+            cancellation.Cancel();
+        }
+
+        await Assert.ThrowsAsync<OperationCanceledException>(() => commit);
+        Assert.AreEqual("keep destination", await File.ReadAllTextAsync(destinationPath, TestContext.CancellationToken));
+        Assert.IsTrue(File.Exists(stagingPath));
+    }
+
+    [TestMethod]
     public async Task CommitAsync_HoldsProjectMutationLockThroughReplacement()
     {
         var viewModel = new CutFlow.ViewModels.EditorViewModel(CreateExportableProject());

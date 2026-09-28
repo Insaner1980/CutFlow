@@ -194,7 +194,8 @@ public sealed class ExportService
                     stagingPath,
                     destinationPath,
                     canCommit: () => !IsSourceMediaPath(project, getSourceGuardProject(), destinationPath),
-                    sourceGuardLock: sourceGuardLock);
+                    sourceGuardLock: sourceGuardLock,
+                    cancellationToken: token);
             }
 
             // Finish any in-flight import/relink before checking and replacing its potential source.
@@ -326,13 +327,15 @@ public sealed class ExportService
         string destinationPath,
         Action<string, string>? move = null,
         Func<bool>? canCommit = null,
-        object? sourceGuardLock = null) =>
+        object? sourceGuardLock = null,
+        CancellationToken cancellationToken = default) =>
         Task.Run(() =>
         {
             // The editor uses the same gate for import, relink, undo and other project edits.
             lock (sourceGuardLock ?? new object())
             {
                 if (canCommit is not null && !canCommit()) return false;
+                cancellationToken.ThrowIfCancellationRequested();
                 (move ?? MoveStagingFile)(stagingPath, destinationPath);
                 return true;
             }
