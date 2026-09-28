@@ -367,11 +367,12 @@ public sealed class Task11LifecycleTests
         var rebuildStart = editor.IndexOf("private async Task RebuildPreviewAsync", StringComparison.Ordinal);
         var rebuildEnd = editor.IndexOf("private void EditorView_SizeChanged", rebuildStart, StringComparison.Ordinal);
         var rebuild = editor[rebuildStart..rebuildEnd];
-        var showMessage = editor.IndexOf("private void TryShowPreviewMessage", StringComparison.Ordinal);
+        var showMessage = editor.IndexOf("private bool TryShowPreviewMessage", StringComparison.Ordinal);
         var clearMessage = editor.IndexOf("private void ClearPreviewMessage", StringComparison.Ordinal);
 
         Assert.Contains("CompositionBuildResult.SelectPreviewErrors(result.Errors)", rebuild);
-        Assert.Contains("TryShowPreviewMessage(", rebuild);
+        Assert.Contains("if (!TryShowPreviewMessage(", rebuild);
+        Assert.Contains("_publishedPreviewKey = null;", rebuild);
         Assert.Contains("InfoBarSeverity.Warning", rebuild);
         Assert.Contains("ClearPreviewMessage();", rebuild);
         Assert.Contains("TryShowPreviewMessage(publication, InfoBarSeverity.Error", rebuild);

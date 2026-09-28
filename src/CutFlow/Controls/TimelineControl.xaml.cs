@@ -1159,7 +1159,7 @@ public sealed partial class TimelineControl : UserControl
     private void TimelineScroller_ViewChanged(object sender, ScrollViewerViewChangedEventArgs e)
     {
         RenderRuler();
-        if (!ClipWindowContainsViewport())
+        if (_dragOperation == TimelineDragOperation.None && !ClipWindowContainsViewport())
         {
             RenderClips();
         }

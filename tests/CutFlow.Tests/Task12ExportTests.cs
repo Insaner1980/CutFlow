@@ -13,6 +13,20 @@ namespace CutFlow.Tests;
 public sealed class Task12ExportTests
 {
     [TestMethod]
+    public async Task CreateReservedStagingFileAsync_CancellationRemovesCreatedFile()
+    {
+        await using var directory = new TestDirectory();
+        using var cancellation = new CancellationTokenSource();
+        cancellation.Cancel();
+        const string fileName = "cancelled.cutflow-test.mp4";
+
+        await Assert.ThrowsAsync<OperationCanceledException>(() =>
+            ExportService.CreateReservedStagingFileAsync(directory.Path, fileName, cancellation.Token));
+
+        Assert.IsFalse(File.Exists(Path.Combine(directory.Path, fileName)));
+    }
+
+    [TestMethod]
     public void ExportStatus_LiveRegionAnnouncesMessagesWithoutIncludingProgressUpdates()
     {
         var root = FindRepositoryRoot();

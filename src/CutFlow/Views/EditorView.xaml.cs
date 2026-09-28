@@ -653,6 +653,7 @@ public sealed partial class EditorView : UserControl, IDisposable
         {
             lease = _previewRebuildGate.Begin(_lifetimeToken);
             if (debounce) await Task.Delay(140, lease.Token);
+            publication = CaptureInfoBarPublication();
             var previewKey = PreviewCompositionKey.Create(ViewModel.Project);
             if (previewKey.Equals(_publishedPreviewKey)) return;
             var result = await _compositionService.BuildPreviewAsync(ViewModel.Project, lease.Token);
@@ -671,11 +672,14 @@ public sealed partial class EditorView : UserControl, IDisposable
             var previewErrors = CompositionBuildResult.SelectPreviewErrors(result.Errors);
             if (previewErrors.Count > 0)
             {
-                TryShowPreviewMessage(
+                if (!TryShowPreviewMessage(
                     publication,
                     InfoBarSeverity.Warning,
                     "Preview contains unavailable items",
-                    string.Join(" ", previewErrors));
+                    string.Join(" ", previewErrors)))
+                {
+                    _publishedPreviewKey = null;
+                }
             }
             else
             {
@@ -950,6 +954,11 @@ public sealed partial class EditorView : UserControl, IDisposable
             if (!ReferenceEquals(inspector, DesktopInspector)) DesktopInspector.SetProject(ViewModel.Project);
             if (!ReferenceEquals(inspector, NarrowInspector)) NarrowInspector.SetProject(ViewModel.Project);
         }
+
+        DispatcherQueue.TryEnqueue(() =>
+        {
+            if (!_disposed) inspector?.SetProject(ViewModel.Project);
+        });
     }
 
     private void Timeline_PlayheadChanged(object sender, PlayheadChangedEventArgs e)
@@ -1929,7 +1938,7 @@ public sealed partial class EditorView : UserControl, IDisposable
         _ => 1
     };
 
-    private void TryShowPreviewMessage(
+    private bool TryShowPreviewMessage(
         InfoBarPublication publication,
         InfoBarSeverity severity,
         string title,
@@ -1938,7 +1947,9 @@ public sealed partial class EditorView : UserControl, IDisposable
         if (TryShowMessage(publication, severity, title, message))
         {
             _previewInfoBarIsCurrent = true;
+            return true;
         }
+        return false;
     }
 
     private void ClearPreviewMessage()

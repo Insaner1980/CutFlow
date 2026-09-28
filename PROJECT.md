@@ -63,8 +63,8 @@ Extension acceptance is only the first gate. The native Windows APIs must also b
 - XAML and WinUI 3.
 - .NET target: `net10.0-windows10.0.26100.0`.
 - SDK pinned by `global.json`: .NET SDK `10.0.302`, `latestPatch` roll-forward, prerelease SDKs disabled.
-- Windows App SDK NuGet package: `2.4.0`.
-- Windows SDK Build Tools NuGet package: `10.0.28000.2526`.
+- Windows App SDK NuGet package: `2.5.1`.
+- Windows SDK Build Tools NuGet package: `10.0.28000.2705`.
 - Minimum declared Windows version: `10.0.17763.0` (Windows 10 version 1809).
 - Primary target and only solution platform: x64 / `win-x64`.
 - Output type: packaged WinUI `WinExe` with MSIX tooling enabled.
@@ -86,9 +86,9 @@ CutFlow.slnx
 
 The app project exposes internals to `CutFlow.Tests`; there is no separate core library. The test project uses:
 
-- `Microsoft.NET.Test.Sdk` 18.9.0
-- `MSTest.TestAdapter` 4.3.3
-- `MSTest.TestFramework` 4.3.3
+- `Microsoft.NET.Test.Sdk` 18.10.1
+- `MSTest.TestAdapter` 4.4.1
+- `MSTest.TestFramework` 4.4.1
 
 ### Canonical commands
 

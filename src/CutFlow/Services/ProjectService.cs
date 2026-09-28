@@ -256,6 +256,15 @@ public sealed partial class ProjectService
                 RejectReparsePoints(projectPath);
                 RejectReparsePoints(temporaryPath);
                 var json = _serialize(snapshot);
+                if (json.Length > MaximumProjectJsonCharacters)
+                {
+                    throw new InvalidDataException("The project JSON exceeds the supported size limit.");
+                }
+
+                using (var document = JsonDocument.Parse(json, new JsonDocumentOptions { MaxDepth = JsonOptions.MaxDepth }))
+                {
+                    ValidateJsonResourceBounds(document.RootElement);
+                }
                 cancellationToken.ThrowIfCancellationRequested();
                 await _writeAndFlushAsync(temporaryPath, json, cancellationToken);
                 cancellationToken.ThrowIfCancellationRequested();

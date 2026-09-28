@@ -305,6 +305,7 @@ public sealed class Task11WorkspaceSettingsTests
 
         Assert.Contains("DesktopInspector.SetProject(ViewModel.Project);", editCommitted);
         Assert.Contains("NarrowInspector.SetProject(ViewModel.Project);", editCommitted);
+        Assert.Contains("if (!_disposed) inspector?.SetProject(ViewModel.Project);", editCommitted);
     }
 
     [TestMethod]
@@ -318,6 +319,24 @@ public sealed class Task11WorkspaceSettingsTests
         Assert.Contains("FocusManager.TryMoveFocus(FocusNavigationDirection.Next);", keyDown);
         Assert.AreEqual(2, source.Split("new KeyEventHandler(TextPositionBox_KeyUp), handledEventsToo: true", StringSplitOptions.None).Length - 1);
         Assert.Contains("if (e.Key == VirtualKey.Enter)", source);
+        var positionKeyUp = GetMethod(source, "private void TextPositionBox_KeyUp", "private void SetTextAlignmentButtons");
+        Assert.Contains("ReferenceEquals(_enterPositionBox, sender)", positionKeyUp);
+        Assert.Contains("if (startedHere)", positionKeyUp);
+        Assert.Contains("e.Handled = true;", positionKeyUp);
+        Assert.AreEqual(2, source.Split("new KeyEventHandler(TextPositionBox_KeyDown), handledEventsToo: true", StringSplitOptions.None).Length - 1);
+        Assert.Contains("TextContentBox.MaxLength = ProjectService.MaximumPersistedTextLength;", source);
+    }
+
+    [TestMethod]
+    public void TimelineVirtualization_DefersCanvasReplacementUntilDragEnds()
+    {
+        var source = File.ReadAllText(Path.Combine(FindRepositoryRoot(), "src", "CutFlow", "Controls", "TimelineControl.xaml.cs"));
+        var viewChanged = GetMethod(source, "private void TimelineScroller_ViewChanged", "private void TimelineScroller_SizeChanged");
+        var release = GetMethod(source, "private void Drag_PointerReleased", "private void Drag_PointerCanceled");
+
+        Assert.Contains("if (_dragOperation == TimelineDragOperation.None && !ClipWindowContainsViewport())", viewChanged);
+        Assert.Contains("RenderClips();", release);
+        Assert.IsLessThan(release.IndexOf("RenderClips();", StringComparison.Ordinal), release.IndexOf("RaiseEdit(request);", StringComparison.Ordinal));
     }
 
     private static string GetMethod(string source, string startMarker, string endMarker)

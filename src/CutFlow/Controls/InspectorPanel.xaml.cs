@@ -1,5 +1,6 @@
 using System.Globalization;
 using CutFlow.Models;
+using CutFlow.Services;
 using CutFlow.Utilities;
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Automation;
@@ -20,14 +21,20 @@ public sealed partial class InspectorPanel : UserControl
     private ProjectDocument? _project;
     private EditorSelection _selection = EditorSelection.None;
     private bool _updating;
+    private NumberBox? _enterPositionBox;
 
     public InspectorPanel()
     {
         InitializeComponent();
+        TextContentBox.MaxLength = ProjectService.MaximumPersistedTextLength;
         TextFontFamilyBox.ItemsSource = TextStyle.SupportedFontFamilies;
         VideoVolumeSlider.AddHandler(PointerReleasedEvent, new PointerEventHandler(VolumeSlider_PointerReleased), handledEventsToo: true);
         AudioVolumeSlider.AddHandler(PointerReleasedEvent, new PointerEventHandler(VolumeSlider_PointerReleased), handledEventsToo: true);
         TextOpacitySlider.AddHandler(PointerReleasedEvent, new PointerEventHandler(TextOpacitySlider_PointerReleased), handledEventsToo: true);
+        TextHorizontalPositionBox.AddHandler(KeyDownEvent, new KeyEventHandler(TextPositionBox_KeyDown), handledEventsToo: true);
+        TextVerticalPositionBox.AddHandler(KeyDownEvent, new KeyEventHandler(TextPositionBox_KeyDown), handledEventsToo: true);
+        TextHorizontalPositionBox.LostFocus += TextPositionBox_LostFocus;
+        TextVerticalPositionBox.LostFocus += TextPositionBox_LostFocus;
         TextHorizontalPositionBox.AddHandler(KeyUpEvent, new KeyEventHandler(TextPositionBox_KeyUp), handledEventsToo: true);
         TextVerticalPositionBox.AddHandler(KeyUpEvent, new KeyEventHandler(TextPositionBox_KeyUp), handledEventsToo: true);
     }
@@ -492,10 +499,24 @@ public sealed partial class InspectorPanel : UserControl
             doubleValue: TextStyle.ClampNormalized(args.NewValue));
     }
 
-    private static void TextPositionBox_KeyUp(object sender, KeyRoutedEventArgs e)
+    private void TextPositionBox_KeyDown(object sender, KeyRoutedEventArgs e)
     {
-        if (e.Key == VirtualKey.Enter)
+        if (e.Key == VirtualKey.Enter) _enterPositionBox = sender as NumberBox;
+    }
+
+    private void TextPositionBox_LostFocus(object sender, RoutedEventArgs e)
+    {
+        if (ReferenceEquals(_enterPositionBox, sender)) _enterPositionBox = null;
+    }
+
+    private void TextPositionBox_KeyUp(object sender, KeyRoutedEventArgs e)
+    {
+        if (e.Key != VirtualKey.Enter) return;
+        var startedHere = ReferenceEquals(_enterPositionBox, sender);
+        _enterPositionBox = null;
+        if (startedHere)
         {
+            e.Handled = true;
             FocusManager.TryMoveFocus(FocusNavigationDirection.Next);
         }
     }

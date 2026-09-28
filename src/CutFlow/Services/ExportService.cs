@@ -219,7 +219,7 @@ public sealed class ExportService
         return stagingFileName;
     }
 
-    private static async Task<(StorageFile File, FileStream Reservation)> CreateReservedStagingFileAsync(
+    internal static async Task<(StorageFile File, FileStream Reservation)> CreateReservedStagingFileAsync(
         string directoryPath,
         string fileName,
         CancellationToken cancellationToken)
@@ -248,6 +248,15 @@ public sealed class ExportService
         catch
         {
             reservation?.Dispose();
+            await creation.DisposeAsync();
+            try
+            {
+                File.Delete(path);
+            }
+            catch (Exception cleanupException) when (cleanupException is IOException or UnauthorizedAccessException)
+            {
+                // Preserve the original lookup failure or cancellation.
+            }
             throw;
         }
     }
