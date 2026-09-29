@@ -7,6 +7,21 @@ namespace CutFlow.Tests;
 public sealed class PreviewTransportMathTests
 {
     [TestMethod]
+    public void TimecodeAutomationName_UpdatesOncePerSecondDuringPlaybackAndImmediatelyWhenPaused()
+    {
+        Assert.IsFalse(PreviewTransportMath.ShouldUpdateTimecodeAutomationName(
+            "00:00:00:02", "00:01:00:00", "00:00:00:01", "00:01:00:00", isPlaying: true));
+        Assert.IsTrue(PreviewTransportMath.ShouldUpdateTimecodeAutomationName(
+            "00:00:01:00", "00:01:00:00", "00:00:00:01", "00:01:00:00", isPlaying: true));
+        Assert.IsTrue(PreviewTransportMath.ShouldUpdateTimecodeAutomationName(
+            "00:00:00:02", "00:01:00:00", "00:00:00:01", "00:01:00:00", isPlaying: false));
+        Assert.IsTrue(PreviewTransportMath.ShouldUpdateTimecodeAutomationName(
+            "00:00:00:01", "00:02:00:00", "00:00:00:01", "00:01:00:00", isPlaying: true));
+        Assert.IsFalse(PreviewTransportMath.ShouldUpdateTimecodeAutomationName(
+            "00:00:00:01", "00:01:00:00", "00:00:00:01", "00:01:00:00", isPlaying: false));
+    }
+
+    [TestMethod]
     [DataRow(1_000L, 5_000L, false, 967L)]
     [DataRow(1_000L, 5_000L, true, 1_034L)]
     [DataRow(0L, 5_000L, false, 0L)]

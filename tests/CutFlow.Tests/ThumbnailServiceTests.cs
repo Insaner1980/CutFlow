@@ -7,6 +7,23 @@ namespace CutFlow.Tests;
 public sealed partial class ThumbnailServiceTests
 {
     [TestMethod]
+    public void TemporaryThumbnailCopy_DisposesManagedWinRtStreamAdapter()
+    {
+        var source = File.ReadAllText(Path.Combine(
+            FindRepositoryRoot(),
+            "src",
+            "CutFlow",
+            "Services",
+            "ThumbnailService.cs"));
+        var methodStart = source.IndexOf("private static async Task WriteTemporaryThumbnailAsync", StringComparison.Ordinal);
+        var methodEnd = source.IndexOf("public bool TryDeleteCachedThumbnail", methodStart, StringComparison.Ordinal);
+        var method = source[methodStart..methodEnd];
+
+        Assert.Contains("using var source = encodedThumbnail.AsStreamForRead();", method);
+        Assert.Contains("await CopyBoundedAsync(\n            source,", method.Replace("\r\n", "\n", StringComparison.Ordinal));
+    }
+
+    [TestMethod]
     public void CacheKey_IsDeterministicAndIncludesNormalizedPathMetadataAndRequestedSize()
     {
         var modified = new DateTimeOffset(2026, 8, 5, 10, 0, 0, TimeSpan.Zero);
@@ -196,7 +213,7 @@ public sealed partial class ThumbnailServiceTests
     }
 
     [TestMethod]
-    public async Task GetOrCreateThumbnailAsync_WhenSourceChangesInPlace_UsesNewKeyAndPreservesOldCache()
+    public async Task GetOrCreateThumbnailAsync_WhenSourceChangesInPlace_UsesNewKeyAndDeletesOldCache()
     {
         using var project = new TemporaryProjectRoot();
         var sourcePath = Path.Combine(project.Path, "source.jpg");
@@ -235,7 +252,7 @@ public sealed partial class ThumbnailServiceTests
         Assert.AreEqual(
             ThumbnailService.CreateRelativeCachePath(refreshedRequest.CacheKey),
             asset.ThumbnailCachePath);
-        Assert.IsTrue(File.Exists(originalCachePath), "The old cache may still be referenced and must not be deleted during metadata refresh.");
+        Assert.IsFalse(File.Exists(originalCachePath));
         Assert.IsTrue(File.Exists(refreshedCachePath));
     }
 
@@ -386,6 +403,19 @@ public sealed partial class ThumbnailServiceTests
         Assert.IsFalse(ThumbnailService.IsStoragePathForRequest(request, asset.SourcePath));
         Assert.IsTrue(ThumbnailService.IsStoragePathForRequest(request, @"c:\media\old.png"));
         Assert.IsFalse(ThumbnailService.IsStoragePathForRequest(replacementRequest, @"C:\Media\old.png"));
+    }
+
+    private static string FindRepositoryRoot()
+    {
+        for (var directory = new DirectoryInfo(AppContext.BaseDirectory); directory is not null; directory = directory.Parent)
+        {
+            if (File.Exists(Path.Combine(directory.FullName, "CutFlow.slnx")))
+            {
+                return directory.FullName;
+            }
+        }
+
+        throw new DirectoryNotFoundException("Could not locate the repository root.");
     }
 
     private sealed partial class TemporaryProjectRoot : IDisposable

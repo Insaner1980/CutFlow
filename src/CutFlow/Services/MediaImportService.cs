@@ -9,6 +9,9 @@ namespace CutFlow.Services;
 public sealed class MediaImportService
 {
     public const long DefaultImageDurationMilliseconds = 5_000;
+    internal const long MaximumDecodedVisualBytes = 256L * 1024 * 1024;
+    private const uint DecodedVisualBytesPerPixel = 4;
+    private const string UnsupportedVisualDimensionsMessage = "The visual dimensions exceed the supported decode limit.";
 
     [SuppressMessage("Performance", "CA1822:Mark members as static", Justification = "The instance method preserves the injected service API.")]
     [SuppressMessage("Major Code Smell", "S2325:Methods and properties that don't access instance data should be static", Justification = "The instance method preserves the injected service API.")]
@@ -370,6 +373,11 @@ public sealed class MediaImportService
     public static ProjectAsset CreateAsset(MediaFileMetadata metadata)
     {
         ArgumentNullException.ThrowIfNull(metadata);
+        if (metadata.Kind is ProjectAssetKind.Video or ProjectAssetKind.Image)
+        {
+            ValidateVisualDimensions(metadata.Width, metadata.Height);
+        }
+
         var duration = metadata.Kind == ProjectAssetKind.Image
             ? DefaultImageDurationMilliseconds
             : metadata.DurationMilliseconds;
@@ -411,14 +419,21 @@ public sealed class MediaImportService
             return false;
         }
 
+        if (replacement.Kind is ProjectAssetKind.Video or ProjectAssetKind.Image &&
+            !AreVisualDimensionsSupported(replacement.Width, replacement.Height))
+        {
+            error = UnsupportedVisualDimensionsMessage;
+            return false;
+        }
+
         ProjectAsset mapped;
         try
         {
             mapped = CreateAsset(replacement);
         }
-        catch (InvalidDataException exception)
+        catch (InvalidDataException)
         {
-            error = exception.Message;
+            error = $"Media must be at least {ProjectDocument.MinimumItemDurationMilliseconds} ms long.";
             return false;
         }
 
@@ -496,6 +511,9 @@ public sealed class MediaImportService
         {
             case ProjectAssetKind.Video:
                 {
+                    var storageProperties = await file.Properties.GetVideoPropertiesAsync();
+                    cancellationToken.ThrowIfCancellationRequested();
+                    ValidateKnownVideoDimensions(storageProperties.Width, storageProperties.Height);
                     var clip = await MediaClip.CreateFromFileAsync(file);
                     cancellationToken.ThrowIfCancellationRequested();
                     var properties = clip.GetVideoEncodingProperties();
@@ -505,8 +523,7 @@ public sealed class MediaImportService
                     }
 
                     durationMilliseconds = ToMilliseconds(clip.OriginalDuration);
-                    width = checked((int)properties.Width);
-                    height = checked((int)properties.Height);
+                    (width, height) = ValidateVisualDimensions(properties.Width, properties.Height);
                     break;
                 }
             case ProjectAssetKind.Audio:
@@ -521,8 +538,9 @@ public sealed class MediaImportService
                     using var stream = await file.OpenReadAsync();
                     var decoder = await BitmapDecoder.CreateAsync(stream);
                     cancellationToken.ThrowIfCancellationRequested();
-                    width = checked((int)decoder.OrientedPixelWidth);
-                    height = checked((int)decoder.OrientedPixelHeight);
+                    (width, height) = ValidateVisualDimensions(
+                        decoder.OrientedPixelWidth,
+                        decoder.OrientedPixelHeight);
                     durationMilliseconds = DefaultImageDurationMilliseconds;
                     break;
                 }
@@ -586,14 +604,50 @@ public sealed class MediaImportService
 
     private static long ToMilliseconds(TimeSpan duration) => checked((long)Math.Round(duration.TotalMilliseconds));
 
+    internal static void ValidateKnownVideoDimensions(uint width, uint height)
+    {
+        // Shell metadata can omit dimensions; decoder dimensions are validated separately.
+        if (width != 0 && height != 0)
+        {
+            ValidateVisualDimensions(width, height);
+        }
+    }
+
+    internal static (int Width, int Height) ValidateVisualDimensions(uint width, uint height)
+    {
+        if (!AreVisualDimensionsSupported(width, height))
+        {
+            throw new InvalidDataException(UnsupportedVisualDimensionsMessage);
+        }
+
+        return (checked((int)width), checked((int)height));
+    }
+
+    private static void ValidateVisualDimensions(int width, int height)
+    {
+        if (!AreVisualDimensionsSupported(width, height))
+        {
+            throw new InvalidDataException(UnsupportedVisualDimensionsMessage);
+        }
+    }
+
+    private static bool AreVisualDimensionsSupported(int width, int height) =>
+        width > 0 && height > 0 && AreVisualDimensionsSupported((uint)width, (uint)height);
+
+    private static bool AreVisualDimensionsSupported(uint width, uint height) =>
+        width > 0 &&
+        height > 0 &&
+        width <= (ulong)MaximumDecodedVisualBytes / DecodedVisualBytesPerPixel / height;
+
     internal static bool IsExpectedMediaFailure(Exception exception) =>
         exception is IOException or UnauthorizedAccessException or InvalidDataException or NotSupportedException or ArgumentException or OverflowException or System.Runtime.InteropServices.COMException;
 
-    private static string ReadableReason(Exception exception) => exception switch
+    internal static string ReadableReason(Exception exception) => exception switch
     {
-        UnauthorizedAccessException => "Access was denied.",
-        NotSupportedException => exception.Message,
-        InvalidDataException => exception.Message,
+        UnauthorizedAccessException => "Access was denied. Check the file permissions and try again.",
+        NotSupportedException => "Supported formats are MP4, PNG, JPEG, MP3, and WAV.",
+        InvalidDataException => "The file is unsupported, damaged, or changed while it was being read.",
+        System.Runtime.InteropServices.COMException => "Windows could not decode the file. Try a different file or codec.",
         _ => "The file may be unsupported, damaged, moved, or inaccessible."
     };
 }

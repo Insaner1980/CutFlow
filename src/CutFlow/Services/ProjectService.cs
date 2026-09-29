@@ -11,11 +11,20 @@ namespace CutFlow.Services;
 
 public sealed partial class ProjectService
 {
+    internal const int MaximumProjectJsonCharacters = 16 * 1024 * 1024;
+    internal const int MaximumAssetCount = 2_000;
+    internal const int MaximumTimelineItemCount = 10_000;
+    internal const int MaximumPersistedNameLength = 1_024;
+    internal const int MaximumPersistedFileNameLength = 1_024;
+    internal const int MaximumPersistedSourcePathLength = 32_767;
+    internal const int MaximumPersistedTextLength = 4_096;
+
     private static readonly JsonSerializerOptions JsonOptions = new()
     {
         PropertyNamingPolicy = JsonNamingPolicy.CamelCase,
         DefaultIgnoreCondition = JsonIgnoreCondition.Never,
-        WriteIndented = true
+        WriteIndented = true,
+        MaxDepth = 32
     };
 
     private readonly string _projectsRootPath;
@@ -81,7 +90,7 @@ public sealed partial class ProjectService
 
                     Directory.Delete(projectDirectory, recursive: false);
                 }
-                catch (Exception cleanupException)
+                catch (Exception cleanupException) when (!ExceptionPolicy.IsFatal(cleanupException))
                 {
                     exception.Data["ProjectDirectoryCleanupException"] = cleanupException;
                 }
@@ -92,6 +101,12 @@ public sealed partial class ProjectService
     }
 
     public async Task<IReadOnlyList<ProjectDocument>> ListAsync(CancellationToken cancellationToken = default)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+        return await Task.Run(() => ListCoreAsync(cancellationToken));
+    }
+
+    private async Task<IReadOnlyList<ProjectDocument>> ListCoreAsync(CancellationToken cancellationToken)
     {
         cancellationToken.ThrowIfCancellationRequested();
         if (!Directory.Exists(_projectsRootPath))
@@ -112,7 +127,7 @@ public sealed partial class ProjectService
 
             try
             {
-                projects.Add(await LoadAsync(projectId, cancellationToken));
+                projects.Add(await LoadCoreAsync(projectId, cancellationToken));
             }
             catch (IOException)
             {
@@ -136,11 +151,17 @@ public sealed partial class ProjectService
 
     public async Task<ProjectDocument> LoadAsync(Guid projectId, CancellationToken cancellationToken = default)
     {
+        cancellationToken.ThrowIfCancellationRequested();
+        return await Task.Run(() => LoadCoreAsync(projectId, cancellationToken));
+    }
+
+    private async Task<ProjectDocument> LoadCoreAsync(Guid projectId, CancellationToken cancellationToken)
+    {
         var projectPath = GetProjectFilePath(projectId);
         string json;
         try
         {
-            json = await File.ReadAllTextAsync(projectPath, cancellationToken);
+            json = await ReadBoundedJsonAsync(projectPath, cancellationToken).ConfigureAwait(false);
         }
         catch (JsonException exception)
         {
@@ -150,7 +171,7 @@ public sealed partial class ProjectService
         ProjectDocument project;
         try
         {
-            using var jsonDocument = JsonDocument.Parse(json);
+            using var jsonDocument = JsonDocument.Parse(json, new JsonDocumentOptions { MaxDepth = JsonOptions.MaxDepth });
             var root = jsonDocument.RootElement;
             if (root.ValueKind != JsonValueKind.Object)
             {
@@ -168,11 +189,20 @@ public sealed partial class ProjectService
                 throw new InvalidDataException("The project schema version is invalid.");
             }
 
-            if (schemaVersion != ProjectDocument.CurrentSchemaVersion)
+            if (schemaVersion is not (ProjectDocument.LegacySchemaVersion or ProjectDocument.CurrentSchemaVersion))
             {
                 throw new InvalidDataException($"Unsupported project schema version {schemaVersion}.");
             }
 
+            if (schemaVersion == ProjectDocument.CurrentSchemaVersion)
+            {
+                if (json.Length > MaximumProjectJsonCharacters)
+                {
+                    throw new InvalidDataException("The project JSON exceeds the supported size limit.");
+                }
+
+                ValidateJsonResourceBounds(root);
+            }
             project = root.Deserialize<ProjectDocument>(JsonOptions)
                 ?? throw new InvalidDataException("The project JSON did not contain a document.");
         }
@@ -204,7 +234,7 @@ public sealed partial class ProjectService
             throw new ArgumentException("A project must have an identity before it can be saved.", nameof(project));
         }
 
-        if (project.SchemaVersion != ProjectDocument.CurrentSchemaVersion)
+        if (project.SchemaVersion is not (ProjectDocument.LegacySchemaVersion or ProjectDocument.CurrentSchemaVersion))
         {
             throw new InvalidDataException($"Unsupported project schema version {project.SchemaVersion}.");
         }
@@ -218,7 +248,7 @@ public sealed partial class ProjectService
             Normalize(project, _projectsRootPath);
             cancellationToken.ThrowIfCancellationRequested();
             var candidateModifiedAt = GetUtcNow();
-            var snapshot = ProjectDocumentCloner.Clone(project, JsonOptions);
+            var snapshot = ProjectDocumentCloner.Clone(project);
             snapshot.ModifiedAt = candidateModifiedAt;
             var projectPath = GetProjectFilePath(project.Id);
             var temporaryPath = $"{projectPath}.{Guid.NewGuid():N}.tmp";
@@ -234,6 +264,16 @@ public sealed partial class ProjectService
                 RejectReparsePoints(projectPath);
                 RejectReparsePoints(temporaryPath);
                 var json = _serialize(snapshot);
+                if (snapshot.SchemaVersion == ProjectDocument.CurrentSchemaVersion)
+                {
+                    if (json.Length > MaximumProjectJsonCharacters)
+                    {
+                        throw new InvalidDataException("The project JSON exceeds the supported size limit.");
+                    }
+
+                    using var document = JsonDocument.Parse(json, new JsonDocumentOptions { MaxDepth = JsonOptions.MaxDepth });
+                    ValidateJsonResourceBounds(document.RootElement);
+                }
                 cancellationToken.ThrowIfCancellationRequested();
                 await _writeAndFlushAsync(temporaryPath, json, cancellationToken);
                 cancellationToken.ThrowIfCancellationRequested();
@@ -267,7 +307,7 @@ public sealed partial class ProjectService
                         RejectReparsePoints(temporaryPath);
                         File.Delete(temporaryPath);
                     }
-                    catch (Exception cleanupException)
+                    catch (Exception cleanupException) when (!ExceptionPolicy.IsFatal(cleanupException))
                     {
                         saveException!.Data["TemporaryFileCleanupException"] = cleanupException;
                     }
@@ -291,7 +331,7 @@ public sealed partial class ProjectService
     public async Task<ProjectDocument> DuplicateAsync(Guid projectId, string? name = null, CancellationToken cancellationToken = default)
     {
         var original = await LoadAsync(projectId, cancellationToken);
-        var duplicate = ProjectDocumentCloner.Clone(original, JsonOptions);
+        var duplicate = ProjectDocumentCloner.Clone(original);
         duplicate.Id = Guid.NewGuid();
         duplicate.Name = name is null ? CreateDuplicateName(original.Name) : NormalizeName(name);
         var now = GetUtcNow();
@@ -402,6 +442,52 @@ public sealed partial class ProjectService
         stream.Flush(flushToDisk: true);
     }
 
+    private static async Task<string> ReadBoundedJsonAsync(string path, CancellationToken cancellationToken)
+    {
+        await using var stream = new FileStream(
+            path,
+            FileMode.Open,
+            FileAccess.Read,
+            FileShare.Read,
+            bufferSize: 4096,
+            FileOptions.Asynchronous | FileOptions.SequentialScan);
+        using var reader = new StreamReader(stream, Encoding.UTF8, detectEncodingFromByteOrderMarks: true);
+        var json = new StringBuilder((int)Math.Min(stream.Length, MaximumProjectJsonCharacters));
+        var buffer = new char[4096];
+        var maximumCharacters = MaximumProjectJsonCharacters;
+        while (true)
+        {
+            var read = await reader.ReadBlockAsync(buffer.AsMemory(), cancellationToken);
+            if (read == 0)
+            {
+                return json.ToString();
+            }
+
+            // The original serializer wrote schemaVersion first. Preserve its existing
+            // documents without applying new schema-2 resource limits retroactively.
+            if (json.Length == 0 && HasLegacySchemaHeader(buffer.AsSpan(0, read)))
+            {
+                maximumCharacters = int.MaxValue;
+            }
+
+            if (json.Length > maximumCharacters - read)
+            {
+                throw new InvalidDataException("The project JSON exceeds the supported size limit.");
+            }
+
+            json.Append(buffer, 0, read);
+        }
+    }
+
+    private static bool HasLegacySchemaHeader(ReadOnlySpan<char> prefix)
+    {
+        var reader = new Utf8JsonReader(Encoding.UTF8.GetBytes(prefix.ToString()), isFinalBlock: false, state: default);
+        return reader.Read() && reader.TokenType == JsonTokenType.StartObject &&
+            reader.Read() && reader.TokenType == JsonTokenType.PropertyName && reader.ValueTextEquals("schemaVersion") &&
+            reader.Read() && reader.TokenType == JsonTokenType.Number &&
+            reader.TryGetInt32(out var version) && version == ProjectDocument.LegacySchemaVersion;
+    }
+
     private static void CreateNewDirectory(string path)
     {
         if (CreateDirectoryW(path, 0))
@@ -424,7 +510,7 @@ public sealed partial class ProjectService
     internal static void NormalizeSnapshot(ProjectDocument project)
     {
         ArgumentNullException.ThrowIfNull(project);
-        if (project.SchemaVersion != ProjectDocument.CurrentSchemaVersion)
+        if (project.SchemaVersion is not (ProjectDocument.LegacySchemaVersion or ProjectDocument.CurrentSchemaVersion))
         {
             throw new InvalidDataException($"Unsupported project schema version {project.SchemaVersion}.");
         }
@@ -442,6 +528,52 @@ public sealed partial class ProjectService
         NormalizeAudioItems(project.AudioItems, assetsById);
         NormalizeTextItems(project.TextItems);
     }
+
+    private static void ValidateJsonResourceBounds(JsonElement root)
+    {
+        if (JsonStringExceedsLimit(root, "name", MaximumPersistedNameLength))
+        {
+            throw new InvalidDataException("The project name exceeds the supported length limit.");
+        }
+
+        var assetCount = GetJsonArrayLength(root, "assets");
+        var videoItemCount = GetJsonArrayLength(root, "videoItems");
+        var audioItemCount = GetJsonArrayLength(root, "audioItems");
+        var textItemCount = GetJsonArrayLength(root, "textItems");
+        if (assetCount > MaximumAssetCount ||
+            (long)videoItemCount + audioItemCount + textItemCount > MaximumTimelineItemCount)
+        {
+            throw new InvalidDataException("The project contains more assets or timeline items than supported.");
+        }
+
+        if (root.TryGetProperty("assets", out var assets) && assets.ValueKind == JsonValueKind.Array &&
+            assets.EnumerateArray().Any(asset =>
+                asset.ValueKind == JsonValueKind.Object &&
+                (JsonStringExceedsLimit(asset, "sourcePath", MaximumPersistedSourcePathLength) ||
+                 JsonStringExceedsLimit(asset, "fileName", MaximumPersistedFileNameLength))))
+        {
+            throw new InvalidDataException("A project asset contains an oversized path or file name.");
+        }
+
+        if (root.TryGetProperty("textItems", out var textItems) && textItems.ValueKind == JsonValueKind.Array &&
+            textItems.EnumerateArray().Any(item =>
+                item.ValueKind == JsonValueKind.Object &&
+                JsonStringExceedsLimit(item, "text", MaximumPersistedTextLength)))
+        {
+            throw new InvalidDataException("A text item exceeds the supported content length limit.");
+        }
+    }
+
+    private static int GetJsonArrayLength(JsonElement root, string propertyName) =>
+        root.TryGetProperty(propertyName, out var property) && property.ValueKind == JsonValueKind.Array
+            ? property.GetArrayLength()
+            : 0;
+
+    private static bool JsonStringExceedsLimit(JsonElement root, string propertyName, int maximumLength) =>
+        root.TryGetProperty(propertyName, out var property) &&
+        property.ValueKind == JsonValueKind.String &&
+        property.GetString() is { } value &&
+        value.Length > maximumLength;
 
     private static void NormalizeProjectSettings(ProjectDocument project)
     {
@@ -474,9 +606,14 @@ public sealed partial class ProjectService
         string? projectsRootPath)
     {
         var assetsById = new Dictionary<Guid, ProjectAsset>();
+        var sourcePaths = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         foreach (var asset in assets)
         {
             NormalizeAsset(asset, assetsById, projectsRootPath);
+            if (asset.SourcePath.Length > 0 && !sourcePaths.Add(asset.SourcePath))
+            {
+                throw new InvalidDataException("Project assets must reference unique source paths.");
+            }
         }
 
         return assetsById;

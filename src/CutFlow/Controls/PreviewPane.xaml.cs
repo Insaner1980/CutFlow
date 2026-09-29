@@ -29,16 +29,20 @@ public sealed partial class PreviewPane : UserControl, IDisposable
     private ProjectDocument? _textProject;
     private EditorSelection _textSelection = EditorSelection.None;
     private long _textPositionMilliseconds;
+    private long _textRevision;
     private FrameworkElement? _dragTextElement;
     private Guid _dragTextId;
     private Pointer? _dragPointer;
     private uint _dragPointerId;
     private string _currentTimecode = ZeroTimecode;
     private string _totalTimecode = ZeroTimecode;
+    private string? _announcedCurrentTimecode;
+    private string? _announcedTotalTimecode;
     private bool _canPlay;
     private bool _disposed;
     private TypedEventHandler<MediaPlaybackSession, object>? _playbackStateChangedHandler;
     private TypedEventHandler<MediaPlayer, object>? _mediaEndedHandler;
+    private TypedEventHandler<MediaPlayer, MediaPlayerFailedEventArgs>? _mediaFailedHandler;
 
     public PreviewPane()
     {
@@ -54,6 +58,7 @@ public sealed partial class PreviewPane : UserControl, IDisposable
     public event EventHandler<PlaybackChangedEventArgs>? PlayPauseRequested;
     public event EventHandler<PlayheadChangedEventArgs>? SeekRequested;
     public event EventHandler<PlayheadChangedEventArgs>? PlaybackPositionChanged;
+    public event EventHandler<PreviewPlaybackFailedEventArgs>? PlaybackFailed;
     public event EventHandler<TextPositionCommittedEventArgs>? TextPositionCommitted;
     public event EventHandler? ImportRequested;
     public event EventHandler? LoopChanged;
@@ -290,9 +295,17 @@ public sealed partial class PreviewPane : UserControl, IDisposable
     public void Loop(bool loop)
     {
         _player.IsLoopingEnabled = false;
-        if (LoopButton.IsChecked == loop) return;
+        var changed = LoopButton.IsChecked != loop;
         LoopButton.IsChecked = loop;
-        LoopChanged?.Invoke(this, EventArgs.Empty);
+        UpdateLoopButtonPresentation(loop);
+        if (changed) LoopChanged?.Invoke(this, EventArgs.Empty);
+    }
+
+    private void UpdateLoopButtonPresentation(bool loop)
+    {
+        var name = loop ? "Disable preview looping" : "Loop preview";
+        AutomationProperties.SetName(LoopButton, name);
+        ToolTipService.SetToolTip(LoopButton, name);
     }
 
     public void SetCanPlay(bool canPlay)
@@ -315,12 +328,13 @@ public sealed partial class PreviewPane : UserControl, IDisposable
         PlayIcon.Glyph = playing ? "\uE769" : "\uE768";
         PlayToolTip.Content = _canPlay ? playAction : "Playback is unavailable until the preview has media";
         AutomationProperties.SetName(PlayButton, _canPlay ? $"{playAction} preview" : "Play preview unavailable");
+        UpdateTimecodeText(playing);
     }
 
     public void RequestSeek(long positionMilliseconds) =>
         SeekRequested?.Invoke(this, new PlayheadChangedEventArgs(positionMilliseconds));
 
-    public void SetTextItems(ProjectDocument project, EditorSelection selection, long positionMilliseconds)
+    public void SetTextItems(ProjectDocument project, EditorSelection selection, long positionMilliseconds, long revision)
     {
         if (_dragTextElement is not null &&
             (!ReferenceEquals(_textProject, project) || _textSelection != selection))
@@ -331,6 +345,7 @@ public sealed partial class PreviewPane : UserControl, IDisposable
         _textProject = project ?? throw new ArgumentNullException(nameof(project));
         _textSelection = selection;
         _textPositionMilliseconds = Math.Max(0, positionMilliseconds);
+        _textRevision = revision;
         RenderLiveText();
     }
 
@@ -369,8 +384,10 @@ public sealed partial class PreviewPane : UserControl, IDisposable
         var generation = _playerEventGeneration.Current;
         _playbackStateChangedHandler = (sender, args) => PlaybackSession_PlaybackStateChanged(sender, args, generation);
         _mediaEndedHandler = (sender, args) => Player_MediaEnded(sender, args, generation);
+        _mediaFailedHandler = (sender, args) => Player_MediaFailed(sender, args, generation);
         _player.PlaybackSession.PlaybackStateChanged += _playbackStateChangedHandler;
         _player.MediaEnded += _mediaEndedHandler;
+        _player.MediaFailed += _mediaFailedHandler;
     }
 
     private void DetachPlayerEvents()
@@ -385,6 +402,12 @@ public sealed partial class PreviewPane : UserControl, IDisposable
         {
             _player.MediaEnded -= _mediaEndedHandler;
             _mediaEndedHandler = null;
+        }
+
+        if (_mediaFailedHandler is not null)
+        {
+            _player.MediaFailed -= _mediaFailedHandler;
+            _mediaFailedHandler = null;
         }
     }
 
@@ -426,6 +449,24 @@ public sealed partial class PreviewPane : UserControl, IDisposable
                 sender.Pause();
                 PlaybackPositionChanged?.Invoke(this, new PlayheadChangedEventArgs(PositionMilliseconds));
                 ApplyActualPlaybackState(isPlaying: false);
+            });
+        });
+    }
+
+    private void Player_MediaFailed(MediaPlayer sender, MediaPlayerFailedEventArgs eventArgs, long generation)
+    {
+        if (_disposed || !_playerEventGeneration.IsCurrent(generation)) return;
+        var error = eventArgs.Error;
+        DispatcherQueue.TryEnqueue(() =>
+        {
+            if (_disposed) return;
+            _playerEventGeneration.TryRun(generation, () =>
+            {
+                _positionTimer.Stop();
+                _playbackState.SetIntent(false);
+                sender.Pause();
+                ApplyActualPlaybackState(isPlaying: false);
+                PlaybackFailed?.Invoke(this, new PreviewPlaybackFailedEventArgs(error));
             });
         });
     }
@@ -475,12 +516,24 @@ public sealed partial class PreviewPane : UserControl, IDisposable
         UpdateTimecodeText();
     }
 
-    private void UpdateTimecodeText()
+    private void UpdateTimecodeText(bool? isPlaying = null)
     {
         TimecodeText.Text = $"{_currentTimecode} / {_totalTimecode}";
+        if (!PreviewTransportMath.ShouldUpdateTimecodeAutomationName(
+                _currentTimecode,
+                _totalTimecode,
+                _announcedCurrentTimecode,
+                _announcedTotalTimecode,
+                isPlaying ?? IsPlaying))
+        {
+            return;
+        }
+
         AutomationProperties.SetName(
             TimecodeText,
             $"Current time {_currentTimecode}, total duration {_totalTimecode}");
+        _announcedCurrentTimecode = _currentTimecode;
+        _announcedTotalTimecode = _totalTimecode;
     }
 
     private void ApplyFit()
@@ -501,13 +554,22 @@ public sealed partial class PreviewPane : UserControl, IDisposable
     private void RenderLiveText()
     {
         if (_textProject is null) return;
+        if (!_liveTextRenderGate.ShouldBuildKey(
+                _textProject,
+                _textRevision,
+                _textSelection,
+                _textPositionMilliseconds,
+                PreviewSurface.Width,
+                PreviewSurface.Height,
+                _dragTextElement is not null)) return;
         var renderKey = LiveTextRenderKey.Create(
             _textProject,
             _textSelection,
             _textPositionMilliseconds,
             PreviewSurface.Width,
-            PreviewSurface.Height);
-        if (!_liveTextRenderGate.ShouldRender(renderKey, _dragTextElement is not null)) return;
+            PreviewSurface.Height,
+            _textRevision);
+        if (!_liveTextRenderGate.ShouldRender(renderKey, hasPointerCapture: false)) return;
 
         TextOverlayCanvas.Children.Clear();
         if (!_textProject.Settings.TextTrackVisible) return;
@@ -653,6 +715,7 @@ public sealed partial class PreviewPane : UserControl, IDisposable
     private void LoopButton_Click(object sender, RoutedEventArgs e)
     {
         _player.IsLoopingEnabled = false;
+        UpdateLoopButtonPresentation(LoopButton.IsChecked == true);
         LoopChanged?.Invoke(this, EventArgs.Empty);
     }
 
@@ -666,4 +729,9 @@ public sealed class TextPositionCommittedEventArgs(Guid itemId, double normalize
     public Guid ItemId { get; } = itemId;
     public double NormalizedX { get; } = normalizedX;
     public double NormalizedY { get; } = normalizedY;
+}
+
+public sealed class PreviewPlaybackFailedEventArgs(MediaPlayerError error) : EventArgs
+{
+    public MediaPlayerError Error { get; } = error;
 }

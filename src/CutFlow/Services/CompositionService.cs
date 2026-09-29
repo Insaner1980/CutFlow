@@ -1,5 +1,8 @@
 using System.Diagnostics.CodeAnalysis;
+using System.Globalization;
 using CutFlow.Models;
+using CutFlow.Utilities;
+using Windows.Graphics.Imaging;
 using Windows.Media.Editing;
 using Windows.Storage;
 using Windows.UI;
@@ -43,7 +46,8 @@ public sealed class CompositionService
         var plan = CompositionPlan.Create(project);
         var composition = new MediaComposition();
         var errors = plan.Errors.ToList();
-        await AddVisualsAsync(composition, plan.Visuals, errors, cancellationToken);
+        var backgroundColor = ResolveBackgroundColor(project.Settings.BackgroundColor);
+        await AddVisualsAsync(composition, plan.Visuals, backgroundColor, errors, cancellationToken);
         await AddAudioTracksAsync(composition, plan.AudioTracks, errors, cancellationToken);
         await AddTextOverlaysAsync(
             composition,
@@ -61,33 +65,58 @@ public sealed class CompositionService
     private static async Task AddVisualsAsync(
         MediaComposition composition,
         IEnumerable<CompositionVisualPlan> visuals,
+        Color backgroundColor,
         List<string> errors,
         CancellationToken cancellationToken)
     {
         foreach (var visual in visuals)
         {
             cancellationToken.ThrowIfCancellationRequested();
-            composition.Clips.Add(await CreateVisualClipAsync(visual, errors, cancellationToken));
+            composition.Clips.Add(await CreateVisualClipAsync(visual, backgroundColor, errors, cancellationToken));
         }
     }
 
     private static async Task<MediaClip> CreateVisualClipAsync(
         CompositionVisualPlan visual,
+        Color backgroundColor,
         List<string> errors,
         CancellationToken cancellationToken)
     {
         if (visual.Kind == CompositionVisualKind.Filler)
         {
-            return CreateBlackClip(visual.DurationMilliseconds);
+            return CreateBackgroundClip(backgroundColor, visual.DurationMilliseconds);
         }
 
         try
         {
             var file = await StorageFile.GetFileFromPathAsync(visual.SourcePath);
             cancellationToken.ThrowIfCancellationRequested();
-            var clip = visual.Kind == CompositionVisualKind.Image
-                ? await MediaClip.CreateFromImageFileAsync(file, ToTimeSpan(visual.DurationMilliseconds))
-                : await MediaClip.CreateFromFileAsync(file);
+            MediaClip clip;
+            if (visual.Kind == CompositionVisualKind.Image)
+            {
+                using (var stream = await file.OpenReadAsync())
+                {
+                    var decoder = await BitmapDecoder.CreateAsync(stream);
+                    cancellationToken.ThrowIfCancellationRequested();
+                    MediaImportService.ValidateVisualDimensions(
+                        decoder.OrientedPixelWidth,
+                        decoder.OrientedPixelHeight);
+                }
+
+                clip = await MediaClip.CreateFromImageFileAsync(file, ToTimeSpan(visual.DurationMilliseconds));
+            }
+            else
+            {
+                var storageProperties = await file.Properties.GetVideoPropertiesAsync();
+                cancellationToken.ThrowIfCancellationRequested();
+                MediaImportService.ValidateKnownVideoDimensions(
+                    storageProperties.Width,
+                    storageProperties.Height);
+                clip = await MediaClip.CreateFromFileAsync(file);
+                var properties = clip.GetVideoEncodingProperties();
+                MediaImportService.ValidateVisualDimensions(properties.Width, properties.Height);
+            }
+
             cancellationToken.ThrowIfCancellationRequested();
             if (visual.Kind == CompositionVisualKind.Video)
             {
@@ -104,8 +133,8 @@ public sealed class CompositionService
         }
         catch (Exception exception) when (IsItemFailure(exception))
         {
-            errors.Add($"'{visual.AssetName}' could not be loaded and was replaced with black video.");
-            return CreateBlackClip(visual.DurationMilliseconds);
+            errors.Add($"'{visual.AssetName}' could not be loaded and was replaced with the project background.");
+            return CreateBackgroundClip(backgroundColor, visual.DurationMilliseconds);
         }
     }
 
@@ -159,10 +188,15 @@ public sealed class CompositionService
         }
 
         var layer = new MediaOverlayLayer();
+        var textItems = project.TextItems.ToDictionary(item => item.Id);
         foreach (var overlayPlan in overlayPlans)
         {
             cancellationToken.ThrowIfCancellationRequested();
-            var item = project.TextItems.First(item => item.Id == overlayPlan.ItemId);
+            if (!textItems.TryGetValue(overlayPlan.ItemId, out var item))
+            {
+                continue;
+            }
+
             try
             {
                 var path = await textOverlayRenderer.RenderAsync(project, item, renderHost, cancellationToken);
@@ -182,8 +216,7 @@ public sealed class CompositionService
             }
             catch (Exception exception) when (IsItemFailure(exception) || exception is InvalidOperationException)
             {
-                var name = string.IsNullOrWhiteSpace(item.Text) ? item.Id.ToString("D") : item.Text;
-                errors.Add($"Text '{name}' could not be rendered and was omitted.");
+                errors.Add("A text overlay could not be rendered and was omitted.");
             }
         }
 
@@ -208,8 +241,20 @@ public sealed class CompositionService
         return new Windows.Foundation.Rect(0, 0, outputWidth, outputHeight);
     }
 
-    private static MediaClip CreateBlackClip(long durationMilliseconds) =>
-        MediaClip.CreateFromColor(Color.FromArgb(255, 0, 0, 0), ToTimeSpan(durationMilliseconds));
+    internal static Color ResolveBackgroundColor(string? opaqueArgb)
+    {
+        var value = TimelineInput.IsOpaqueArgb(opaqueArgb)
+            ? opaqueArgb!
+            : ProjectSettings.DefaultBackgroundColor;
+        return Color.FromArgb(
+            255,
+            byte.Parse(value.AsSpan(3, 2), NumberStyles.HexNumber, CultureInfo.InvariantCulture),
+            byte.Parse(value.AsSpan(5, 2), NumberStyles.HexNumber, CultureInfo.InvariantCulture),
+            byte.Parse(value.AsSpan(7, 2), NumberStyles.HexNumber, CultureInfo.InvariantCulture));
+    }
+
+    private static MediaClip CreateBackgroundClip(Color backgroundColor, long durationMilliseconds) =>
+        MediaClip.CreateFromColor(backgroundColor, ToTimeSpan(durationMilliseconds));
 
     internal static void ApplyTrim(MediaClip clip, long sourceInMilliseconds, long sourceOutMilliseconds)
     {

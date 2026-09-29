@@ -1,5 +1,6 @@
 using CutFlow.Models;
 using CutFlow.Services;
+using CutFlow.Utilities;
 
 namespace CutFlow.ViewModels;
 
@@ -78,7 +79,7 @@ public sealed partial class MainViewModel : ViewModelBase
         {
             if (!_canContinue()) return false;
             editor.MarkSaveFailed();
-            Home.ReportError(exception.Message);
+            Home.ReportError("The project could not be saved. Check available disk space and try again.");
             return false;
         }
     }
@@ -91,7 +92,7 @@ public sealed partial class MainViewModel : ViewModelBase
         }
         catch (Exception exception) when (exception is IOException or UnauthorizedAccessException or InvalidDataException)
         {
-            if (_canContinue()) Home.ReportError(exception.Message);
+            if (_canContinue()) Home.ReportError("Projects could not be loaded. Check app storage and try again.");
         }
     }
 
@@ -160,7 +161,7 @@ public sealed partial class MainViewModel : ViewModelBase
                 NotifyCurrentViewPropertiesChanged();
                 CurrentViewChanged?.Invoke(this, EventArgs.Empty);
             }
-            catch
+            catch (Exception rollbackException) when (!ExceptionPolicy.IsFatal(rollbackException))
             {
                 // Preserve the original transition failure after best-effort rollback notification.
             }

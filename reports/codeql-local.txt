@@ -1,0 +1,30 @@
+local code scan
+Root: C:\Dev\CutFlow
+Command: semgrep scan --config p/csharp --error --metrics=off .
+Started: 2026-08-19 09.19.01
+
+
+┌─────────────┐
+│ Scan Status │
+└─────────────┘
+  Scanning 126 files tracked by git with 27 Code rules:
+  Scanning 59 files with 27 csharp rules.
+
+
+┌──────────────┐
+│ Scan Summary │
+└──────────────┘
+✅ Scan completed successfully.
+ • Findings: 0 (0 blocking)
+ • Rules run: 27
+ • Targets scanned: 59
+ • Parsed lines: ~99.7%
+ • Scan skipped:
+   ◦ Files matching .semgrepignore patterns: 52
+ • Scan was limited to files tracked by git
+ • For a detailed list of skipped files and lines, run semgrep with the --verbose flag
+Ran 27 rules on 59 files: 0 findings.
+(need more rules? `semgrep login` for additional free Semgrep Registry rules)
+
+If Semgrep missed a finding, please send us feedback to let us know!
+See https://semgrep.dev/docs/reporting-false-negatives/

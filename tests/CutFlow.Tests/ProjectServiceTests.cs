@@ -93,6 +93,27 @@ public sealed partial class ProjectServiceTests
     }
 
     [TestMethod]
+    public async Task CreateAsync_WhenWriteFailsAfterCreatingOwnedTemp_CleansUpClaimedDirectory()
+    {
+        using var directory = new TemporaryDirectory();
+        string? ownedTemporaryPath = null;
+        var service = new ProjectService(
+            directory.Path,
+            writeAndFlushAsync: async (path, _, _) =>
+            {
+                ownedTemporaryPath = path;
+                await File.WriteAllBytesAsync(path, [0x7B, 0x22, 0x70], TestContext.CancellationToken);
+                throw new IOException("Deterministic first-save write failure");
+            });
+
+        await Assert.ThrowsExactlyAsync<IOException>(() => service.CreateAsync("Fails", TestContext.CancellationToken));
+
+        Assert.IsNotNull(ownedTemporaryPath);
+        Assert.IsFalse(File.Exists(ownedTemporaryPath));
+        Assert.IsEmpty(Directory.EnumerateFileSystemEntries(Path.Combine(directory.Path, "Projects")));
+    }
+
+    [TestMethod]
     public async Task CreateAsync_WhenAnotherProcessCreatesTheSamePath_PreservesTheOtherDirectory()
     {
         using var directory = new TemporaryDirectory();
@@ -307,6 +328,28 @@ public sealed partial class ProjectServiceTests
         Assert.HasCount(1, projects);
         Assert.AreEqual(defaultTimestamp.Id, projects[0].Id);
         Assert.AreEqual(default(DateTimeOffset), projects[0].ModifiedAt);
+    }
+
+    [TestMethod]
+    public async Task ListAsync_WhenProjectJsonIsUnreadable_SkipsItWithoutChangingBytes()
+    {
+        using var directory = new TemporaryDirectory();
+        var service = new ProjectService(directory.Path);
+        var readable = await service.CreateAsync("Readable", TestContext.CancellationToken);
+        var unreadable = ProjectDocument.CreateNew("Temporarily unreadable", DateTimeOffset.UnixEpoch);
+        await WriteProjectJsonAsync(directory.Path, unreadable);
+        var unreadablePath = Path.Combine(directory.Path, "Projects", unreadable.Id.ToString("D"), "project.json");
+        var originalBytes = await File.ReadAllBytesAsync(unreadablePath, TestContext.CancellationToken);
+
+        IReadOnlyList<ProjectDocument> projects;
+        await using (new FileStream(unreadablePath, FileMode.Open, FileAccess.Read, FileShare.None))
+        {
+            projects = await service.ListAsync(TestContext.CancellationToken);
+        }
+
+        Assert.HasCount(1, projects);
+        Assert.AreEqual(readable.Id, projects[0].Id);
+        Assert.AreSequenceEqual(originalBytes, await File.ReadAllBytesAsync(unreadablePath, TestContext.CancellationToken));
     }
 
     [TestMethod]

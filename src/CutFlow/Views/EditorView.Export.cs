@@ -28,6 +28,7 @@ public sealed partial class EditorView
             return;
         }
 
+        var publication = CaptureInfoBarPublication();
         RefreshExportAvailability();
         try
         {
@@ -40,7 +41,7 @@ public sealed partial class EditorView
 
             if (!validation.CanExport)
             {
-                ShowMessage(InfoBarSeverity.Error, "Could not export project", validation.ErrorMessage);
+                TryShowMessage(publication, InfoBarSeverity.Error, "Could not export project", validation.ErrorMessage);
                 return;
             }
 
@@ -56,7 +57,7 @@ public sealed partial class EditorView
                 return;
             }
 
-            var destination = await PickExportDestinationAsync(windowHandle, operationId, selection);
+            var destination = await PickExportDestinationAsync(windowHandle, operationId, selection, publication);
             if (destination is null || !_exportState.TryBeginRender(operationId))
             {
                 return;
@@ -74,7 +75,7 @@ public sealed partial class EditorView
         {
             if (CanContinueExport(operationId))
             {
-                ReportExportFailure(exception);
+                ReportExportFailure(publication, exception);
             }
         }
         finally
@@ -97,7 +98,8 @@ public sealed partial class EditorView
     private async Task<ExportDestination?> PickExportDestinationAsync(
         nint windowHandle,
         long operationId,
-        ExportDialogSelection selection)
+        ExportDialogSelection selection,
+        InfoBarPublication publication)
     {
         try
         {
@@ -123,7 +125,7 @@ public sealed partial class EditorView
         {
             if (CanContinueExport(operationId))
             {
-                ReportExportFailure(exception);
+                ReportExportFailure(publication, exception);
             }
 
             return null;
@@ -198,6 +200,7 @@ public sealed partial class EditorView
     {
         using var cancellation = CancellationTokenSource.CreateLinkedTokenSource(_lifetimeToken);
         _exportCts = cancellation;
+        var publication = CaptureInfoBarPublication();
         ShowExportProgress(Path.GetFileName(destinationPath));
         try
         {
@@ -208,11 +211,13 @@ public sealed partial class EditorView
             var service = new ExportService(_compositionService, _textOverlayRenderer, _logService);
             var result = await service.ExportToPathAsync(
                 projectSnapshot,
-                ViewModel.Project,
+                () => ViewModel.Project,
                 destinationPath,
                 options,
                 progress,
-                cancellation.Token);
+                cancellation.Token,
+                ViewModel.ProjectMutationLock,
+                _importGate);
             if (_disposed || !ReferenceEquals(_exportCts, cancellation))
             {
                 return;
@@ -225,11 +230,11 @@ public sealed partial class EditorView
                     break;
                 case ExportCompletionState.Cancelled:
                     HideExportStatus();
-                    ShowMessage(InfoBarSeverity.Informational, "Export cancelled", "No output file was changed.");
+                    TryShowMessage(publication, InfoBarSeverity.Informational, "Export cancelled", "No output file was changed.");
                     break;
                 default:
                     HideExportStatus();
-                    ShowMessage(InfoBarSeverity.Error, "Export failed", result.ErrorMessage);
+                    TryShowMessage(publication, InfoBarSeverity.Error, "Export failed", result.ErrorMessage);
                     _ = _logService.TryWriteAsync($"Export failed: {result.Status}", CancellationToken.None);
                     break;
             }
@@ -239,7 +244,7 @@ public sealed partial class EditorView
             if (!_disposed && ReferenceEquals(_exportCts, cancellation))
             {
                 HideExportStatus();
-                ShowMessage(InfoBarSeverity.Informational, "Export cancelled", "No output file was changed.");
+                TryShowMessage(publication, InfoBarSeverity.Informational, "Export cancelled", "No output file was changed.");
             }
         }
         catch (Exception exception) when (IsExpectedExportException(exception))
@@ -247,7 +252,7 @@ public sealed partial class EditorView
             if (!_disposed && ReferenceEquals(_exportCts, cancellation))
             {
                 HideExportStatus();
-                ReportExportFailure(exception);
+                ReportExportFailure(publication, exception);
             }
         }
         finally
@@ -400,6 +405,7 @@ public sealed partial class EditorView
     private void ShowExportProgress(string fileName)
     {
         _lastExportResult = null;
+        ExportStatusPanel.Visibility = Visibility.Visible;
         ExportStatusTitle.Text = "Exporting video";
         ExportStatusMessage.Text = $"Creating '{fileName}' at full resolution. You can keep working in the editor.";
         ExportProgressBar.Value = 0;
@@ -408,7 +414,6 @@ public sealed partial class EditorView
         ExportSuccessActions.Visibility = Visibility.Collapsed;
         DismissExportStatusButton.Visibility = Visibility.Collapsed;
         CancelExportButton.IsEnabled = true;
-        ExportStatusPanel.Visibility = Visibility.Visible;
     }
 
     private void ApplyExportProgress(double value, CancellationTokenSource operation)
@@ -444,18 +449,36 @@ public sealed partial class EditorView
     private void RefreshExportAvailability()
     {
         ExportButton.IsEnabled = ExportPresentation.CanStartExport(ViewModel.Project, _isExporting);
-        var helpText = string.Empty;
-        if (!ExportButton.IsEnabled)
-        {
-            helpText = _isExporting
-                ? "Export setup is open or rendering is in progress"
-                : "Add visual media to V1 before exporting";
-        }
-
+        var helpText = ExportPresentation.GetDisabledHelpText(ViewModel.Project, _isExporting);
         AutomationProperties.SetHelpText(ExportButton, helpText);
+        ToolTipService.SetToolTip(ExportButton, ExportButton.IsEnabled ? "Export project" : helpText);
+        ExportAvailabilityButton.Visibility = ExportButton.IsEnabled ? Visibility.Collapsed : Visibility.Visible;
+        AutomationProperties.SetHelpText(ExportAvailabilityButton, helpText);
+        ToolTipService.SetToolTip(ExportAvailabilityButton, helpText);
     }
 
-    private void HideExportStatus() => ExportStatusPanel.Visibility = Visibility.Collapsed;
+    private void ExportAvailability_Click(object sender, RoutedEventArgs e)
+    {
+        var helpText = ExportPresentation.GetDisabledHelpText(ViewModel.Project, _isExporting);
+        if (helpText.Length > 0)
+        {
+            ShowMessage(InfoBarSeverity.Informational, "Export unavailable", helpText);
+        }
+    }
+
+    private void HideExportStatus()
+    {
+        DismissTransientSurface(
+            () => ContainsFocus(ExportStatusPanel),
+            () => ExportStatusPanel.Visibility = Visibility.Collapsed,
+            () =>
+            {
+                if (!ExportButton.Focus(FocusState.Programmatic))
+                {
+                    InspectorToggleButton.Focus(FocusState.Programmatic);
+                }
+            });
+    }
 
     private void CancelExport_Click(object sender, RoutedEventArgs e)
     {
@@ -480,6 +503,7 @@ public sealed partial class EditorView
             return;
         }
 
+        var publication = CaptureInfoBarPublication();
         try
         {
             bool launched;
@@ -508,12 +532,12 @@ public sealed partial class EditorView
 
             if (!launched)
             {
-                ReportOpenExportFailure(operation, openFolder, "LauncherReturnedFalse");
+                ReportOpenExportFailure(operation, publication, openFolder, "LauncherReturnedFalse");
             }
         }
         catch (Exception exception) when (IsExpectedExportException(exception) || exception is InvalidOperationException)
         {
-            ReportOpenExportFailure(operation, openFolder, exception.GetType().Name);
+            ReportOpenExportFailure(operation, publication, openFolder, exception.GetType().Name);
         }
         finally
         {
@@ -527,7 +551,11 @@ public sealed partial class EditorView
         ExportResultAction operation) =>
         !disposed && ReferenceEquals(currentOperation, operation);
 
-    private void ReportOpenExportFailure(ExportResultAction operation, bool openFolder, string reason)
+    private void ReportOpenExportFailure(
+        ExportResultAction operation,
+        InfoBarPublication publication,
+        bool openFolder,
+        string reason)
     {
         if (!CanContinueOpenExportResult(_disposed, _lastExportResult, operation))
         {
@@ -537,16 +565,17 @@ public sealed partial class EditorView
         _lastExportResult = null;
         HideExportStatus();
         ReportError(
+            publication,
             openFolder ? "Could not open export folder" : "Could not open exported file",
             "The exported item may have been moved or is no longer available.");
         _ = _logService.TryWriteAsync($"Open export result failed: {reason}", CancellationToken.None);
     }
 
-    private void ReportExportFailure(Exception exception)
+    private void ReportExportFailure(InfoBarPublication publication, Exception exception)
     {
         var message = ExportFailureMapper.GetExceptionMessage(exception)
             ?? throw new InvalidOperationException("Unexpected export exceptions must not be converted to user-facing failures.");
-        ShowMessage(InfoBarSeverity.Error, "Export failed", message);
+        TryShowMessage(publication, InfoBarSeverity.Error, "Export failed", message);
         _ = _logService.TryWriteAsync(
             $"Export failed: {exception.GetType().Name}; HRESULT=0x{exception.HResult:X8}",
             CancellationToken.None);

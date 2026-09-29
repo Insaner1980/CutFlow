@@ -14,7 +14,7 @@ public sealed class ProjectModelTests
 
         var project = ProjectDocument.CreateNew("Summer edit", createdAt);
 
-        Assert.AreEqual(1, project.SchemaVersion);
+        Assert.AreEqual(ProjectDocument.CurrentSchemaVersion, project.SchemaVersion);
         Assert.AreNotEqual(Guid.Empty, project.Id);
         Assert.AreEqual("Summer edit", project.Name);
         Assert.AreEqual(createdAt, project.CreatedAt);

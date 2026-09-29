@@ -346,28 +346,40 @@ public sealed class Task8TimelineTests
     [TestMethod]
     public void ContextMenuState_ResolvesCurrentItemLockPlayheadAndSourceByGuid()
     {
-        var project = TestProjects.WithVideo(1_000);
-        var video = project.VideoItems.Single();
-        project.Assets.Single().SourcePath = @"C:\Media\clip.mp4";
+        var project = TestProjects.WithVideo(1_000, 1_000, 1_000);
+        var video = project.VideoItems[1];
+        project.Assets[1].SourcePath = @"C:\Media\clip.mp4";
         var text = TestProjects.Text(0, 1_000);
         project.TextItems.Add(text);
         var locks = new TimelineTrackLocks();
 
-        var edge = TimelineContextCommands.Resolve(project, video.Id, locks, 50);
+        var edge = TimelineContextCommands.Resolve(project, video.Id, locks, 1_050);
         Assert.IsFalse(edge.CanSplit);
         Assert.IsTrue(edge.CanDuplicate);
         Assert.IsTrue(edge.CanDelete);
         Assert.IsTrue(edge.CanShowSourceFile);
+        Assert.IsTrue(edge.CanMoveEarlier);
+        Assert.IsTrue(edge.CanMoveLater);
 
-        var interior = TimelineContextCommands.Resolve(project, video.Id, locks, 500);
+        var first = TimelineContextCommands.Resolve(project, project.VideoItems[0].Id, locks, 50);
+        var last = TimelineContextCommands.Resolve(project, project.VideoItems[2].Id, locks, 2_500);
+        Assert.IsFalse(first.CanMoveEarlier);
+        Assert.IsTrue(first.CanMoveLater);
+        Assert.IsTrue(last.CanMoveEarlier);
+        Assert.IsFalse(last.CanMoveLater);
+
+        var interior = TimelineContextCommands.Resolve(project, video.Id, locks, 1_500);
         Assert.IsTrue(interior.CanSplit);
 
         locks.SetLocked(TimelineTrackKind.Video, true);
-        var locked = TimelineContextCommands.Resolve(project, video.Id, locks, 500);
+        var locked = TimelineContextCommands.Resolve(project, video.Id, locks, 1_500);
         Assert.IsFalse(locked.CanSplit);
         Assert.IsFalse(locked.CanDuplicate);
         Assert.IsFalse(locked.CanDelete);
         Assert.IsTrue(locked.CanShowSourceFile);
+        Assert.IsFalse(locked.CanMoveEarlier);
+        Assert.IsFalse(locked.CanMoveLater);
+        Assert.IsTrue(locked.IsLocked);
 
         var textState = TimelineContextCommands.Resolve(project, text.Id, locks, 500);
         Assert.IsFalse(textState.CanSplit);
@@ -376,6 +388,20 @@ public sealed class Task8TimelineTests
         Assert.IsFalse(textState.CanShowSourceFile);
 
         Assert.AreEqual(default, TimelineContextCommands.Resolve(project, Guid.NewGuid(), locks, 500));
+    }
+
+    [TestMethod]
+    public void ContextMenuTargetName_IdentifiesTheClipByTrackTitleAndStartTime()
+    {
+        var project = TestProjects.WithVideo(1_000, 2_000);
+        project.Assets[1].FileName = "interview.mp4";
+
+        var name = TimelineContextCommands.TargetName(
+            project,
+            project.VideoItems[1].Id,
+            EditorSelectionKind.VideoItem);
+
+        Assert.AreEqual("V1 clip 'interview.mp4' at 00:00:01:00", name);
     }
 
     [TestMethod]
@@ -460,6 +486,22 @@ public sealed class Task8TimelineTests
     {
         Assert.IsFalse(TimelineInput.TryParseFiniteDouble(value, out _));
         Assert.IsFalse(TimelineInput.TryParseSeconds(value, out _));
+    }
+
+    [TestMethod]
+    public void ProjectBackgroundColor_RequiresExactOpaqueArgbAndCanonicalizesCase()
+    {
+        var viewModel = new EditorViewModel(ProjectDocument.CreateNew("Background", DateTimeOffset.UnixEpoch));
+
+        Assert.IsTrue(viewModel.SetBackgroundColor("#ff12ab34"));
+        Assert.AreEqual("#FF12AB34", viewModel.Project.Settings.BackgroundColor);
+        Assert.IsFalse(viewModel.SetBackgroundColor("#FF12AB34"));
+
+        foreach (var rejected in new[] { "#8012AB34", "#FF12AB3", "#FF12AB3G", " #FF12AB34", "#FF12AB34 " })
+        {
+            Assert.IsFalse(viewModel.SetBackgroundColor(rejected));
+            Assert.AreEqual("#FF12AB34", viewModel.Project.Settings.BackgroundColor);
+        }
     }
 
     [TestMethod]

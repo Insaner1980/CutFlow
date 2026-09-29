@@ -547,6 +547,8 @@ public sealed partial class Task10TextTests
     {
         Assert.IsTrue(Services.TextOverlayRenderer.TryGetDecodedPixelByteCount(1920, 1920, out var byteCount));
         Assert.AreEqual(14_745_600, byteCount);
+        Assert.IsTrue(Services.TextOverlayRenderer.TryGetDecodedPixelByteCount(4096, 4096, out var maximumByteCount));
+        Assert.AreEqual(64L * 1024 * 1024, maximumByteCount);
         Assert.IsFalse(Services.TextOverlayRenderer.TryGetDecodedPixelByteCount(4097, 4096, out _));
         Assert.IsFalse(Services.TextOverlayRenderer.TryGetDecodedPixelByteCount(uint.MaxValue, uint.MaxValue, out _));
     }
@@ -609,11 +611,15 @@ public sealed partial class Task10TextTests
         var first = new TextTimelineItem { Id = Guid.NewGuid(), Text = "First" };
         var second = new TextTimelineItem { Id = Guid.NewGuid(), Text = "Second" };
         var renderer = new Services.TextOverlayRenderer(directory.Path);
+        var firstStarted = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var releaseFirst = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
         var active = 0;
         var maximumActive = 0;
+        var renderCount = 0;
         var sync = new object();
         async Task Render(string path, CancellationToken cancellationToken)
         {
+            var call = Interlocked.Increment(ref renderCount);
             lock (sync)
             {
                 active++;
@@ -622,7 +628,12 @@ public sealed partial class Task10TextTests
 
             try
             {
-                await Task.Delay(75, cancellationToken);
+                if (call == 1)
+                {
+                    firstStarted.SetResult();
+                    await releaseFirst.Task.WaitAsync(cancellationToken);
+                }
+
                 await WriteTransparentPngAsync(path, 1, 1, cancellationToken);
             }
             finally
@@ -631,9 +642,15 @@ public sealed partial class Task10TextTests
             }
         }
 
-        await Task.WhenAll(
-            renderer.GetOrRenderAsync(project, first, Render, CancellationToken.None),
-            renderer.GetOrRenderAsync(project, second, Render, CancellationToken.None));
+        var firstRender = renderer.GetOrRenderAsync(project, first, Render, CancellationToken.None);
+        await firstStarted.Task;
+        var secondRender = renderer.GetOrRenderAsync(project, second, Render, CancellationToken.None);
+
+        Assert.AreEqual(1, renderCount);
+        Assert.IsFalse(secondRender.IsCompleted);
+
+        releaseFirst.SetResult();
+        await Task.WhenAll(firstRender, secondRender);
 
         Assert.AreEqual(1, maximumActive);
     }
@@ -676,7 +693,44 @@ public sealed partial class Task10TextTests
     }
 
     [TestMethod]
-    public async Task CacheAfterRender_RetainsCurrentAndNewestPngFilesDeterministically()
+    public async Task GetOrRenderAsync_WhenCanceledAfterRendering_DoesNotPublishCacheFile()
+    {
+        using var directory = new TemporaryDirectory();
+        var project = ProjectDocument.CreateNew("Canceled publish", DateTimeOffset.UnixEpoch);
+        project.Settings.Width = 1;
+        project.Settings.Height = 1;
+        var item = new TextTimelineItem { Id = Guid.NewGuid(), Text = "Canceled" };
+        var renderer = new Services.TextOverlayRenderer(directory.Path);
+        var cachePath = renderer.GetCachePath(project, item);
+        var renderCompleted = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var releaseRender = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        using var cancellation = new CancellationTokenSource();
+
+        var render = renderer.GetOrRenderAsync(
+            project,
+            item,
+            async (temporaryPath, _) =>
+            {
+                await WriteTransparentPngAsync(temporaryPath, 1, 1, TestContext.CancellationToken);
+                renderCompleted.SetResult();
+                await releaseRender.Task;
+            },
+            cancellation.Token);
+
+        await renderCompleted.Task;
+        cancellation.Cancel();
+        releaseRender.SetResult();
+
+        await Assert.ThrowsExactlyAsync<OperationCanceledException>(() => render);
+        Assert.IsFalse(File.Exists(cachePath));
+        Assert.HasCount(0, Directory.GetFiles(Path.GetDirectoryName(cachePath)!, "*.tmp"));
+    }
+
+    [TestMethod]
+    [DataRow(254)]
+    [DataRow(255)]
+    [DataRow(256)]
+    public async Task CacheAfterRender_EnforcesThe255_256_257FileBoundary(int existingFileCount)
     {
         using var directory = new TemporaryDirectory();
         var project = ProjectDocument.CreateNew("Bounded cache", DateTimeOffset.UnixEpoch);
@@ -687,7 +741,7 @@ public sealed partial class Task10TextTests
         var cacheDirectory = Path.GetDirectoryName(renderer.GetCachePath(project, item))!;
         Directory.CreateDirectory(cacheDirectory);
         var sharedTimestamp = new DateTime(2040, 1, 1, 0, 0, 0, DateTimeKind.Utc);
-        for (var index = 0; index < 256; index++)
+        for (var index = 0; index < existingFileCount; index++)
         {
             var path = Path.Combine(cacheDirectory, $"old-{index:D3}.png");
             await File.WriteAllBytesAsync(path, [0], TestContext.CancellationToken);
@@ -704,10 +758,15 @@ public sealed partial class Task10TextTests
             (path, cancellationToken) => WriteTransparentPngAsync(path, 1, 1, cancellationToken),
             CancellationToken.None);
 
-        Assert.HasCount(256, Directory.GetFiles(cacheDirectory, "*.png"));
+        Assert.HasCount(Math.Min(existingFileCount + 1, 256), Directory.GetFiles(cacheDirectory, "*.png"));
         Assert.IsTrue(File.Exists(currentPath));
-        Assert.IsTrue(File.Exists(Path.Combine(cacheDirectory, "old-000.png")));
-        Assert.IsFalse(File.Exists(Path.Combine(cacheDirectory, "old-255.png")));
+        if (existingFileCount > 0)
+        {
+            Assert.IsTrue(File.Exists(Path.Combine(cacheDirectory, "old-000.png")));
+            Assert.AreEqual(
+                existingFileCount < 256,
+                File.Exists(Path.Combine(cacheDirectory, $"old-{existingFileCount - 1:D3}.png")));
+        }
         Assert.IsTrue(File.Exists(temporaryPath));
         Assert.IsTrue(File.Exists(nonPngPath));
     }
@@ -796,6 +855,22 @@ public sealed partial class Task10TextTests
         string tag, VirtualKey key, bool controlDown, bool expected)
     {
         Assert.AreEqual(expected, Controls.InspectorCommitGesture.ShouldCommit(tag, key, controlDown));
+    }
+
+    [TestMethod]
+    public void InspectorDuplicateCommit_SecondNoOpDoesNotAddHistory()
+    {
+        var project = ProjectDocument.CreateNew("Inspector", DateTimeOffset.UnixEpoch);
+        var item = new TextTimelineItem { Id = Guid.NewGuid() };
+        project.TextItems.Add(item);
+        var viewModel = new EditorViewModel(project);
+        var committed = 0;
+        viewModel.EditCommitted += (_, _) => committed++;
+
+        Assert.IsTrue(viewModel.SetTextContent(item.Id, "Changed"));
+        Assert.IsFalse(viewModel.SetTextContent(item.Id, "Changed"));
+        Assert.AreEqual(1L, viewModel.Revision);
+        Assert.AreEqual(1, committed);
     }
 
     [TestMethod]

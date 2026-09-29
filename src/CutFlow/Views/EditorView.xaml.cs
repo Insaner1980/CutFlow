@@ -32,6 +32,7 @@ public sealed partial class EditorView : UserControl, IDisposable
     private readonly EditorImportGate _importGate = new();
     private readonly CompositionService _compositionService = new();
     private readonly PreviewRebuildGate _previewRebuildGate = new();
+    private PreviewCompositionKey? _publishedPreviewKey;
     private readonly TextOverlayRenderer _textOverlayRenderer;
     private readonly DebouncedSaveCoordinator _autosave;
     private readonly AppSettings _workspaceSettings;
@@ -48,6 +49,10 @@ public sealed partial class EditorView : UserControl, IDisposable
     private double _timelineResizeStartHeight;
     private bool _projectSaveFailureInfoBarIsCurrent;
     private bool _previewInfoBarIsCurrent;
+    private InspectorPanel? _committingInspector;
+    private long _infoBarRevision;
+    private InfoBarSeverity _infoBarSeverity;
+    private InfoBarPublication? _autosaveInfoBarPublication;
     private bool _disposed;
 
     public EditorView(
@@ -97,6 +102,7 @@ public sealed partial class EditorView : UserControl, IDisposable
         ToolPanel.MediaFilesDropped += ToolPanel_MediaFilesDropped;
         ToolPanel.MediaDropFailed += ToolPanel_MediaDropFailed;
         Preview.PlaybackPositionChanged += Preview_PlaybackPositionChanged;
+        Preview.PlaybackFailed += Preview_PlaybackFailed;
         Preview.TextPositionCommitted += Preview_TextPositionCommitted;
         Preview.LoopChanged += Preview_LoopChanged;
         Timeline.ZoomChanged += Timeline_ZoomChanged;
@@ -118,6 +124,8 @@ public sealed partial class EditorView : UserControl, IDisposable
 
     public UIElement TitleBarElement => TitleBarDragRegion;
 
+    public bool FocusInitialControl() => BackButton.Focus(FocusState.Programmatic);
+
     public double TimelineHeight => TimelineRow.Height.Value;
 
     public void SetTimelineHeight(double height) => SetTimelineHeight(height, notify: true);
@@ -135,15 +143,20 @@ public sealed partial class EditorView : UserControl, IDisposable
             var rejected = resultSlots.OfType<ImportResult>().ToList();
             if (rejected.Count > 0)
             {
-                CommitImportResults(rejected);
+                ShowImportResults(rejected);
             }
 
             return;
         }
 
+        InfoBarPublication publication = default;
         await _importGate.ExecuteAsync(
-            cancellationToken => _mediaImportService.ImportAsync(files, ViewModel.Project, _projectsRootPath, cancellationToken),
-            results => CommitImportResults(MediaImportService.MergeImportResults(resultSlots, results)),
+            cancellationToken =>
+            {
+                publication = CaptureInfoBarPublication();
+                return _mediaImportService.ImportAsync(files, ViewModel.Project, _projectsRootPath, cancellationToken);
+            },
+            results => CommitImportResults(MediaImportService.MergeImportResults(resultSlots, results), publication),
             _lifetimeToken);
     }
 
@@ -203,9 +216,14 @@ public sealed partial class EditorView : UserControl, IDisposable
             return;
         }
 
+        InfoBarPublication publication = default;
         await _importGate.ExecuteAsync(
-            cancellationToken => _mediaImportService.ImportAsync(accepted, ViewModel.Project, _projectsRootPath, cancellationToken),
-            results => CommitTimelineDropResults(accepted, results, track, positionMilliseconds, rejected),
+            cancellationToken =>
+            {
+                publication = CaptureInfoBarPublication();
+                return _mediaImportService.ImportAsync(accepted, ViewModel.Project, _projectsRootPath, cancellationToken);
+            },
+            results => CommitTimelineDropResults(accepted, results, track, positionMilliseconds, rejected, publication),
             _lifetimeToken);
     }
 
@@ -214,7 +232,8 @@ public sealed partial class EditorView : UserControl, IDisposable
         IReadOnlyList<ImportResult> results,
         TimelineTrackKind track,
         long positionMilliseconds,
-        IReadOnlyList<string> rejected)
+        IReadOnlyList<string> rejected,
+        InfoBarPublication publication)
     {
         EnsureActive();
         if (Timeline.IsTrackLocked(track))
@@ -245,7 +264,7 @@ public sealed partial class EditorView : UserControl, IDisposable
         AddTimelineInsertionIssues(candidates, additions, issues);
         ToolPanel.RefreshAssets();
         UpdateProjectPresentation();
-        ShowTimelineDropSummary(track, additions.Count(wasAdded => wasAdded), issues);
+        ShowTimelineDropSummary(track, additions.Count(wasAdded => wasAdded), issues, publication);
     }
 
     private List<ProjectAsset> CollectDropCandidates(
@@ -309,19 +328,25 @@ public sealed partial class EditorView : UserControl, IDisposable
         }
     }
 
-    private void ShowTimelineDropSummary(TimelineTrackKind track, int added, List<string> issues)
+    private void ShowTimelineDropSummary(
+        TimelineTrackKind track,
+        int added,
+        List<string> issues,
+        InfoBarPublication publication)
     {
         var trackName = TimelineDropPolicy.DisplayName(track);
         if (issues.Count == 0)
         {
-            ShowMessage(
+            TryShowMessage(
+                publication,
                 InfoBarSeverity.Success,
                 $"Added to {trackName}",
                 $"Added {added} file(s) to the timeline.");
         }
         else
         {
-            ShowMessage(
+            TryShowMessage(
+                publication,
                 InfoBarSeverity.Warning,
                 added > 0 ? $"Added {added} file(s) with issues" : "No files were added",
                 string.Join(" ", issues.Take(3)) + (issues.Count > 3 ? $" {issues.Count - 3} more files were not added." : string.Empty));
@@ -397,6 +422,7 @@ public sealed partial class EditorView : UserControl, IDisposable
 
     public async Task<bool> SaveAsync()
     {
+        var publication = CaptureInfoBarPublication();
         try
         {
             await _autosave.FlushAsync();
@@ -404,7 +430,7 @@ public sealed partial class EditorView : UserControl, IDisposable
         }
         catch (Exception exception) when (exception is IOException or UnauthorizedAccessException or InvalidDataException)
         {
-            ShowProjectSaveFailure("Your latest edit could not be saved. Try again before closing the editor.");
+            TryShowProjectSaveFailure(publication, "Your latest edit could not be saved. Try again before closing the editor.");
             _ = _logService.TryWriteAsync($"Project save failed: {exception.GetType().Name}", CancellationToken.None);
             return false;
         }
@@ -429,23 +455,29 @@ public sealed partial class EditorView : UserControl, IDisposable
         }
 
         var candidate = CopyAsset(existing);
-        var result = await _mediaImportService.RelinkAsync(
-            replacement,
-            candidate,
-            ViewModel.Project,
-            _projectsRootPath,
-            _lifetimeToken);
-        EnsureActive();
-        var oldCacheReference = FindAsset(assetId) is { } current ? CopyAsset(current) : CopyAsset(existing);
-        if (!result.IsSuccess || !ViewModel.ApplyRelinkedAsset(candidate))
-        {
-            ShowMessage(InfoBarSeverity.Error, $"Could not relink '{replacement.Name}'", result.ErrorMessage ?? "The asset could not be updated.");
-            return;
-        }
+        var publication = CaptureInfoBarPublication();
+        await _importGate.ExecuteAsync(
+            token => _mediaImportService.RelinkAsync(
+                replacement,
+                candidate,
+                ViewModel.Project,
+                _projectsRootPath,
+                token),
+            result =>
+            {
+                EnsureActive();
+                var oldCacheReference = FindAsset(assetId) is { } current ? CopyAsset(current) : CopyAsset(existing);
+                if (!result.IsSuccess || !ViewModel.ApplyRelinkedAsset(candidate))
+                {
+                    TryShowMessage(publication, InfoBarSeverity.Error, $"Could not relink '{replacement.Name}'", result.ErrorMessage ?? "The asset could not be updated.");
+                    return;
+                }
 
-        TryDeleteCache(oldCacheReference);
-        ToolPanel.RefreshAssets();
-        ShowMessage(InfoBarSeverity.Success, "Media relinked", $"'{candidate.FileName}' now replaces the missing or moved source while keeping timeline references.");
+                TryDeleteCache(oldCacheReference);
+                ToolPanel.RefreshAssets();
+                TryShowMessage(publication, InfoBarSeverity.Success, "Media relinked", $"'{candidate.FileName}' now replaces the missing or moved source while keeping timeline references.");
+            },
+            _lifetimeToken);
     }
 
     public void Dispose()
@@ -469,6 +501,7 @@ public sealed partial class EditorView : UserControl, IDisposable
         ToolPanel.MediaFilesDropped -= ToolPanel_MediaFilesDropped;
         ToolPanel.MediaDropFailed -= ToolPanel_MediaDropFailed;
         Preview.PlaybackPositionChanged -= Preview_PlaybackPositionChanged;
+        Preview.PlaybackFailed -= Preview_PlaybackFailed;
         Preview.TextPositionCommitted -= Preview_TextPositionCommitted;
         Preview.LoopChanged -= Preview_LoopChanged;
         Timeline.ZoomChanged -= Timeline_ZoomChanged;
@@ -500,7 +533,7 @@ public sealed partial class EditorView : UserControl, IDisposable
         if (e.PropertyName == nameof(EditorViewModel.PlayheadMilliseconds))
         {
             Preview.SetPlayhead(ViewModel.PlayheadText);
-            Preview.SetTextItems(ViewModel.Project, ViewModel.Selection, ViewModel.PlayheadMilliseconds);
+            Preview.SetTextItems(ViewModel.Project, ViewModel.Selection, ViewModel.PlayheadMilliseconds, ViewModel.Revision);
             Timeline.UpdatePlaybackPosition(ViewModel.PlayheadMilliseconds, ViewModel.PlayheadText, ViewModel.IsPlaying);
         }
         else if (e.PropertyName == nameof(EditorViewModel.Project))
@@ -537,13 +570,17 @@ public sealed partial class EditorView : UserControl, IDisposable
                 case DebouncedSaveState.Saved:
                     ViewModel.MarkSaved();
                     ClearProjectSaveFailure();
+                    _autosaveInfoBarPublication = null;
                     break;
                 case DebouncedSaveState.Saving:
                     ViewModel.MarkSaving();
+                    _autosaveInfoBarPublication = CaptureInfoBarPublication();
                     break;
                 case DebouncedSaveState.SaveFailed:
                     ViewModel.MarkSaveFailed();
-                    ShowProjectSaveFailure("Autosave failed. Try Ctrl+S before closing the editor.");
+                    TryShowProjectSaveFailure(
+                        _autosaveInfoBarPublication ?? CaptureInfoBarPublication(),
+                        "Autosave failed. Try Ctrl+S before closing the editor.");
                     _ = _logService.TryWriteAsync("Project autosave failed.", CancellationToken.None);
                     break;
             }
@@ -552,10 +589,11 @@ public sealed partial class EditorView : UserControl, IDisposable
 
     private void ViewModel_SelectionChanged(object? sender, EditorSelectionChangedEventArgs e)
     {
+        _pendingInspectorFocus = null;
         DesktopInspector.SetSelection(e.Selection);
         NarrowInspector.SetSelection(e.Selection);
         Timeline.SetSelection(e.Selection);
-        Preview.SetTextItems(ViewModel.Project, e.Selection, ViewModel.PlayheadMilliseconds);
+        Preview.SetTextItems(ViewModel.Project, e.Selection, ViewModel.PlayheadMilliseconds, ViewModel.Revision);
     }
 
     private void Tool_Click(object sender, RoutedEventArgs e)
@@ -583,12 +621,20 @@ public sealed partial class EditorView : UserControl, IDisposable
 
     private void UpdateProjectPresentation()
     {
-        DesktopInspector.SetProject(ViewModel.Project);
-        NarrowInspector.SetProject(ViewModel.Project);
+        _pendingInspectorFocus = _pendingInspectorFocus?.FocusOnly();
+        if (!ReferenceEquals(_committingInspector, DesktopInspector))
+        {
+            DesktopInspector.SetProject(ViewModel.Project);
+        }
+
+        if (!ReferenceEquals(_committingInspector, NarrowInspector))
+        {
+            NarrowInspector.SetProject(ViewModel.Project);
+        }
         Preview.SetPlayhead(ViewModel.PlayheadText);
         Preview.SetAspectRatio(ViewModel.Project.Settings.Width, ViewModel.Project.Settings.Height);
         Preview.SetBackgroundColor(ViewModel.Project.Settings.BackgroundColor);
-        Preview.SetTextItems(ViewModel.Project, ViewModel.Selection, ViewModel.PlayheadMilliseconds);
+        Preview.SetTextItems(ViewModel.Project, ViewModel.Selection, ViewModel.PlayheadMilliseconds, ViewModel.Revision);
         Timeline.SetTimeline(
             ViewModel.Project,
             new TimelinePresentation(
@@ -607,10 +653,13 @@ public sealed partial class EditorView : UserControl, IDisposable
     private async Task RebuildPreviewAsync(bool debounce)
     {
         PreviewRebuildLease? lease = null;
+        var publication = CaptureInfoBarPublication();
         try
         {
             lease = _previewRebuildGate.Begin(_lifetimeToken);
             if (debounce) await Task.Delay(140, lease.Token);
+            var previewKey = PreviewCompositionKey.Create(ViewModel.Project);
+            if (previewKey.Equals(_publishedPreviewKey)) return;
             var result = await _compositionService.BuildPreviewAsync(ViewModel.Project, lease.Token);
             if (_disposed || lease.Token.IsCancellationRequested) return;
             if (!lease.TryCommit(() =>
@@ -622,11 +671,14 @@ public sealed partial class EditorView : UserControl, IDisposable
                         requestedPosition,
                         currentPlayIntent,
                         result.HasVisualContent);
+                    _publishedPreviewKey = previewKey;
                 })) return;
             var previewErrors = CompositionBuildResult.SelectPreviewErrors(result.Errors);
             if (previewErrors.Count > 0)
             {
-                ShowPreviewMessage(
+                _publishedPreviewKey = null;
+                TryShowPreviewMessage(
+                    publication,
                     InfoBarSeverity.Warning,
                     "Preview contains unavailable items",
                     string.Join(" ", previewErrors));
@@ -636,7 +688,9 @@ public sealed partial class EditorView : UserControl, IDisposable
                 ClearPreviewMessage();
             }
         }
-        catch (OperationCanceledException)
+        catch (OperationCanceledException) when (
+            _lifetimeToken.IsCancellationRequested ||
+            lease?.Token.IsCancellationRequested == true)
         {
             // A newer preview request or editor disposal superseded this rebuild.
         }
@@ -644,7 +698,12 @@ public sealed partial class EditorView : UserControl, IDisposable
         {
             if (!_disposed && lease?.IsCurrent == true)
             {
-                ShowPreviewMessage(InfoBarSeverity.Error, "Could not rebuild preview", exception.Message);
+                TryShowPreviewMessage(publication, InfoBarSeverity.Error,
+                    "Could not rebuild preview",
+                    "Windows could not prepare the project preview. Check the source files and try again.");
+                _ = _logService.TryWriteAsync(
+                    $"Preview rebuild failed: {exception.GetType().Name}; HRESULT=0x{exception.HResult:X8}",
+                    CancellationToken.None);
             }
         }
         finally
@@ -738,12 +797,54 @@ public sealed partial class EditorView : UserControl, IDisposable
 
     private void CloseOverlayInspector_Click(object sender, RoutedEventArgs e)
     {
-        _narrowInspectorVisible = false;
-        ApplyInspectorLayout();
+        DismissNarrowInspector();
+    }
+
+    private void DismissNarrowInspector()
+    {
+        DismissTransientSurface(
+            () => ContainsFocus(InspectorOverlay),
+            () =>
+            {
+                _narrowInspectorVisible = false;
+                ApplyInspectorLayout();
+            },
+            () => InspectorToggleButton.Focus(FocusState.Programmatic));
+    }
+
+    private bool ContainsFocus(DependencyObject surface)
+    {
+        if (XamlRoot is null || FocusManager.GetFocusedElement(XamlRoot) is not DependencyObject focused)
+        {
+            return false;
+        }
+
+        for (var current = focused; current is not null; current = VisualTreeHelper.GetParent(current))
+        {
+            if (ReferenceEquals(current, surface))
+            {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    internal static void DismissTransientSurface(Func<bool> containsFocus, Action dismiss, Action restoreFocus)
+    {
+        var restore = containsFocus();
+        dismiss();
+        if (restore)
+        {
+            restoreFocus();
+        }
     }
 
     private void Inspector_EditCommitted(object sender, InspectorEditCommittedEventArgs e)
     {
+        _pendingInspectorFocus = _pendingInspectorFocus?.FocusOnly();
+        var inspector = sender as InspectorPanel;
+        var revision = ViewModel.Revision;
         if (e.ItemId is Guid itemId && Timeline.IsItemLocked(itemId))
         {
             ShowLockedTrackMessage(itemId);
@@ -751,96 +852,115 @@ public sealed partial class EditorView : UserControl, IDisposable
             return;
         }
 
-        switch (e.Kind)
+        _committingInspector = inspector;
+        try
         {
-            case InspectorEditKind.SetAspectRatio:
-                ViewModel.SetProjectAspectRatio(e.AspectRatio);
-                break;
-            case InspectorEditKind.SetBackgroundColor when e.TextValue is not null:
-                ViewModel.SetBackgroundColor(e.TextValue);
-                break;
-            case InspectorEditKind.TrimVideoStart when e.ItemId is Guid id:
-                ViewModel.TrimVideoStart(id, e.LongValue);
-                break;
-            case InspectorEditKind.TrimVideoEnd when e.ItemId is Guid id:
-                ViewModel.TrimVideoEnd(id, e.LongValue);
-                break;
-            case InspectorEditKind.SetImageDuration when e.ItemId is Guid id:
-                ViewModel.SetImageDuration(id, e.LongValue);
-                break;
-            case InspectorEditKind.ResetImageDuration when e.ItemId is Guid id:
-                ViewModel.ResetImageDuration(id);
-                break;
-            case InspectorEditKind.SetVideoVolume when e.ItemId is Guid id:
-                ViewModel.SetVideoVolume(id, e.DoubleValue);
-                break;
-            case InspectorEditKind.SetVideoMuted when e.ItemId is Guid id:
-                ViewModel.SetVideoMuted(id, e.BoolValue);
-                break;
-            case InspectorEditKind.MoveAudio when e.ItemId is Guid id:
-                ViewModel.MoveAudioItem(id, e.LongValue);
-                break;
-            case InspectorEditKind.TrimAudioStart when e.ItemId is Guid id:
-                ViewModel.TrimAudioStart(id, e.LongValue);
-                break;
-            case InspectorEditKind.TrimAudioEnd when e.ItemId is Guid id:
-                ViewModel.TrimAudioEnd(id, e.LongValue);
-                break;
-            case InspectorEditKind.SetAudioVolume when e.ItemId is Guid id:
-                ViewModel.SetAudioVolume(id, e.DoubleValue);
-                break;
-            case InspectorEditKind.SetAudioMuted when e.ItemId is Guid id:
-                ViewModel.SetAudioMuted(id, e.BoolValue);
-                break;
-            case InspectorEditKind.SetTextContent when e.ItemId is Guid id && e.TextValue is not null:
-                ViewModel.SetTextContent(id, e.TextValue);
-                break;
-            case InspectorEditKind.SetTextFontFamily when e.ItemId is Guid id && e.TextValue is not null:
-                ViewModel.SetTextFontFamily(id, e.TextValue);
-                break;
-            case InspectorEditKind.SetTextFontSize when e.ItemId is Guid id:
-                ViewModel.SetTextFontSize(id, e.DoubleValue);
-                break;
-            case InspectorEditKind.SetTextFontWeight when e.ItemId is Guid id:
-                ViewModel.SetTextFontWeight(id, checked((int)e.LongValue));
-                break;
-            case InspectorEditKind.SetTextBold when e.ItemId is Guid id:
-                ViewModel.SetTextBold(id, e.BoolValue);
-                break;
-            case InspectorEditKind.SetTextItalic when e.ItemId is Guid id:
-                ViewModel.SetTextItalic(id, e.BoolValue);
-                break;
-            case InspectorEditKind.SetTextColor when e.ItemId is Guid id && e.TextValue is not null:
-                ViewModel.SetTextColor(id, e.TextValue, background: false);
-                break;
-            case InspectorEditKind.SetTextBackground when e.ItemId is Guid id && e.TextValue is not null:
-                ViewModel.SetTextColor(id, e.TextValue, background: true);
-                break;
-            case InspectorEditKind.SetTextBackgroundEnabled when e.ItemId is Guid id:
-                ViewModel.SetTextBackgroundEnabled(id, e.BoolValue);
-                break;
-            case InspectorEditKind.SetTextOpacity when e.ItemId is Guid id:
-                ViewModel.SetTextOpacity(id, e.DoubleValue);
-                break;
-            case InspectorEditKind.SetTextAlignment when e.ItemId is Guid id:
-                ViewModel.SetTextAlignment(id, e.TextAlignment);
-                break;
-            case InspectorEditKind.SetTextHorizontalPosition when e.ItemId is Guid id:
-                ViewModel.SetTextHorizontalPosition(id, e.DoubleValue);
-                break;
-            case InspectorEditKind.SetTextVerticalPosition when e.ItemId is Guid id:
-                ViewModel.SetTextVerticalPosition(id, e.DoubleValue);
-                break;
-            case InspectorEditKind.MoveText when e.ItemId is Guid id:
-                ViewModel.MoveTextItem(id, e.LongValue);
-                break;
-            case InspectorEditKind.SetTextDuration when e.ItemId is Guid id:
-                ViewModel.SetTextDuration(id, e.LongValue);
-                break;
-            case InspectorEditKind.ResetTextStyle when e.ItemId is Guid id:
-                ViewModel.ResetTextStyle(id);
-                break;
+            switch (e.Kind)
+            {
+                case InspectorEditKind.SetAspectRatio:
+                    ViewModel.SetProjectAspectRatio(e.AspectRatio);
+                    break;
+                case InspectorEditKind.SetBackgroundColor when e.TextValue is not null:
+                    ViewModel.SetBackgroundColor(e.TextValue);
+                    break;
+                case InspectorEditKind.TrimVideoStart when e.ItemId is Guid id:
+                    ViewModel.TrimVideoStart(id, e.LongValue);
+                    break;
+                case InspectorEditKind.TrimVideoEnd when e.ItemId is Guid id:
+                    ViewModel.TrimVideoEnd(id, e.LongValue);
+                    break;
+                case InspectorEditKind.SetImageDuration when e.ItemId is Guid id:
+                    ViewModel.SetImageDuration(id, e.LongValue);
+                    break;
+                case InspectorEditKind.ResetImageDuration when e.ItemId is Guid id:
+                    ViewModel.ResetImageDuration(id);
+                    break;
+                case InspectorEditKind.SetVideoVolume when e.ItemId is Guid id:
+                    ViewModel.SetVideoVolume(id, e.DoubleValue);
+                    break;
+                case InspectorEditKind.SetVideoMuted when e.ItemId is Guid id:
+                    ViewModel.SetVideoMuted(id, e.BoolValue);
+                    break;
+                case InspectorEditKind.MoveAudio when e.ItemId is Guid id:
+                    ViewModel.MoveAudioItem(id, e.LongValue);
+                    break;
+                case InspectorEditKind.TrimAudioStart when e.ItemId is Guid id:
+                    ViewModel.TrimAudioStart(id, e.LongValue);
+                    break;
+                case InspectorEditKind.TrimAudioEnd when e.ItemId is Guid id:
+                    ViewModel.TrimAudioEnd(id, e.LongValue);
+                    break;
+                case InspectorEditKind.SetAudioVolume when e.ItemId is Guid id:
+                    ViewModel.SetAudioVolume(id, e.DoubleValue);
+                    break;
+                case InspectorEditKind.SetAudioMuted when e.ItemId is Guid id:
+                    ViewModel.SetAudioMuted(id, e.BoolValue);
+                    break;
+                case InspectorEditKind.SetTextContent when e.ItemId is Guid id && e.TextValue is not null:
+                    ViewModel.SetTextContent(id, e.TextValue);
+                    break;
+                case InspectorEditKind.SetTextFontFamily when e.ItemId is Guid id && e.TextValue is not null:
+                    ViewModel.SetTextFontFamily(id, e.TextValue);
+                    break;
+                case InspectorEditKind.SetTextFontSize when e.ItemId is Guid id:
+                    ViewModel.SetTextFontSize(id, e.DoubleValue);
+                    break;
+                case InspectorEditKind.SetTextFontWeight when e.ItemId is Guid id:
+                    ViewModel.SetTextFontWeight(id, checked((int)e.LongValue));
+                    break;
+                case InspectorEditKind.SetTextBold when e.ItemId is Guid id:
+                    ViewModel.SetTextBold(id, e.BoolValue);
+                    break;
+                case InspectorEditKind.SetTextItalic when e.ItemId is Guid id:
+                    ViewModel.SetTextItalic(id, e.BoolValue);
+                    break;
+                case InspectorEditKind.SetTextColor when e.ItemId is Guid id && e.TextValue is not null:
+                    ViewModel.SetTextColor(id, e.TextValue, background: false);
+                    break;
+                case InspectorEditKind.SetTextBackground when e.ItemId is Guid id && e.TextValue is not null:
+                    ViewModel.SetTextColor(id, e.TextValue, background: true);
+                    break;
+                case InspectorEditKind.SetTextBackgroundEnabled when e.ItemId is Guid id:
+                    ViewModel.SetTextBackgroundEnabled(id, e.BoolValue);
+                    break;
+                case InspectorEditKind.SetTextOpacity when e.ItemId is Guid id:
+                    ViewModel.SetTextOpacity(id, e.DoubleValue);
+                    break;
+                case InspectorEditKind.SetTextAlignment when e.ItemId is Guid id:
+                    ViewModel.SetTextAlignment(id, e.TextAlignment);
+                    break;
+                case InspectorEditKind.SetTextHorizontalPosition when e.ItemId is Guid id:
+                    ViewModel.SetTextHorizontalPosition(id, e.DoubleValue);
+                    break;
+                case InspectorEditKind.SetTextVerticalPosition when e.ItemId is Guid id:
+                    ViewModel.SetTextVerticalPosition(id, e.DoubleValue);
+                    break;
+                case InspectorEditKind.MoveText when e.ItemId is Guid id:
+                    ViewModel.MoveTextItem(id, e.LongValue);
+                    break;
+                case InspectorEditKind.SetTextDuration when e.ItemId is Guid id:
+                    ViewModel.SetTextDuration(id, e.LongValue);
+                    break;
+                case InspectorEditKind.ResetTextStyle when e.ItemId is Guid id:
+                    ViewModel.ResetTextStyle(id);
+                    break;
+            }
         }
+        finally
+        {
+            _committingInspector = null;
+        }
+
+        if (ViewModel.Revision == revision)
+        {
+            if (!ReferenceEquals(inspector, DesktopInspector)) DesktopInspector.SetProject(ViewModel.Project);
+            if (!ReferenceEquals(inspector, NarrowInspector)) NarrowInspector.SetProject(ViewModel.Project);
+        }
+
+        DispatcherQueue.TryEnqueue(() =>
+        {
+            if (!_disposed) inspector?.SetProject(ViewModel.Project);
+        });
     }
 
     private void Timeline_PlayheadChanged(object sender, PlayheadChangedEventArgs e)
@@ -899,7 +1019,7 @@ public sealed partial class EditorView : UserControl, IDisposable
         {
             await ImportFilesToTimelineAsync(e.Files, e.Track, e.PositionMilliseconds, e.RejectedItems);
         }
-        catch (OperationCanceledException)
+        catch (OperationCanceledException) when (_lifetimeToken.IsCancellationRequested)
         {
             // The editor was closed while the drop import was running.
         }
@@ -997,6 +1117,18 @@ public sealed partial class EditorView : UserControl, IDisposable
     private void Preview_PlaybackPositionChanged(object? sender, PlayheadChangedEventArgs e) =>
         ViewModel.Seek(e.PositionMilliseconds);
 
+    private void Preview_PlaybackFailed(object? sender, PreviewPlaybackFailedEventArgs e)
+    {
+        TryShowPreviewMessage(
+            CaptureInfoBarPublication(),
+            InfoBarSeverity.Error,
+            "Preview playback failed",
+            "Windows could not decode the preview. A source file may be damaged or require a codec that is not installed.");
+        _ = _logService.TryWriteAsync(
+            $"Preview playback failed: {e.Error}",
+            CancellationToken.None);
+    }
+
     private void Preview_TextPositionCommitted(object? sender, TextPositionCommittedEventArgs e)
     {
         if (Timeline.IsItemLocked(e.ItemId))
@@ -1075,6 +1207,25 @@ public sealed partial class EditorView : UserControl, IDisposable
         _timelineResizeStartHeight = TimelineHeight;
         e.Handled = true;
     }
+
+    private void TimelineResizeHandle_KeyDown(object sender, KeyRoutedEventArgs e)
+    {
+        var delta = TimelineResizeDelta(e.Key);
+        if (delta == 0)
+        {
+            return;
+        }
+
+        SetTimelineHeight(TimelineHeight + delta, notify: true);
+        e.Handled = true;
+    }
+
+    internal static double TimelineResizeDelta(VirtualKey key) => key switch
+    {
+        VirtualKey.Up => 20,
+        VirtualKey.Down => -20,
+        _ => 0
+    };
 
     private void TimelineResizeHandle_PointerMoved(object sender, PointerRoutedEventArgs e)
     {
@@ -1278,7 +1429,7 @@ public sealed partial class EditorView : UserControl, IDisposable
         {
             await ImportFilesAsync(e.Files, e.ResultSlots);
         }
-        catch (OperationCanceledException)
+        catch (OperationCanceledException) when (_lifetimeToken.IsCancellationRequested)
         {
             // The editor was closed while the drop import was running.
         }
@@ -1500,8 +1651,7 @@ public sealed partial class EditorView : UserControl, IDisposable
             case VirtualKey.Escape:
                 if (_isNarrow && _narrowInspectorVisible)
                 {
-                    _narrowInspectorVisible = false;
-                    ApplyInspectorLayout();
+                    DismissNarrowInspector();
                 }
                 else
                 {
@@ -1682,7 +1832,9 @@ public sealed partial class EditorView : UserControl, IDisposable
         }
     }
 
-    private void ShowImportResults(IReadOnlyList<ImportResult> results)
+    private void ShowImportResults(
+        IReadOnlyList<ImportResult> results,
+        InfoBarPublication? publication = null)
     {
         var imported = results.Count(result => result.IsSuccess);
         var issues = results.Where(result => !result.IsSuccess).ToList();
@@ -1694,31 +1846,112 @@ public sealed partial class EditorView : UserControl, IDisposable
                 details += $" {issues.Count - 3} more files were not imported.";
             }
 
-            ShowMessage(
+            ShowImportMessage(
+                publication,
                 issues.All(result => result.IsDuplicate) ? InfoBarSeverity.Informational : InfoBarSeverity.Error,
                 imported > 0 ? $"Imported {imported} file(s) with issues" : "No files were imported",
                 details);
         }
         else
         {
-            ShowMessage(InfoBarSeverity.Success, "Import complete", $"Imported {imported} file(s) into this project.");
+            ShowImportMessage(
+                publication,
+                InfoBarSeverity.Success,
+                "Import complete",
+                $"Imported {imported} file(s) into this project.");
+        }
+    }
+
+    private void ShowImportMessage(
+        InfoBarPublication? publication,
+        InfoBarSeverity severity,
+        string title,
+        string message)
+    {
+        if (publication is { } captured)
+        {
+            TryShowMessage(captured, severity, title, message);
+        }
+        else
+        {
+            ShowMessage(severity, title, message);
         }
     }
 
     private void ShowMessage(InfoBarSeverity severity, string title, string message)
     {
+        if (_disposed || _lifetimeToken.IsCancellationRequested)
+        {
+            return;
+        }
+
         _projectSaveFailureInfoBarIsCurrent = false;
         _previewInfoBarIsCurrent = false;
+        _infoBarRevision++;
+        _infoBarSeverity = severity;
         EditorInfoBar.Severity = severity;
         EditorInfoBar.Title = title;
         EditorInfoBar.Message = message;
         EditorInfoBar.IsOpen = true;
     }
 
-    private void ShowPreviewMessage(InfoBarSeverity severity, string title, string message)
+    internal InfoBarPublication CaptureInfoBarPublication() => new(_infoBarRevision);
+
+    internal void ReportError(InfoBarPublication publication, string title, string message) =>
+        TryShowMessage(publication, InfoBarSeverity.Error, title, message);
+
+    private bool TryShowMessage(
+        InfoBarPublication publication,
+        InfoBarSeverity severity,
+        string title,
+        string message)
     {
+        if (!CanPublishInfoBar(
+                _disposed,
+                _lifetimeToken.IsCancellationRequested,
+                _infoBarRevision,
+                _infoBarSeverity,
+                publication,
+                severity))
+        {
+            return false;
+        }
+
         ShowMessage(severity, title, message);
-        _previewInfoBarIsCurrent = true;
+        return true;
+    }
+
+    internal static bool CanPublishInfoBar(
+        bool disposed,
+        bool lifetimeCanceled,
+        long currentRevision,
+        InfoBarSeverity currentSeverity,
+        InfoBarPublication publication,
+        InfoBarSeverity proposedSeverity) =>
+        !disposed &&
+        !lifetimeCanceled &&
+        (publication.Revision == currentRevision || MessagePriority(proposedSeverity) > MessagePriority(currentSeverity));
+
+    private static int MessagePriority(InfoBarSeverity severity) => severity switch
+    {
+        InfoBarSeverity.Error => 4,
+        InfoBarSeverity.Warning => 3,
+        InfoBarSeverity.Informational => 2,
+        _ => 1
+    };
+
+    private bool TryShowPreviewMessage(
+        InfoBarPublication publication,
+        InfoBarSeverity severity,
+        string title,
+        string message)
+    {
+        if (TryShowMessage(publication, severity, title, message))
+        {
+            _previewInfoBarIsCurrent = true;
+            return true;
+        }
+        return false;
     }
 
     private void ClearPreviewMessage()
@@ -1732,10 +1965,12 @@ public sealed partial class EditorView : UserControl, IDisposable
         EditorInfoBar.IsOpen = false;
     }
 
-    private void ShowProjectSaveFailure(string message)
+    private void TryShowProjectSaveFailure(InfoBarPublication publication, string message)
     {
-        ShowMessage(InfoBarSeverity.Error, "Could not save project", message);
-        _projectSaveFailureInfoBarIsCurrent = true;
+        if (TryShowMessage(publication, InfoBarSeverity.Error, "Could not save project", message))
+        {
+            _projectSaveFailureInfoBarIsCurrent = true;
+        }
     }
 
     private void ClearProjectSaveFailure()
@@ -1772,7 +2007,7 @@ public sealed partial class EditorView : UserControl, IDisposable
         }
     }
 
-    private void CommitImportResults(IReadOnlyList<ImportResult> results)
+    private void CommitImportResults(IReadOnlyList<ImportResult> results, InfoBarPublication publication)
     {
         EnsureActive();
         results = MediaImportService.RevalidateDuplicateResults(ViewModel.Project, results);
@@ -1783,7 +2018,7 @@ public sealed partial class EditorView : UserControl, IDisposable
         }
 
         ToolPanel.RefreshAssets();
-        ShowImportResults(results);
+        ShowImportResults(results, publication);
     }
 
     private void EnsureActive()
@@ -1813,6 +2048,8 @@ public sealed partial class EditorView : UserControl, IDisposable
         }
     }
 }
+
+internal readonly record struct InfoBarPublication(long Revision);
 
 public sealed class WorkspaceSettingsChangedEventArgs(
     double timelineZoom,

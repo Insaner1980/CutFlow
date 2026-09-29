@@ -70,7 +70,7 @@ public sealed class ExportService
         CancellationToken cancellationToken) =>
         await ExportToPathAsync(
             project,
-            project,
+            () => project,
             destinationPath,
             options,
             progress,
@@ -78,14 +78,16 @@ public sealed class ExportService
 
     internal async Task<ExportResult> ExportToPathAsync(
         ProjectDocument project,
-        ProjectDocument sourceGuardProject,
+        Func<ProjectDocument> getSourceGuardProject,
         string destinationPath,
         ExportOptions options,
         IProgress<double> progress,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken,
+        object? sourceGuardLock = null,
+        EditorImportGate? sourcePreparationGate = null)
     {
         ArgumentNullException.ThrowIfNull(project);
-        ArgumentNullException.ThrowIfNull(sourceGuardProject);
+        ArgumentNullException.ThrowIfNull(getSourceGuardProject);
         ArgumentException.ThrowIfNullOrWhiteSpace(destinationPath);
         ArgumentNullException.ThrowIfNull(options);
         ArgumentNullException.ThrowIfNull(progress);
@@ -93,7 +95,7 @@ public sealed class ExportService
         project = CreateProjectSnapshot(project);
         destinationPath = Path.GetFullPath(destinationPath);
 
-        if (IsSourceMediaPath(project, sourceGuardProject, destinationPath))
+        if (IsSourceMediaPath(project, getSourceGuardProject(), destinationPath))
         {
             return SourceMediaConflict(destinationPath);
         }
@@ -134,25 +136,26 @@ public sealed class ExportService
             return new ExportResult(ExportResultStatus.Failed, destinationPath, message);
         }
 
-        if (IsSourceMediaPath(project, sourceGuardProject, destinationPath))
+        if (IsSourceMediaPath(project, getSourceGuardProject(), destinationPath))
         {
             return SourceMediaConflict(destinationPath);
         }
 
         var directoryPath = Path.GetDirectoryName(destinationPath)
             ?? throw new InvalidOperationException("The export destination folder is unavailable.");
-        var folder = await StorageFolder.GetFolderFromPathAsync(directoryPath);
         cancellationToken.ThrowIfCancellationRequested();
         string? stagingPath = null;
+        FileStream? stagingReservation = null;
         try
         {
             var stagingFileName = CreateSafeStagingFileName(
                 project,
-                sourceGuardProject,
+                getSourceGuardProject,
                 destinationPath,
                 directoryPath);
-            var staging = await folder.CreateFileAsync(stagingFileName, CreationCollisionOption.FailIfExists);
-            stagingPath = Path.GetFullPath(staging.Path);
+            var staging = await CreateReservedStagingFileAsync(directoryPath, stagingFileName, cancellationToken);
+            stagingPath = Path.GetFullPath(staging.File.Path);
+            stagingReservation = staging.Reservation;
             cancellationToken.ThrowIfCancellationRequested();
             var finalValidation = await ExportPreflight.ValidateAsync(
                 project,
@@ -166,7 +169,7 @@ public sealed class ExportService
                     finalValidation.ErrorMessage);
             }
 
-            var failure = await _renderAsync(build.Composition, staging, profile, progress, cancellationToken);
+            var failure = await _renderAsync(build.Composition, staging.File, profile, progress, cancellationToken);
             cancellationToken.ThrowIfCancellationRequested();
             if (failure != TranscodeFailureReason.None)
             {
@@ -176,18 +179,40 @@ public sealed class ExportService
                     ExportFailureMapper.GetMessage(failure) ?? "Export failed.");
             }
 
-            if (IsSourceMediaPath(project, sourceGuardProject, destinationPath))
+            if (IsSourceMediaPath(project, getSourceGuardProject(), destinationPath))
             {
                 return SourceMediaConflict(destinationPath);
             }
 
-            await CommitAsync(stagingPath, destinationPath);
+            cancellationToken.ThrowIfCancellationRequested();
+            stagingReservation.Dispose();
+            stagingReservation = null;
+            Task<bool> CommitPreparedAsync(CancellationToken token)
+            {
+                token.ThrowIfCancellationRequested();
+                return CommitAsync(
+                    stagingPath,
+                    destinationPath,
+                    canCommit: () => !IsSourceMediaPath(project, getSourceGuardProject(), destinationPath),
+                    sourceGuardLock: sourceGuardLock,
+                    cancellationToken: token);
+            }
+
+            // Finish any in-flight import/relink before checking and replacing its potential source.
+            var committed = sourcePreparationGate is null
+                ? await CommitPreparedAsync(cancellationToken)
+                : await sourcePreparationGate.ExecuteAsync(CommitPreparedAsync, cancellationToken);
+            if (!committed)
+            {
+                return SourceMediaConflict(destinationPath);
+            }
             stagingPath = null;
             progress.Report(100);
             return new ExportResult(ExportResultStatus.Success, destinationPath, string.Empty);
         }
         finally
         {
+            stagingReservation?.Dispose();
             if (stagingPath is not null)
             {
                 await CleanupStagingAsync(stagingPath);
@@ -197,7 +222,7 @@ public sealed class ExportService
 
     private static string CreateSafeStagingFileName(
         ProjectDocument project,
-        ProjectDocument sourceGuardProject,
+        Func<ProjectDocument> getSourceGuardProject,
         string destinationPath,
         string directoryPath)
     {
@@ -208,10 +233,53 @@ public sealed class ExportService
         }
         while (IsSourceMediaPath(
             project,
-            sourceGuardProject,
+            getSourceGuardProject(),
             Path.Combine(directoryPath, stagingFileName)));
 
         return stagingFileName;
+    }
+
+    internal static async Task<(StorageFile File, FileStream Reservation)> CreateReservedStagingFileAsync(
+        string directoryPath,
+        string fileName,
+        CancellationToken cancellationToken)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+        var path = Path.Combine(directoryPath, fileName);
+        FileStream? reservation = null;
+        await using var creation = new FileStream(
+            path,
+            FileMode.CreateNew,
+            FileAccess.ReadWrite,
+            FileShare.ReadWrite,
+            bufferSize: 1,
+            FileOptions.Asynchronous);
+        try
+        {
+            reservation = new FileStream(
+                path,
+                FileMode.Open,
+                FileAccess.Read,
+                FileShare.ReadWrite,
+                bufferSize: 1,
+                FileOptions.Asynchronous);
+            var file = await StorageFile.GetFileFromPathAsync(path).AsTask(cancellationToken);
+            return (file, reservation);
+        }
+        catch
+        {
+            reservation?.Dispose();
+            await creation.DisposeAsync();
+            try
+            {
+                File.Delete(path);
+            }
+            catch (Exception cleanupException) when (cleanupException is IOException or UnauthorizedAccessException)
+            {
+                // Preserve the original lookup failure or cancellation.
+            }
+            throw;
+        }
     }
 
     private async Task CleanupStagingAsync(string stagingPath)
@@ -254,11 +322,24 @@ public sealed class ExportService
         return $"{baseName}.cutflow-{operationId:N}.mp4";
     }
 
-    internal static Task CommitAsync(
+    internal static Task<bool> CommitAsync(
         string stagingPath,
         string destinationPath,
-        Action<string, string>? move = null) =>
-        Task.Run(() => (move ?? MoveStagingFile)(stagingPath, destinationPath));
+        Action<string, string>? move = null,
+        Func<bool>? canCommit = null,
+        object? sourceGuardLock = null,
+        CancellationToken cancellationToken = default) =>
+        Task.Run(() =>
+        {
+            // The editor uses the same gate for import, relink, undo and other project edits.
+            lock (sourceGuardLock ?? new object())
+            {
+                if (canCommit is not null && !canCommit()) return false;
+                cancellationToken.ThrowIfCancellationRequested();
+                (move ?? MoveStagingFile)(stagingPath, destinationPath);
+                return true;
+            }
+        });
 
     private static void MoveStagingFile(string stagingPath, string destinationPath) =>
         File.Move(stagingPath, destinationPath, overwrite: true);
@@ -330,7 +411,6 @@ public static class ExportPreflight
 {
     private const int MaximumReportedMissingAssets = 3;
     private const int MaximumMissingAssetNameLength = 96;
-    private const int MaximumMissingAssetPathLength = 120;
 
     public static ExportPreflightResult Validate(ProjectDocument project)
     {
@@ -436,22 +516,12 @@ public static class ExportPreflight
 
     private static List<string> FormatMissingAssets(List<(Guid Id, ProjectAsset? Asset, string Name)> missingAssets)
     {
-        var sharedNames = missingAssets
+        return missingAssets
             .GroupBy(item => item.Name, StringComparer.OrdinalIgnoreCase)
-            .Where(group => group.Count() > 1)
-            .Select(group => group.Key)
-            .ToHashSet(StringComparer.OrdinalIgnoreCase);
-        var missing = new List<string>();
-        var missingNames = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-        foreach (var item in missingAssets)
-        {
-            var name = sharedNames.Contains(item.Name) && item.Asset is not null
-                ? $"{item.Name} ({MissingAssetPath(item.Asset, item.Id)})"
-                : item.Name;
-            if (missingNames.Add(name)) missing.Add(name);
-        }
-
-        return missing;
+            .Select(group => group.Count() == 1
+                ? group.First().Name
+                : $"{group.First().Name} ({group.Count()} missing items)")
+            .ToList();
     }
 
     private static string MissingAssetName(ProjectAsset? asset, Guid assetId)
@@ -459,20 +529,10 @@ public static class ExportPreflight
         var name = asset?.FileName;
         if (string.IsNullOrWhiteSpace(name))
         {
-            return $"Unknown asset {assetId:D}";
+            return "Unknown project media";
         }
 
         return TruncateEnd(NormalizeDisplayText(name), MaximumMissingAssetNameLength);
-    }
-
-    private static string MissingAssetPath(ProjectAsset asset, Guid assetId)
-    {
-        if (string.IsNullOrWhiteSpace(asset.SourcePath))
-        {
-            return $"asset {assetId:D}";
-        }
-
-        return TruncateMiddle(NormalizeDisplayText(asset.SourcePath), MaximumMissingAssetPathLength);
     }
 
     private static string MissingMediaMessage(List<string> missing)
@@ -502,25 +562,6 @@ public static class ExportPreflight
         return value[..length].TrimEnd();
     }
 
-    private static string TruncateMiddle(string value, int maximumLength)
-    {
-        if (value.Length <= maximumLength) return value;
-
-        var prefixLength = (maximumLength - 1) / 2;
-        if (char.IsHighSurrogate(value[prefixLength - 1]) && char.IsLowSurrogate(value[prefixLength]))
-        {
-            prefixLength--;
-        }
-
-        var suffixLength = maximumLength - prefixLength - 1;
-        var suffixStart = value.Length - suffixLength;
-        if (char.IsLowSurrogate(value[suffixStart]) && char.IsHighSurrogate(value[suffixStart - 1]))
-        {
-            suffixStart++;
-        }
-
-        return $"{value[..prefixLength]}…{value[suffixStart..]}";
-    }
 }
 
 public sealed record ExportPreflightResult(

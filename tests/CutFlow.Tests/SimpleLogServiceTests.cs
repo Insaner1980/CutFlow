@@ -44,21 +44,39 @@ public sealed partial class SimpleLogServiceTests
     }
 
     [TestMethod]
-    public async Task WriteAsync_FromTwoServiceInstances_KeepsBoundedCoherentFile()
+    public async Task WriteAsync_FromTwoServiceInstances_WaitsForSharedLockAndPreservesBothEntries()
     {
         using var directory = new TemporaryDirectory();
         var first = new SimpleLogService(directory.Path);
         var second = new SimpleLogService(directory.Path);
-        var writes = Enumerable.Range(0, 300)
-            .Select(index => (index % 2 == 0 ? first : second).WriteAsync($"entry-{index:D3}", TestContext.CancellationToken));
+        using var processWriteBlocker = new Semaphore(1, 1, first.ProcessWriteLockName);
+        Assert.IsTrue(processWriteBlocker.WaitOne(0));
 
-        await Task.WhenAll(writes);
+        var firstWrite = first.WriteAsync("first entry", TestContext.CancellationToken);
+        var secondWrite = second.WriteAsync("second entry", TestContext.CancellationToken);
 
-        var lines = await File.ReadAllLinesAsync(directory.LogPath, TestContext.CancellationToken);
-        Assert.HasCount(200, lines);
-        Assert.HasCount(200, lines.Distinct(StringComparer.Ordinal));
-        Assert.IsTrue(lines.All(
-            line => TryReadEntry(line, out var message) && message.StartsWith("entry-", StringComparison.Ordinal)));
+        try
+        {
+            Assert.IsFalse(firstWrite.IsCompleted);
+            Assert.IsFalse(secondWrite.IsCompleted);
+        }
+        finally
+        {
+            processWriteBlocker.Release();
+        }
+
+        await Task.WhenAll(firstWrite, secondWrite);
+
+        var messages = (await File.ReadAllLinesAsync(directory.LogPath, TestContext.CancellationToken))
+            .Select(line =>
+            {
+                Assert.IsTrue(TryReadEntry(line, out var message));
+                return message;
+            })
+            .ToArray();
+        Assert.HasCount(2, messages);
+        Assert.Contains("first entry", messages);
+        Assert.Contains("second entry", messages);
         Assert.HasCount(0, Directory.EnumerateFiles(directory.Path, "*.tmp").ToArray());
     }
 
@@ -67,11 +85,8 @@ public sealed partial class SimpleLogServiceTests
     {
         using var directory = new TemporaryDirectory();
         var log = new SimpleLogService(directory.Path);
-        var lockName = (string)typeof(SimpleLogService)
-            .GetField("_processWriteLockName", System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic)!
-            .GetValue(log)!;
 
-        using (var conflictingHandle = new EventWaitHandle(false, EventResetMode.ManualReset, lockName))
+        using (var conflictingHandle = new EventWaitHandle(false, EventResetMode.ManualReset, log.ProcessWriteLockName))
         {
             await Assert.ThrowsExactlyAsync<WaitHandleCannotBeOpenedException>(() => log.WriteAsync("blocked entry", TestContext.CancellationToken));
         }

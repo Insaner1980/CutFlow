@@ -1,7 +1,7 @@
 dotnet format
 Root: C:\Dev\CutFlow
 Command: dotnet format CutFlow.slnx --verify-no-changes --verbosity diagnostic
-Started: 2026-08-17 14.50.40
+Started: 2026-08-19 09.14.37
 
 The dotnet runtime version is '10.0.11'.
 Formatting code files in workspace 'C:\Dev\CutFlow\CutFlow.slnx'.
@@ -13,22 +13,22 @@ Project CutFlow is using configuration from 'C:\Program Files\dotnet\sdk\10.0.30
 Project CutFlow.Tests is using configuration from 'C:\Users\EmmaH\.nuget\packages\mstest.analyzers\4.3.3\globalconfigs\mstest-default.globalconfig'.
 Project CutFlow.Tests is using configuration from 'C:\Dev\CutFlow\tests\CutFlow.Tests\obj\x64\Debug\net10.0-windows10.0.26100.0\CutFlow.Tests.GeneratedMSBuildEditorConfig.editorconfig'.
 Project CutFlow.Tests is using configuration from 'C:\Program Files\dotnet\sdk\10.0.302\Sdks\Microsoft.NET.Sdk\analyzers\build\config\analysislevel_10_default.globalconfig'.
-Complete in 5212ms.
+Complete in 8820ms.
 Determining formattable files.
-Complete in 881ms.
+Complete in 3454ms.
 Running formatters.
 Running Code Style analysis.
 Determining diagnostics...
 Running 5 analyzers on CutFlow.
 Running 5 analyzers on CutFlow.Tests.
-Complete in 9079ms.
-Analysis complete in 9079ms.
+Complete in 10399ms.
+Analysis complete in 10399ms.
 Running Analyzer Reference analysis.
 Determining diagnostics...
 Running 155 analyzers on CutFlow.
 Running 197 analyzers on CutFlow.Tests.
-Complete in 1853ms.
-Analysis complete in 1853ms.
-Complete in 12234ms.
-Formatted 0 of 121 files.
-Format complete in 18327ms.
+Complete in 2209ms.
+Analysis complete in 2209ms.
+Complete in 13667ms.
+Formatted 0 of 129 files.
+Format complete in 25941ms.

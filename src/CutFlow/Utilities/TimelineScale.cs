@@ -40,6 +40,23 @@ public sealed class TimelineScale
             Math.Max(minimumVisualWidth, hitWidth - margin));
     }
 
+    public bool IsCardVisible(
+        TimelineItemBounds bounds,
+        double rangeStart,
+        double rangeEnd,
+        double minimumVisualWidth,
+        double margin)
+    {
+        if (!double.IsFinite(rangeStart) || !double.IsFinite(rangeEnd) || rangeEnd < rangeStart)
+        {
+            return false;
+        }
+
+        var geometry = GetCardGeometry(bounds, minimumVisualWidth, margin);
+        var cardRight = Math.Max(geometry.HitRight, geometry.VisualLeft + geometry.VisualWidth);
+        return cardRight >= rangeStart && geometry.HitLeft <= rangeEnd;
+    }
+
     public long PixelsToTime(double pixels)
     {
         if (double.IsNaN(pixels) || pixels <= 0)

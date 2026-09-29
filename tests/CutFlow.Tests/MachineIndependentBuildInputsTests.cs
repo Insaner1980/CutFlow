@@ -42,6 +42,31 @@ public sealed class MachineIndependentBuildInputsTests
         }
     }
 
+    [TestMethod]
+    public void NativeTests_HaveBoundedExecution()
+    {
+        var repositoryRoot = FindRepositoryRoot();
+        var testProject = XDocument.Load(Path.Combine(
+            repositoryRoot,
+            "tests",
+            "CutFlow.Tests",
+            "CutFlow.Tests.csproj"));
+        var runSettingsPath = testProject
+            .Root!
+            .Elements("PropertyGroup")
+            .Elements("RunSettingsFilePath")
+            .Single()
+            .Value
+            .Replace("$(MSBuildThisFileDirectory)", string.Empty, StringComparison.Ordinal);
+        var runSettings = XDocument.Load(Path.Combine(
+            repositoryRoot,
+            "tests",
+            "CutFlow.Tests",
+            runSettingsPath));
+
+        Assert.AreEqual("60000", runSettings.Root?.Element("MSTest")?.Element("TestTimeout")?.Value);
+    }
+
     private static string FindRepositoryRoot()
     {
         for (var directory = new DirectoryInfo(AppContext.BaseDirectory); directory is not null; directory = directory.Parent)

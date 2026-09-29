@@ -24,7 +24,9 @@ public sealed partial class TimelineControl : UserControl
     private const double MinimumClipVisualWidth = 18;
     private const double TrimHitWidth = 8;
     private const double ContentEndPadding = 48;
+    private const double ClipViewportBuffer = 1;
     private ProjectDocument? _project;
+    private Guid? _keyboardClipTarget;
     private EditorSelection _selection = EditorSelection.None;
     private EditorSelection _selectionBeforePointerPress = EditorSelection.None;
     private TimelineScale _scale = new(80);
@@ -48,6 +50,8 @@ public sealed partial class TimelineControl : UserControl
     private ClipTag? _dragTag;
     private long _previewValue;
     private int _previewIndex;
+    private double _renderedClipWindowStart = double.NaN;
+    private double _renderedClipWindowEnd = double.NaN;
 
     public TimelineControl()
     {
@@ -204,6 +208,7 @@ public sealed partial class TimelineControl : UserControl
 
     private void RenderClips()
     {
+        var restoreClipFocus = XamlRoot is not null && FocusManager.GetFocusedElement(XamlRoot) is FrameworkElement { Tag: ClipTag };
         CancelPointerInteraction();
         var thumbnailToken = RestartThumbnailWork();
         var thumbnailGeneration = ++_thumbnailRenderGeneration;
@@ -212,13 +217,23 @@ public sealed partial class TimelineControl : UserControl
         AudioCanvas.Children.Clear();
         if (_project is null)
         {
+            _renderedClipWindowStart = double.NaN;
+            _renderedClipWindowEnd = double.NaN;
             return;
         }
 
+        var viewportWidth = Math.Max(1, TimelineScroller.ViewportWidth);
+        _renderedClipWindowStart = Math.Max(0, TimelineScroller.HorizontalOffset - viewportWidth * ClipViewportBuffer);
+        _renderedClipWindowEnd = TimelineScroller.HorizontalOffset + viewportWidth * (1 + ClipViewportBuffer);
         var assets = _project.Assets.ToDictionary(asset => asset.Id);
+        var videoItems = _project.VideoItems.ToDictionary(item => item.Id);
         foreach (var bound in _videoBounds)
         {
-            var item = _project.VideoItems.First(candidate => candidate.Id == bound.ItemId);
+            if (!IsClipVisible(bound) || !videoItems.TryGetValue(bound.ItemId, out var item))
+            {
+                continue;
+            }
+
             assets.TryGetValue(item.AssetId, out var asset);
             AddClip(VideoCanvas, CreateVideoCard(item, asset, bound, thumbnailGeneration, thumbnailToken), bound);
         }
@@ -226,6 +241,11 @@ public sealed partial class TimelineControl : UserControl
         foreach (var item in _project.TextItems)
         {
             var bound = new TimelineItemBounds(item.Id, EditorSelectionKind.TextItem, Math.Max(0, item.StartMilliseconds), Math.Max(0, item.DurationMilliseconds));
+            if (!IsClipVisible(bound))
+            {
+                continue;
+            }
+
             AddClip(TextCanvas, CreateTextCard(item, bound), bound);
         }
 
@@ -233,8 +253,32 @@ public sealed partial class TimelineControl : UserControl
         {
             assets.TryGetValue(item.AssetId, out var asset);
             var bound = new TimelineItemBounds(item.Id, EditorSelectionKind.AudioItem, Math.Max(0, item.StartMilliseconds), Math.Max(0, item.DurationMilliseconds));
+            if (!IsClipVisible(bound))
+            {
+                continue;
+            }
+
             AddClip(AudioCanvas, CreateAudioCard(item, asset, bound), bound);
         }
+
+        if (restoreClipFocus && _keyboardClipTarget is { } focusedId) RestoreTimelineCardFocus(focusedId);
+    }
+
+    private bool IsClipVisible(TimelineItemBounds bound) =>
+        bound.ItemId == _keyboardClipTarget || _scale.IsCardVisible(
+            bound,
+            _renderedClipWindowStart,
+            _renderedClipWindowEnd,
+            MinimumClipVisualWidth,
+            ClipMargin);
+
+    private bool ClipWindowContainsViewport()
+    {
+        var viewportStart = TimelineScroller.HorizontalOffset;
+        var viewportEnd = viewportStart + Math.Max(1, TimelineScroller.ViewportWidth);
+        return double.IsFinite(_renderedClipWindowStart) &&
+            _renderedClipWindowStart <= viewportStart &&
+            _renderedClipWindowEnd >= viewportEnd;
     }
 
     private Border CreateVideoCard(
@@ -252,14 +296,14 @@ public sealed partial class TimelineControl : UserControl
         var title = asset?.FileName ?? "Unknown media";
         var content = CreateCardContent(title, badges, bound.DurationMilliseconds, null);
         _ = LoadThumbnailSafelyAsync(asset, content, thumbnailGeneration, thumbnailToken);
-        return CreateCard(content, new ClipTag(bound, asset, item.SourceInMilliseconds, item.SourceOutMilliseconds, isImage));
+        return CreateCard(content, new ClipTag(bound, asset, title, item.SourceInMilliseconds, item.SourceOutMilliseconds, isImage));
     }
 
     private Border CreateTextCard(TextTimelineItem item, TimelineItemBounds bound)
     {
         var title = string.IsNullOrWhiteSpace(item.Text) ? "Empty text" : TimelineCardText.ToSingleLine(item.Text);
         var content = CreateCardContent(title, ["TEXT"], bound.DurationMilliseconds, null);
-        return CreateCard(content, new ClipTag(bound, null, 0, 0, false));
+        return CreateCard(content, new ClipTag(bound, null, title, 0, 0, false));
     }
 
     private Border CreateAudioCard(AudioTimelineItem item, ProjectAsset? asset, TimelineItemBounds bound)
@@ -268,7 +312,7 @@ public sealed partial class TimelineControl : UserControl
         if (asset?.IsMissing == true) badges.Add("MISSING");
         if (item.IsMuted) badges.Add("MUTED");
         var content = CreateCardContent(asset?.FileName ?? "Unknown audio", badges, bound.DurationMilliseconds, null);
-        return CreateCard(content, new ClipTag(bound, asset, item.SourceInMilliseconds, item.SourceOutMilliseconds, false));
+        return CreateCard(content, new ClipTag(bound, asset, asset?.FileName ?? "Unknown audio", item.SourceInMilliseconds, item.SourceOutMilliseconds, false));
     }
 
     private static Grid CreateCardContent(string title, IReadOnlyList<string> badges, long durationMilliseconds, ImageSource? thumbnail)
@@ -323,7 +367,7 @@ public sealed partial class TimelineControl : UserControl
             Child = content,
             Opacity = canEdit ? 1 : 0.68
         };
-        AutomationProperties.SetName(card, $"{tag.Bounds.Kind} clip");
+        AutomationProperties.SetName(card, TimelineContextCommands.TargetName(tag.Bounds, tag.Title));
         return card;
     }
 
@@ -342,10 +386,26 @@ public sealed partial class TimelineControl : UserControl
     private MenuFlyout CreateContextMenu(Guid itemId, EditorSelectionKind kind)
     {
         var menu = new MenuFlyout();
+        var targetName = TimelineContextCommands.TargetName(_project, itemId, kind);
+        MenuFlyoutItem? moveEarlier = null;
+        MenuFlyoutItem? moveLater = null;
+        if (kind == EditorSelectionKind.VideoItem)
+        {
+            moveEarlier = new MenuFlyoutItem { Text = "Move earlier" };
+            AutomationProperties.SetName(moveEarlier, $"Move {targetName} earlier");
+            moveEarlier.Click += (_, _) => ReorderVideoBy(itemId, -1);
+            menu.Items.Add(moveEarlier);
+            moveLater = new MenuFlyoutItem { Text = "Move later" };
+            AutomationProperties.SetName(moveLater, $"Move {targetName} later");
+            moveLater.Click += (_, _) => ReorderVideoBy(itemId, 1);
+            menu.Items.Add(moveLater);
+        }
+
         MenuFlyoutItem? split = null;
         if (kind == EditorSelectionKind.VideoItem)
         {
             split = new MenuFlyoutItem { Text = "Split" };
+            AutomationProperties.SetName(split, $"Split {targetName}");
             split.Click += (_, _) => RaiseEdit(new TimelineEditRequestedEventArgs(TimelineEditKind.SplitVideo, itemId, _playheadMilliseconds));
             menu.Items.Add(split);
         }
@@ -354,31 +414,82 @@ public sealed partial class TimelineControl : UserControl
         if (TimelineContextCommands.SupportsDuplicate(kind))
         {
             duplicate = new MenuFlyoutItem { Text = "Duplicate" };
+            AutomationProperties.SetName(duplicate, $"Duplicate {targetName}");
             duplicate.Click += (_, _) => RaiseEdit(new TimelineEditRequestedEventArgs(TimelineEditKind.Duplicate, itemId));
             menu.Items.Add(duplicate);
         }
 
         var delete = new MenuFlyoutItem { Text = "Delete" };
+        AutomationProperties.SetName(delete, $"Delete {targetName}");
         delete.Click += (_, _) => RaiseEdit(new TimelineEditRequestedEventArgs(TimelineEditKind.Delete, itemId));
         menu.Items.Add(delete);
         MenuFlyoutItem? show = null;
         if (kind is EditorSelectionKind.VideoItem or EditorSelectionKind.AudioItem)
         {
             show = new MenuFlyoutItem { Text = "Show source file" };
+            AutomationProperties.SetName(show, $"Show source file for {targetName}");
             show.Click += (_, _) => RaiseEdit(new TimelineEditRequestedEventArgs(TimelineEditKind.ShowSourceFile, itemId));
             menu.Items.Add(show);
         }
 
+        var restoreFocus = false;
         menu.Opening += (_, _) =>
         {
+            restoreFocus = ReferenceEquals(FocusManager.GetFocusedElement(XamlRoot), menu.Target);
             var state = TimelineContextCommands.Resolve(_project, itemId, _trackLocks, _playheadMilliseconds);
+            if (moveEarlier is not null) moveEarlier.IsEnabled = state.CanMoveEarlier;
+            if (moveLater is not null) moveLater.IsEnabled = state.CanMoveLater;
             if (split is not null) split.IsEnabled = state.CanSplit;
             if (duplicate is not null) duplicate.IsEnabled = state.CanDuplicate;
             delete.IsEnabled = state.CanDelete;
             if (show is not null) show.IsEnabled = state.CanShowSourceFile;
+            SetDisabledHelpText(moveEarlier, state.CanMoveEarlier, state.IsLocked ? "Unlock the V1 track to move this clip." : "This is already the first V1 clip.");
+            SetDisabledHelpText(moveLater, state.CanMoveLater, state.IsLocked ? "Unlock the V1 track to move this clip." : "This is already the last V1 clip.");
+            SetDisabledHelpText(split, state.CanSplit, state.IsLocked ? "Unlock the V1 track to split this clip." : "Move the playhead at least 100 milliseconds from both clip edges.");
+            SetDisabledHelpText(duplicate, state.CanDuplicate, "Unlock this track to duplicate the clip.");
+            SetDisabledHelpText(delete, state.CanDelete, "Unlock this track to delete the clip.");
+            SetDisabledHelpText(show, state.CanShowSourceFile, "This clip has no available source file.");
+        };
+        menu.Closed += (_, _) =>
+        {
+            if (restoreFocus)
+            {
+                DispatcherQueue.TryEnqueue(() => RestoreTimelineCardFocus(itemId));
+            }
         };
 
         return menu;
+    }
+
+    private static void SetDisabledHelpText(MenuFlyoutItem? item, bool isEnabled, string disabledHelpText)
+    {
+        if (item is not null)
+        {
+            AutomationProperties.SetHelpText(item, isEnabled ? string.Empty : disabledHelpText);
+            ToolTipService.SetToolTip(item, isEnabled ? null : disabledHelpText);
+        }
+    }
+
+    private void RestoreTimelineCardFocus(Guid itemId)
+    {
+        var target = VideoCanvas.Children
+            .Concat(TextCanvas.Children)
+            .Concat(AudioCanvas.Children)
+            .OfType<ContentControl>()
+            .FirstOrDefault(candidate => candidate.Tag is ClipTag tag && tag.Bounds.ItemId == itemId);
+        if (target?.Focus(FocusState.Programmatic) != true)
+        {
+            SelectionToolButton.Focus(FocusState.Programmatic);
+        }
+    }
+
+    private void ReorderVideoBy(Guid itemId, int offset)
+    {
+        var index = _project?.VideoItems.FindIndex(item => item.Id == itemId) ?? -1;
+        if (index >= 0)
+        {
+            RaiseEdit(new TimelineEditRequestedEventArgs(TimelineEditKind.ReorderVideo, itemId, intValue: index + offset));
+        }
     }
 
     private void AddClip(Canvas canvas, Border card, TimelineItemBounds bound)
@@ -405,11 +516,14 @@ public sealed partial class TimelineControl : UserControl
         card.IsHitTestVisible = false;
         if (card.Tag is ClipTag clipTag)
         {
-            AutomationProperties.SetName(hitTarget, $"{clipTag.Bounds.Kind} clip");
-            ToolTipService.SetToolTip(hitTarget, clipTag.Asset?.SourcePath ?? "Text item");
+            var accessibleName = TimelineContextCommands.TargetName(clipTag.Bounds, clipTag.Title);
+            AutomationProperties.SetName(hitTarget, accessibleName);
+            AutomationProperties.SetItemStatus(hitTarget, IsSelected(bound) ? "Selected" : string.Empty);
+            ToolTipService.SetToolTip(hitTarget, accessibleName);
         }
 
         hitTarget.GotFocus += Clip_GotFocus;
+        hitTarget.KeyDown += Clip_KeyDown;
         hitTarget.PointerPressed += Clip_PointerPressed;
         hitTarget.PointerMoved += Drag_PointerMoved;
         hitTarget.PointerReleased += Drag_PointerReleased;
@@ -421,6 +535,20 @@ public sealed partial class TimelineControl : UserControl
         canvas.Children.Add(hitTarget);
     }
 
+    private void Clip_KeyDown(object sender, KeyRoutedEventArgs e)
+    {
+        if (e.Key != VirtualKey.Tab || _project is null || sender is not FrameworkElement { Tag: ClipTag tag }) return;
+        var backwards = (InputKeyboardSource.GetKeyStateForCurrentThread(VirtualKey.Shift) & CoreVirtualKeyStates.Down) != 0;
+        if (TimelineLayoutProjection.GetAdjacentClip(_project, tag.Bounds.ItemId, backwards) is not { } target) return;
+
+        e.Handled = true;
+        _keyboardClipTarget = target.ItemId;
+        RenderClips();
+        RestoreTimelineCardFocus(target.ItemId);
+        var focused = FocusManager.GetFocusedElement(XamlRoot) as FrameworkElement;
+        focused?.StartBringIntoView(new BringIntoViewOptions { AnimationDesired = false });
+    }
+
     private void Clip_GotFocus(object sender, RoutedEventArgs e)
     {
         if (sender is not FrameworkElement { Tag: ClipTag tag })
@@ -428,6 +556,7 @@ public sealed partial class TimelineControl : UserControl
             return;
         }
 
+        _keyboardClipTarget = tag.Bounds.ItemId;
         var selection = new EditorSelection(tag.Bounds.Kind, tag.Bounds.ItemId);
         if (_selection == selection)
         {
@@ -797,6 +926,7 @@ public sealed partial class TimelineControl : UserControl
         card.BorderThickness = new Thickness(selected ? 2 : 1);
         card.Background = Brush(selected ? "SurfaceHoverBrush" : "SurfaceElevatedBrush");
         card.Opacity = canEdit ? 1 : 0.68;
+        AutomationProperties.SetItemStatus(hitTarget, selected ? "Selected" : string.Empty);
         if (card.Child is not Grid content)
         {
             return;
@@ -844,6 +974,24 @@ public sealed partial class TimelineControl : UserControl
         SplitButton.IsEnabled = _selection is { Kind: EditorSelectionKind.VideoItem, ItemId: Guid id } &&
             selectionCanEdit &&
             _videoBounds.FirstOrDefault(bound => bound.ItemId == id) is var bound && bound.ItemId != Guid.Empty && CanSplit(bound);
+        var deleteHelpText = DeleteButton.IsEnabled
+            ? string.Empty
+            : _selection.ItemId is null
+                ? "Select a timeline clip to delete."
+                : selectionCanEdit
+                    ? "The selected timeline item cannot be deleted."
+                    : "Unlock the selected track to delete its clip.";
+        var splitHelpText = SplitButton.IsEnabled
+            ? string.Empty
+            : _selection.Kind != EditorSelectionKind.VideoItem
+                ? "Select a V1 video clip to split."
+                : !selectionCanEdit
+                    ? "Unlock the V1 track to split its clip."
+                    : "Move the playhead at least 100 milliseconds from both clip edges.";
+        AutomationProperties.SetHelpText(DeleteButton, deleteHelpText);
+        AutomationProperties.SetHelpText(SplitButton, splitHelpText);
+        ToolTipService.SetToolTip(DeleteButton, DeleteButton.IsEnabled ? "Delete selected item" : deleteHelpText);
+        ToolTipService.SetToolTip(SplitButton, SplitButton.IsEnabled ? "Split at playhead (Ctrl+B)" : splitHelpText);
     }
 
     private bool CanSplit(TimelineItemBounds bound) =>
@@ -1028,12 +1176,20 @@ public sealed partial class TimelineControl : UserControl
         e.Handled = true;
     }
 
-    private void TimelineScroller_ViewChanged(object sender, ScrollViewerViewChangedEventArgs e) => RenderRuler();
+    private void TimelineScroller_ViewChanged(object sender, ScrollViewerViewChangedEventArgs e)
+    {
+        RenderRuler();
+        if (_dragOperation == TimelineDragOperation.None && !ClipWindowContainsViewport())
+        {
+            RenderClips();
+        }
+    }
 
     private void TimelineScroller_SizeChanged(object sender, SizeChangedEventArgs e)
     {
         UpdateContentWidth();
         RenderRuler();
+        RenderClips();
     }
 
     private void TimelineContent_DragOver(object sender, DragEventArgs e)
@@ -1084,7 +1240,7 @@ public sealed partial class TimelineControl : UserControl
 
             await DropStorageItemsAsync(e, track, position, lifetimeToken);
         }
-        catch (OperationCanceledException)
+        catch (OperationCanceledException) when (lifetimeToken.IsCancellationRequested)
         {
             // The timeline lifetime ended while the drop was being read.
         }
@@ -1351,7 +1507,7 @@ public sealed partial class TimelineControl : UserControl
             Grid.SetColumn(image, 0);
             content.Children.Insert(0, image);
         }
-        catch (OperationCanceledException)
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
         {
             // A newer thumbnail request superseded this load.
         }
@@ -1398,6 +1554,7 @@ public sealed partial class TimelineControl : UserControl
     private sealed record ClipTag(
         TimelineItemBounds Bounds,
         ProjectAsset? Asset,
+        string Title,
         long SourceInMilliseconds,
         long SourceOutMilliseconds,
         bool IsImage);
@@ -1522,6 +1679,50 @@ internal readonly record struct TimelineVideoTrimPreview(
 
 internal static class TimelineContextCommands
 {
+    public static string TargetName(ProjectDocument? project, Guid itemId, EditorSelectionKind kind)
+    {
+        if (project is null)
+        {
+            return "timeline clip";
+        }
+
+        var bounds = TimelineLayoutProjection.GetAllBounds(project)
+            .FirstOrDefault(candidate => candidate.ItemId == itemId && candidate.Kind == kind);
+        var title = kind switch
+        {
+            EditorSelectionKind.VideoItem => AssetTitle(project, project.VideoItems.FirstOrDefault(candidate => candidate.Id == itemId)?.AssetId, "Unknown media"),
+            EditorSelectionKind.AudioItem => AssetTitle(project, project.AudioItems.FirstOrDefault(candidate => candidate.Id == itemId)?.AssetId, "Unknown audio"),
+            EditorSelectionKind.TextItem => TimelineCardText.ToSingleLine(project.TextItems.FirstOrDefault(candidate => candidate.Id == itemId)?.Text ?? "Empty text"),
+            _ => "timeline"
+        };
+        return bounds.ItemId == Guid.Empty ? "timeline clip" : TargetName(bounds, title);
+    }
+
+    public static string TargetName(TimelineItemBounds bounds, string title)
+    {
+        var kind = bounds.Kind switch
+        {
+            EditorSelectionKind.VideoItem => "V1 clip",
+            EditorSelectionKind.AudioItem => "A1 clip",
+            EditorSelectionKind.TextItem => "T1 clip",
+            _ => "timeline clip"
+        };
+        return $"{kind} '{title}' at {TimecodeFormatter.Format(bounds.StartMilliseconds, 30)}";
+    }
+
+    private static string AssetTitle(ProjectDocument project, Guid? assetId, string fallback)
+    {
+        var asset = assetId is Guid id ? project.Assets.FirstOrDefault(candidate => candidate.Id == id) : null;
+        if (asset is null)
+        {
+            return fallback;
+        }
+
+        return string.IsNullOrWhiteSpace(asset.FileName)
+            ? System.IO.Path.GetFileName(asset.SourcePath) is { Length: > 0 } sourceName ? sourceName : fallback
+            : asset.FileName;
+    }
+
     public static bool SupportsDuplicate(EditorSelectionKind kind) =>
         kind is EditorSelectionKind.VideoItem or EditorSelectionKind.AudioItem or EditorSelectionKind.TextItem;
 
@@ -1544,6 +1745,7 @@ internal static class TimelineContextCommands
             var item = project.VideoItems.First(candidate => candidate.Id == itemId);
             var asset = project.Assets.FirstOrDefault(candidate => candidate.Id == item.AssetId);
             var canEdit = trackLocks.CanEdit(EditorSelectionKind.VideoItem);
+            var index = project.VideoItems.FindIndex(candidate => candidate.Id == itemId);
             var canSplit = canEdit &&
                 playheadMilliseconds - videoBounds.StartMilliseconds >= ProjectDocument.MinimumItemDurationMilliseconds &&
                 videoBounds.EndMilliseconds - playheadMilliseconds >= ProjectDocument.MinimumItemDurationMilliseconds;
@@ -1551,7 +1753,10 @@ internal static class TimelineContextCommands
                 canSplit,
                 canEdit,
                 canEdit,
-                asset is not null && !string.IsNullOrWhiteSpace(asset.SourcePath));
+                asset is not null && !string.IsNullOrWhiteSpace(asset.SourcePath),
+                canEdit && index > 0,
+                canEdit && index < project.VideoItems.Count - 1,
+                IsLocked: !canEdit);
         }
 
         var audio = project.AudioItems.FirstOrDefault(candidate => candidate.Id == itemId);
@@ -1563,7 +1768,10 @@ internal static class TimelineContextCommands
                 CanSplit: false,
                 CanDuplicate: canEdit,
                 CanDelete: canEdit,
-                CanShowSourceFile: asset is not null && !string.IsNullOrWhiteSpace(asset.SourcePath));
+                CanShowSourceFile: asset is not null && !string.IsNullOrWhiteSpace(asset.SourcePath),
+                CanMoveEarlier: false,
+                CanMoveLater: false,
+                IsLocked: !canEdit);
         }
 
         if (project.TextItems.Any(candidate => candidate.Id == itemId))
@@ -1573,7 +1781,10 @@ internal static class TimelineContextCommands
                 CanSplit: false,
                 CanDuplicate: canEdit,
                 CanDelete: canEdit,
-                CanShowSourceFile: false);
+                CanShowSourceFile: false,
+                CanMoveEarlier: false,
+                CanMoveLater: false,
+                IsLocked: !canEdit);
         }
 
         return default;
@@ -1584,7 +1795,10 @@ internal readonly record struct TimelineContextCommandState(
     bool CanSplit,
     bool CanDuplicate,
     bool CanDelete,
-    bool CanShowSourceFile);
+    bool CanShowSourceFile,
+    bool CanMoveEarlier,
+    bool CanMoveLater,
+    bool IsLocked);
 
 public enum TimelineTrackState
 {

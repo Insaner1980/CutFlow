@@ -1,11 +1,13 @@
 test tests\CutFlow.Tests\CutFlow.Tests.csproj
 Root: C:\Dev\CutFlow
 Command: dotnet test tests\CutFlow.Tests\CutFlow.Tests.csproj -c Debug --no-restore
-Started: 2026-08-17 13.19.32
+Started: 2026-08-19 09.17.03
 
+  Sonar: (CutFlow.csproj) The analysis targets file not found: C:\Dev\CutFlow\.sonarqube\bin\targets\SonarQube.Integration.targets
   CutFlow -> C:\Dev\CutFlow\src\CutFlow\bin\x64\Debug\net10.0-windows10.0.26100.0\CutFlow.dll
+  Sonar: (CutFlow.Tests.csproj) The analysis targets file not found: C:\Dev\CutFlow\.sonarqube\bin\targets\SonarQube.Integration.targets
   CutFlow.Tests -> C:\Dev\CutFlow\tests\CutFlow.Tests\bin\x64\Debug\net10.0-windows10.0.26100.0\CutFlow.Tests.dll
 Test run for C:\Dev\CutFlow\tests\CutFlow.Tests\bin\x64\Debug\net10.0-windows10.0.26100.0\CutFlow.Tests.dll (.NETCoreApp,Version=v10.0)
 A total of 1 test files matched the specified pattern.
 
-Passed!  - Failed:     0, Passed:   736, Skipped:     0, Total:   736, Duration: 44 s - CutFlow.Tests.dll (net10.0)
+Passed!  - Failed:     0, Passed:   833, Skipped:     0, Total:   833, Duration: 11 s - CutFlow.Tests.dll (net10.0)

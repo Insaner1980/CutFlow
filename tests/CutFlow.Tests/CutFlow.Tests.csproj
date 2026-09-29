@@ -11,16 +11,17 @@
     <Nullable>enable</Nullable>
     <IsPackable>false</IsPackable>
     <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+    <RunSettingsFilePath>$(MSBuildThisFileDirectory)CutFlow.Tests.runsettings</RunSettingsFilePath>
   </PropertyGroup>
 
   <ItemGroup>
-    <PackageReference Include="coverlet.collector" Version="10.0.1">
+    <PackageReference Include="coverlet.collector" Version="10.1.0">
       <PrivateAssets>all</PrivateAssets>
       <IncludeAssets>runtime; build; native; contentfiles; analyzers; buildtransitive</IncludeAssets>
     </PackageReference>
-    <PackageReference Include="Microsoft.NET.Test.Sdk" Version="18.9.0" />
-    <PackageReference Include="MSTest.TestAdapter" Version="4.3.3" />
-    <PackageReference Include="MSTest.TestFramework" Version="4.3.3" />
+    <PackageReference Include="Microsoft.NET.Test.Sdk" Version="18.10.1" />
+    <PackageReference Include="MSTest.TestAdapter" Version="4.4.1" />
+    <PackageReference Include="MSTest.TestFramework" Version="4.4.1" />
   </ItemGroup>
 
   <ItemGroup>
@@ -28,6 +29,7 @@
   </ItemGroup>
 
   <ItemGroup>
+    <Content Include="SerializationFixtures\schema-1-legacy-minimal.json" CopyToOutputDirectory="PreserveNewest" />
     <Content Include="TestMedia\valid-audio.wav" CopyToOutputDirectory="PreserveNewest" />
     <Content Include="TestMedia\valid-image.jpg" CopyToOutputDirectory="PreserveNewest" />
     <Content Include="TestMedia\valid-video.mp4" CopyToOutputDirectory="PreserveNewest" />

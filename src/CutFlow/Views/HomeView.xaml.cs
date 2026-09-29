@@ -4,6 +4,7 @@ using CutFlow.ViewModels;
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Automation;
 using Microsoft.UI.Xaml.Controls;
+using Microsoft.UI.Xaml.Media;
 
 namespace CutFlow.Views;
 
@@ -48,6 +49,8 @@ public sealed partial class HomeView : UserControl
 
     public UIElement TitleBarElement => TitleBarDragRegion;
 
+    public bool FocusInitialControl() => HomeItem.Focus(FocusState.Programmatic);
+
     private bool IsProjectOperationActive => ViewModel.IsBusy || _projectOpenGate.IsActive;
 
     private void HomeView_Loaded(object sender, RoutedEventArgs e)
@@ -75,9 +78,9 @@ public sealed partial class HomeView : UserControl
 
                 await RequestProjectOpenAsync(project);
             }
-            catch (Exception exception)
+            catch (Exception exception) when (HomeViewModel.IsExpectedProjectOperationFailure(exception))
             {
-                ShowError(exception.Message);
+                ShowError("The project could not be created. Check available disk space and try again.");
             }
         });
     }
@@ -105,9 +108,9 @@ public sealed partial class HomeView : UserControl
 
                 await RequestProjectOpenAsync(project);
             }
-            catch (Exception exception)
+            catch (Exception exception) when (HomeViewModel.IsExpectedProjectOperationFailure(exception))
             {
-                ShowError(exception.Message);
+                ShowError("The project could not be opened. It may be unavailable or damaged.");
             }
         });
     }
@@ -145,39 +148,52 @@ public sealed partial class HomeView : UserControl
 
         await RunProjectOpenGateAsync(async () =>
         {
-            var nameBox = new TextBox
-            {
-                Text = project.Name,
-                SelectionStart = 0,
-                SelectionLength = project.Name.Length,
-                MaxLength = ProjectDocument.MaximumNameLength,
-                Header = "Project name"
-            };
-            AutomationProperties.SetName(nameBox, "Project name");
-            var dialog = CreateDialog("Rename project", nameBox, "Rename");
-            dialog.PrimaryButtonClick += (_, args) =>
-            {
-                if (nameBox.Text.Trim().Length == 0)
-                {
-                    nameBox.Header = "Project name is required";
-                    args.Cancel = true;
-                }
-            };
-            var result = await dialog.ShowAsync();
-            if (!_canContinue() || result != ContentDialogResult.Primary)
-            {
-                return;
-            }
-
-            var name = nameBox.Text.Trim();
-
             try
             {
-                await ViewModel.RenameAsync(project.Id, name);
+                var nameBox = new TextBox
+                {
+                    Text = project.Name,
+                    SelectionStart = 0,
+                    SelectionLength = project.Name.Length,
+                    MaxLength = ProjectDocument.MaximumNameLength,
+                    Header = "Project name"
+                };
+                AutomationProperties.SetName(nameBox, "Project name");
+                var dialog = CreateDialog("Rename project", nameBox, "Rename");
+                dialog.Opened += (_, _) =>
+                {
+                    nameBox.Focus(FocusState.Programmatic);
+                    nameBox.SelectAll();
+                };
+                dialog.PrimaryButtonClick += (_, args) =>
+                {
+                    if (nameBox.Text.Trim().Length == 0)
+                    {
+                        nameBox.Header = "Project name is required";
+                        nameBox.Focus(FocusState.Programmatic);
+                        args.Cancel = true;
+                    }
+                };
+                var result = await dialog.ShowAsync();
+                if (!_canContinue() || result != ContentDialogResult.Primary)
+                {
+                    return;
+                }
+
+                var name = nameBox.Text.Trim();
+
+                try
+                {
+                    await ViewModel.RenameAsync(project.Id, name);
+                }
+                catch (Exception exception) when (HomeViewModel.IsExpectedProjectOperationFailure(exception))
+                {
+                    ShowError("The project could not be renamed. Check app storage and try again.");
+                }
             }
-            catch (Exception exception)
+            finally
             {
-                ShowError(exception.Message);
+                RestoreProjectFocus(project.Id);
             }
         });
     }
@@ -195,9 +211,9 @@ public sealed partial class HomeView : UserControl
             {
                 await ViewModel.DuplicateAsync(projectId);
             }
-            catch (Exception exception)
+            catch (Exception exception) when (HomeViewModel.IsExpectedProjectOperationFailure(exception))
             {
-                ShowError(exception.Message);
+                ShowError("The project could not be duplicated. Check available disk space and try again.");
             }
         });
     }
@@ -211,27 +227,35 @@ public sealed partial class HomeView : UserControl
 
         await RunProjectOpenGateAsync(async () =>
         {
-            var dialog = CreateDialog(
-                "Delete project?",
-                new TextBlock
-                {
-                    Text = $"Delete '{project.Name}' and its {AppInfo.ProductName} project cache? Imported source media will not be deleted.",
-                    TextWrapping = TextWrapping.Wrap
-                },
-                "Delete");
-            var result = await dialog.ShowAsync();
-            if (!_canContinue() || result != ContentDialogResult.Primary)
-            {
-                return;
-            }
-
             try
             {
-                await ViewModel.DeleteAsync(project.Id);
+                var dialog = CreateDialog(
+                    "Delete project?",
+                    new TextBlock
+                    {
+                        Text = $"Delete '{project.Name}' and its {AppInfo.ProductName} project cache? Imported source media will not be deleted.",
+                        TextWrapping = TextWrapping.Wrap
+                    },
+                    "Delete",
+                    ContentDialogButton.Close);
+                var result = await dialog.ShowAsync();
+                if (!_canContinue() || result != ContentDialogResult.Primary)
+                {
+                    return;
+                }
+
+                try
+                {
+                    await ViewModel.DeleteAsync(project.Id);
+                }
+                catch (Exception exception) when (HomeViewModel.IsExpectedProjectOperationFailure(exception))
+                {
+                    ShowError("The project could not be deleted. Close any app using its files and try again.");
+                }
             }
-            catch (Exception exception)
+            finally
             {
-                ShowError(exception.Message);
+                RestoreProjectFocus(project.Id);
             }
         });
     }
@@ -245,15 +269,57 @@ public sealed partial class HomeView : UserControl
         ProjectsHeading.Text = string.Equals(tag, "projects", StringComparison.Ordinal) ? "All projects" : "Recent projects";
     }
 
-    private ContentDialog CreateDialog(string title, object content, string primaryText) => new()
+    private ContentDialog CreateDialog(
+        string title,
+        object content,
+        string primaryText,
+        ContentDialogButton defaultButton = ContentDialogButton.Primary) =>
+        new()
+        {
+            XamlRoot = HomeRoot.XamlRoot,
+            Title = title,
+            Content = content,
+            PrimaryButtonText = primaryText,
+            CloseButtonText = "Cancel",
+            DefaultButton = defaultButton
+        };
+
+    private void RestoreProjectFocus(Guid projectId)
     {
-        XamlRoot = HomeRoot.XamlRoot,
-        Title = title,
-        Content = content,
-        PrimaryButtonText = primaryText,
-        CloseButtonText = "Cancel",
-        DefaultButton = ContentDialogButton.Primary
-    };
+        if (!_canContinue())
+        {
+            return;
+        }
+
+        var index = ViewModel.Projects.ToList().FindIndex(project => project.Id == projectId);
+        if (index >= 0 &&
+            ProjectRepeater.TryGetElement(index) is DependencyObject projectElement &&
+            FindProjectActionsButton(projectElement, projectId)?.Focus(FocusState.Programmatic) == true)
+        {
+            return;
+        }
+
+        HomeItem.Focus(FocusState.Programmatic);
+    }
+
+    private static Button? FindProjectActionsButton(DependencyObject parent, Guid projectId)
+    {
+        for (var index = 0; index < VisualTreeHelper.GetChildrenCount(parent); index++)
+        {
+            var child = VisualTreeHelper.GetChild(parent, index);
+            if (child is Button { Flyout: not null } button && TryGetProjectId(button.Tag, out var id) && id == projectId)
+            {
+                return button;
+            }
+
+            if (FindProjectActionsButton(child, projectId) is { } match)
+            {
+                return match;
+            }
+        }
+
+        return null;
+    }
 
     private bool TryGetProject(FrameworkElement source, out ProjectCardViewModel project)
     {

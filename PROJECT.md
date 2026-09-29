@@ -9,12 +9,12 @@ The implementation under `src/CutFlow` and the executable tests under `tests/Cut
 Snapshot described here:
 
 - Workspace: `C:\Dev\CutFlow`
-- Documentation date: 2026-08-08
+- Documentation date: 2026-08-18
 - Repository: [github.com/Insaner1980/CutFlow](https://github.com/Insaner1980/CutFlow).
 - Default publication branch: `main`. The local `C:\Dev\CutFlow` checkout is the active source of truth; GitHub is its publication and backup destination.
-- Source inventory, excluding generated `bin` and `obj` trees: 74 files, including 55 C# files (10,186 lines) and 9 XAML files (1,012 lines).
-- Test inventory: 35 C# files (5,421 lines).
-- Current verification: `dotnet test .\CutFlow.slnx -c Release -p:Platform=x64 --no-restore` passed 383/383 tests; `dotnet build .\CutFlow.slnx -c Release -p:Platform=x64 --no-restore` completed with 0 warnings and 0 errors.
+- Source inventory, excluding generated `bin` and `obj` trees: 78 files, including 59 C# files (15,051 lines) and 9 XAML files (1,075 lines).
+- Test inventory: 46 C# files (13,972 lines).
+- Current verification: `.\scripts\Verify-CutFlowRelease.ps1` completed its clean restore, passed 833/833 Release x64 tests, and completed the non-incremental Release x64 build with 0 warnings and 0 errors.
 - The verification above proves the automated Release build and test suite. It does not claim that an interactive packaged-app acceptance pass was performed for this documentation update.
 
 ## Product summary
@@ -63,8 +63,8 @@ Extension acceptance is only the first gate. The native Windows APIs must also b
 - XAML and WinUI 3.
 - .NET target: `net10.0-windows10.0.26100.0`.
 - SDK pinned by `global.json`: .NET SDK `10.0.302`, `latestPatch` roll-forward, prerelease SDKs disabled.
-- Windows App SDK NuGet package: `2.3.1`.
-- Windows SDK Build Tools NuGet package: `10.0.26100.7705`.
+- Windows App SDK NuGet package: `2.5.1`.
+- Windows SDK Build Tools NuGet package: `10.0.28000.2705`.
 - Minimum declared Windows version: `10.0.17763.0` (Windows 10 version 1809).
 - Primary target and only solution platform: x64 / `win-x64`.
 - Output type: packaged WinUI `WinExe` with MSIX tooling enabled.
@@ -86,19 +86,19 @@ CutFlow.slnx
 
 The app project exposes internals to `CutFlow.Tests`; there is no separate core library. The test project uses:
 
-- `Microsoft.NET.Test.Sdk` 17.14.1
-- `MSTest.TestAdapter` 3.8.3
-- `MSTest.TestFramework` 3.8.3
+- `Microsoft.NET.Test.Sdk` 18.10.1
+- `MSTest.TestAdapter` 4.4.1
+- `MSTest.TestFramework` 4.4.1
 
 ### Canonical commands
 
 Run from the project root:
 
 ```powershell
-dotnet restore .\CutFlow.slnx
-dotnet test .\CutFlow.slnx -c Release --no-restore
-dotnet build .\CutFlow.slnx -c Release -p:Platform=x64 --no-restore
+.\scripts\Verify-CutFlowRelease.ps1
 ```
+
+The release verifier removes the app and test `bin`/`obj` directories and ignored local `.sonarqube` analysis output, performs a fresh restore, runs the Release x64 tests, and performs a non-incremental Release x64 build. Pass `-RegisterAndLaunch` to continue through development-package registration and package-identity launch; interactive acceptance remains a separately recorded gate in `MANUAL_ACCEPTANCE.md`.
 
 The Release loose-package layout is produced under:
 
@@ -274,13 +274,12 @@ Only `Projects/<guid>`, its base `cache` directory, and `project.json` are creat
 `ProjectService` uses indented camel-case `System.Text.Json` with explicit enum-as-string converters declared on the model enums. Save behavior is designed to preserve the last valid document:
 
 1. Normalize the in-memory document.
-2. Preserve the old `ModifiedAt` value.
-3. Assign a new UTC modification timestamp.
-4. Serialize to `project.json.tmp`.
-5. Write asynchronously with `FileOptions.WriteThrough`.
-6. Flush the managed stream and then flush to disk.
-7. Replace an existing `project.json` atomically with `File.Replace`, or move the first file into place.
-8. Restore `ModifiedAt` on failure and remove a leftover temp file.
+2. Deep-copy it and assign the candidate UTC modification timestamp only to that snapshot.
+3. Serialize the snapshot to a unique `project.json.<guid>.tmp` sibling.
+4. Write asynchronously with `FileOptions.WriteThrough`.
+5. Flush the managed stream and then flush to disk.
+6. Replace an existing `project.json` atomically with `File.Replace`, or move the first file into place.
+7. Publish the new `ModifiedAt` to the live document only after the file commit succeeds; on failure, leave it unchanged and remove the operation's temp file.
 
 Load rejects malformed JSON, a missing required schema version, unsupported schema versions, and an ID that does not match the GUID directory name. `ListAsync` skips unreadable, invalid, unauthorized, or concurrently removed project directories without deleting them.
 
@@ -298,7 +297,7 @@ Settings normalization supplies safe defaults, clamps ranges, removes invalid fo
 
 ### Bounded technical log
 
-`SimpleLogService` writes UTC timestamped single-line entries to `cutflow.log`. Newlines are replaced with spaces, individual caller-provided messages are truncated to 1,024 characters by default, and the file retains at most 200 entries. A semaphore serializes writes. `TryWriteAsync` intentionally suppresses logging failures so telemetry-like infrastructure cannot break a user workflow.
+`SimpleLogService` writes UTC timestamped single-line entries to `cutflow.log`. Newlines are replaced with spaces, individual caller-provided messages are truncated to 1,024 characters by default, and the file retains at most 200 entries. An in-process semaphore and a path-derived named OS semaphore serialize writes within and across app processes. Each update is written to a unique sibling temp file and atomically replaces the log. `TryWriteAsync` intentionally suppresses logging failures so telemetry-like infrastructure cannot break a user workflow.
 
 ## Project data model
 
@@ -420,7 +419,7 @@ Before save and after load, `ProjectService.Normalize` repairs safe model bounda
 
 - null settings/lists become defaults/empty lists;
 - invalid project background becomes opaque black;
-- V1 entries after the 24-hour capacity is exhausted are removed;
+- V1 values are clamped while at least the 100 ms minimum remains; a document with additional V1 entries after that capacity is exhausted is rejected as invalid rather than silently dropping items;
 - V1, A1, and T1 start/duration/source values are clamped to project limits;
 - volume becomes finite and 0–1;
 - fades become 0 through item duration;
@@ -516,7 +515,7 @@ Preview behavior is tolerant:
 - a missing A1 item is omitted;
 - errors are shown in a warning `InfoBar`.
 
-Export behavior is strict: every V1/A1 referenced source must exist, or preflight blocks export and lists missing names.
+Export behavior is strict for every positive-duration A1 item and every positive-duration V1 item while V1 is visible: each referenced source must exist and still match its import snapshot, or preflight blocks export and lists missing names. Hidden V1 is rendered as project-background filler and therefore does not require its source files.
 
 ### Relink
 
@@ -753,8 +752,8 @@ Suggested names:
 Export requires:
 
 - at least one positive-duration V1 item;
-- every distinct V1/A1 referenced asset to resolve to an existing source path;
-- a text renderer when text items exist;
+- every distinct positive-duration A1 asset, and every distinct positive-duration V1 asset while V1 is visible, to resolve to a current source path;
+- a text renderer when visible positive-duration text items exist;
 - a destination path different from every imported source path.
 
 The service refreshes missing flags on its export snapshot immediately before composition. Missing names are de-duplicated case-insensitively.
@@ -992,7 +991,7 @@ Expected exception filters are intentionally narrow around I/O, access, invalid 
 
 The suite is a single x64 MSTest assembly referencing the app project. Internal visibility allows deterministic utilities and state gates to be tested without introducing a separate production abstraction layer.
 
-The current 383 passing cases cover these major areas:
+The current 833 passing cases cover these major areas:
 
 | Area | Representative coverage |
 | --- | --- |
